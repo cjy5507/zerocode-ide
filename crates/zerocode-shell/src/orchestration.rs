@@ -4528,6 +4528,13 @@ impl Launcher for LiveCatalog {
         crate::readiness_runtime::observe(agent)
     }
 
+    /// What the agent's models were last read as (t-124593): its own CLI's
+    /// list or zo's catalog, from the lineup the summons reads — peeked,
+    /// never asked here; an old read sends one more for the next reader.
+    fn model_list(&self, agent: &str) -> Option<zerocode_core::cli_models::Snapshot> {
+        crate::summon_lineup::models_of(agent)
+    }
+
     /// One `stat`, no subprocess — the actor is holding the ledger. A path
     /// that is not a directory is a checkout that is gone; a path that is
     /// one may still be refused by the placement road for its own reasons.
@@ -11543,7 +11550,7 @@ impl Launcher for Catalog {
         if !spec.runs_on(std::env::consts::OS) {
             return Err(format!("{agent} does not run on {}", std::env::consts::OS));
         }
-        let mut words = vec![spec.launch.to_string()];
+        let mut words: Vec<String> = spec.launch_argv().map(str::to_string).collect();
         // A summons is a new conversation whatever the launch args saved
         // (t-68069): a saved `--continue` started a worker on the newest
         // conversation of a folder a neighbour was writing.
@@ -11631,6 +11638,13 @@ impl Launcher for Catalog {
     /// answers the verb.
     fn readiness(&self, agent: &str) -> Option<zerocode_core::readiness::AgentReadinessSnapshot> {
         crate::readiness_runtime::observe(agent)
+    }
+
+    /// What the agent's models were last read as (t-124593): its own CLI's
+    /// list or zo's catalog, from the lineup the summons reads — peeked,
+    /// never asked here; an old read sends one more for the next reader.
+    fn model_list(&self, agent: &str) -> Option<zerocode_core::cli_models::Snapshot> {
+        crate::summon_lineup::models_of(agent)
     }
 }
 

@@ -321,9 +321,9 @@ pub struct SummonAgent {
 impl SummonAgent {
     fn of(agent: &str, snapshot: Option<zerocode_core::readiness::AgentReadinessSnapshot>) -> Self {
         Self {
-            any_provider: zerocode_core::agent::agent_voice(agent)
-                .models_provider
-                .is_none(),
+            any_provider: zerocode_core::agent::agent_spec(agent).is_some_and(|spec| {
+                spec.harness.models == zerocode_core::capabilities::ModelSource::ZoCatalogAll
+            }),
             installed: snapshot.as_ref().map(|seen| {
                 matches!(
                     seen.binary,

@@ -42,6 +42,7 @@ pub mod checks;
 pub mod civil;
 pub mod claude_theme;
 pub mod cli_login_files;
+pub mod cli_models;
 pub mod clone;
 pub mod codex_account;
 pub mod codex_delta;

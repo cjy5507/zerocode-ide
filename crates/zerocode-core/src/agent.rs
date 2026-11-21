@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::capabilities::{
     AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
-    CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, Harness, IdShape, MoveRoad, OneShotRoad,
-    PointerRoute, SignInLog, SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves,
-    WakeMark, ZO_EFFORT_LADDER, ZO_RESUME_SELECTORS,
+    CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, EffortRide, Harness, IdShape, LaunchTuning,
+    ListRoad, ListShape, ModelSource, MoveRoad, OneShotRoad, PointerRoute, SignInLog, SpawnRoad,
+    StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark, ZO_EFFORT_LADDER,
+    ZO_RESUME_SELECTORS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -478,6 +479,15 @@ impl AgentSpec {
     pub fn detect_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         std::iter::once(self.detect).chain(self.detect_aliases.iter().copied())
     }
+
+    /// [`Self::launch`] as the words a process is started with: the program,
+    /// then the subcommand some agents need (`kiro-cli chat --tui`). Every
+    /// door that starts this agent splits it here, so none of them hands the
+    /// whole line over as one program name (t-124593: a summoned kiro worker
+    /// was spawned as the program `kiro-cli chat --tui`).
+    pub fn launch_argv(&self) -> impl Iterator<Item = &'static str> {
+        self.launch.split_whitespace()
+    }
 }
 
 pub fn agent_spec(id: &str) -> Option<&'static AgentSpec> {
@@ -579,7 +589,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     // gone from its help, and `--model`/`--effort`/`--permission-mode`/
     // `--resume` stand in their place. The readiness mark and the paste door
     // both survived the rebuild; only the flag list had gone stale. `--effort`
-    // is why `zo` now sits in `orchestration::TUNABLE`.
+    // is why `zo`'s row carries a launch tuning.
     AgentSpec {
         id: "zo",
         composer_clear: ComposerClear::None,
@@ -622,6 +632,15 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // the spawn bar its launch put on it (t-112277): zo says them in
             // its `SessionStart`, and its command line reads these two flags.
             resume_limits: Some(crate::launch_limits::ZO_LIMIT_FLAGS),
+            // Its own `--help` (re-measured 2026-08-28 against zo 0.1.0):
+            // `--model`, `--effort` (off|low|medium|high|xhigh|max|ultra|smart;
+            // `off` and `smart` are switches, not levels).
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: Some(EffortRide::Flag("--effort")),
+                efforts: crate::capabilities::ZO_EFFORT_LEVELS,
+            }),
+            models: ModelSource::ZoCatalogAll,
             ..Harness::PLAIN
         },
     },
@@ -743,6 +762,16 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // answered its Enter was not taken.
             enter_retry_ms: Some(90_000),
             one_shot: Some(OneShotRoad::ClaudePrint),
+            // `claude --help` (measured 2026-08-28): `--model`, `--effort
+            // <level>` (low, medium, high, xhigh, max). The row carried no
+            // effort until that measurement — the CLI grew the dial and the
+            // table did not follow, so every worker launched with it refused.
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: Some(EffortRide::Flag("--effort")),
+                efforts: CLAUDE_EFFORT_LADDER,
+            }),
+            models: ModelSource::ZoCatalog("claude"),
             ..Harness::PLAIN
         },
     },
@@ -819,6 +848,14 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 rewrites_cache: false,
             },
             one_shot: Some(OneShotRoad::CodexExec),
+            // `codex --help` (measured 2026-08-28): `--model`; its effort is
+            // a config override, not a flag.
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: Some(EffortRide::ConfigKv("model_reasoning_effort")),
+                efforts: CODEX_EFFORT_LADDER,
+            }),
+            models: ModelSource::ZoCatalog("openai"),
             ..Harness::PLAIN
         },
     },
@@ -845,7 +882,35 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         ready_timeout_ms: None,
         harness: Harness {
             submit_ack: SubmitAck::Hook,
+            // Devin CLI 3000.14.30821 in a checkout it has not been told to
+            // trust stops at 「Do you trust the authors of this directory?」
+            // (`❭ 1 Yes, trust` / `2 No, exit`), drawn a second after its
+            // start and still standing at thirteen (2026-11-21, a bare
+            // summons into a fresh worktree, t-124593). Both summonses of
+            // 14:29 and 14:30 pasted their briefing into it: the Enter chose
+            // 「Yes, trust」, the words went nowhere, and the empty composer
+            // behind it never reported a prompt. Its help names the one-launch
+            // answer — `--respect-workspace-trust [true|false]`, "Defaults to
+            // true in every mode" — and this window writes no Devin
+            // configuration, which is the person's.
+            blocked: &[BlockedSignal::TrustFlag(&[
+                "--respect-workspace-trust",
+                "false",
+            ])],
             vault_resume_carries_launch_args: true,
+            // `devin --help` (3000.14.30821, 2026-11-21): `--model <MODEL>`
+            // (also `DEVIN_MODEL`), and no effort flag. `models list --format
+            // json` — "List available models, organized by model family",
+            // "json: Machine-readable JSON (for scripts)".
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: None,
+                efforts: &[],
+            }),
+            models: ModelSource::OwnList(ListRoad {
+                words: &["models", "list", "--format", "json"],
+                shape: ListShape::Unmeasured,
+            }),
             ..Harness::PLAIN
         },
     },
@@ -941,6 +1006,14 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         ready_timeout_ms: None,
         harness: Harness {
             vault_resume_carries_launch_args: true,
+            // `opencode --help` (2.2.5, 2026-11-21): the TUI this row launches
+            // names no `--model` (only `opencode run` and `opencode mini` take
+            // one), so it takes no tuning; `models` — "List all available
+            // models".
+            models: ModelSource::OwnList(ListRoad {
+                words: &["models"],
+                shape: ListShape::Unmeasured,
+            }),
             ..Harness::PLAIN
         },
     },
@@ -1095,14 +1168,22 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 signed_out: &["Logging out current user"],
             })],
             // Gemini CLI's `/model` opens its manage dialog (the console table's
-            // own note) and `--effort` is a launch flag on this machine
-            // (`orchestration::TUNABLE`): shown and relaunched, no ladder read.
+            // own note) and `--effort` is a launch flag on this machine (its
+            // row's launch tuning): shown and relaunched, no ladder read.
             moves: TurnMoves {
                 effort: Some(MoveRoad::Relaunch),
                 model: Some(MoveRoad::Shown("/model")),
                 ladder: &[],
                 rewrites_cache: false,
             },
+            // `agy --help` (measured 2026-08-28): `--model`, `--effort`
+            // (low|medium|high).
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: Some(EffortRide::Flag("--effort")),
+                efforts: crate::capabilities::ANTIGRAVITY_EFFORT_LADDER,
+            }),
+            models: ModelSource::ZoCatalog("google"),
             ..Harness::PLAIN
         },
     },
@@ -1219,7 +1300,29 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         ready: ReadyMark::Quiet,
         ready_quiet_ms: None,
         ready_timeout_ms: None,
-        harness: Harness::PLAIN,
+        harness: Harness {
+            // `kiro-cli chat --help` (2.34.0, 2026-11-21): `--model <MODEL>`;
+            // its `--effort` names its levels only as an example ("e.g. low,
+            // medium, …"), so no effort rides. `--list-models` — "List
+            // available models and exit" — with `--format json`, measured the
+            // same day: `{"models":[{"model_id","model_name",…}],
+            // "default_model":"auto"}`, eight models.
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: None,
+                efforts: &[],
+            }),
+            models: ModelSource::OwnList(ListRoad {
+                words: &["chat", "--list-models", "--format", "json"],
+                shape: ListShape::Json {
+                    list: "/models",
+                    id: "/model_id",
+                    name: Some("/model_name"),
+                    default: Some("/default_model"),
+                },
+            }),
+            ..Harness::PLAIN
+        },
     },
     AgentSpec {
         id: "crush",
@@ -1390,6 +1493,14 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         harness: Harness {
             submit_ack: SubmitAck::Hook,
             blocked: &[BlockedSignal::TrustMenu(TrustMenu::Cursor)],
+            // Not installed on any machine this was measured on, so its model
+            // flag stands as inherited and it carries no effort ride: refusing
+            // a dial nobody has measured beats guessing at its spelling.
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: None,
+                efforts: &[],
+            }),
             ..Harness::PLAIN
         },
     },
@@ -1443,6 +1554,9 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         ready_timeout_ms: None,
         harness: Harness {
             submit_ack: SubmitAck::Hook,
+            // zo's catalog lists its models through zo's kimi login, the rows
+            // the composer's model menu shows a kimi pane.
+            models: ModelSource::ZoOtherLogin("kimi"),
             ..Harness::PLAIN
         },
     },
@@ -1490,7 +1604,16 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         ready: ReadyMark::Quiet,
         ready_quiet_ms: None,
         ready_timeout_ms: None,
-        harness: Harness::PLAIN,
+        harness: Harness {
+            // `qwen --help` (0.25.1, 2026-11-21): `-m, --model`; no effort
+            // flag and no command that lists its models.
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: None,
+                efforts: &[],
+            }),
+            ..Harness::PLAIN
+        },
     },
     AgentSpec {
         id: "rovo",
@@ -1631,6 +1754,17 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         harness: Harness {
             submit_ack: SubmitAck::Hook,
             vault_resume_carries_launch_args: true,
+            // `grok --help` (1.0.70, 2026-11-21): `-m, --model <MODEL>`; its
+            // `--reasoning-effort` names no levels, so no effort rides. Its
+            // help names `models` too, but zo's catalog already lists grok's
+            // models through zo's xai login — the rows the composer's model
+            // menu shows a grok pane — and one source is the rule: that one.
+            tuning: Some(LaunchTuning {
+                model_flag: "--model",
+                effort: None,
+                efforts: &[],
+            }),
+            models: ModelSource::ZoOtherLogin("xai"),
             ..Harness::PLAIN
         },
     },
@@ -1882,10 +2016,6 @@ pub struct AgentVoice {
     /// them at 120 ms). Empty where the mark stands still.
     pub glyph_cycle: &'static [&'static str],
     pub busy_word: &'static str,
-    /// The provider whose models this CLI drives, as zo's live catalog names
-    /// its rows (`zo models --json`, `provider`): the composer's model menu
-    /// lists those rows. `None` lists every row — zo drives them all.
-    pub models_provider: Option<&'static str>,
     /// How the permission mode changes mid-session: `shift-tab` cycles it on
     /// the CLI's own keyboard; a slash command opens the CLI's picker.
     pub permission_road: Option<&'static str>,
@@ -2068,7 +2198,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph: "✻",
             glyph_cycle: &["·", "✢", "*", "✶", "✻", "✽"],
             busy_word: "Pondering…",
-            models_provider: Some("claude"),
             // `shift+tab to cycle`, on Claude Code's own status line.
             permission_road: Some("shift-tab"),
             // In the order Shift+Tab steps through them and in Claude Code's
@@ -2150,7 +2279,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph: "◎",
             glyph_cycle: &[],
             busy_word: "Thinking…",
-            models_provider: Some("openai"),
             permission_road: Some("/permissions"),
             // app-server `approvalPolicy` (docs/design/agent-wire-sessions
             // §2): `untrusted` and `on-request` ask; `on-failure` runs and
@@ -2195,7 +2323,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph: "◐",
             glyph_cycle: &[],
             busy_word: "Working…",
-            models_provider: None,
             permission_road: Some("/permissions"),
             // zo's own three (zo-ide/README.md: `read-only |
             // workspace-write | danger-full-access`; it accepts Claude Code's
@@ -2236,7 +2363,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph: "✦",
             glyph_cycle: &[],
             busy_word: "Thinking…",
-            models_provider: Some("google"),
             permission_road: None,
             // agy's modes are not measured here; every mode asks until they are.
             permission_modes: &[],
@@ -2271,7 +2397,6 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     glyph: "",
     glyph_cycle: &[],
     busy_word: "",
-    models_provider: None,
     permission_road: None,
     permission_modes: &[],
     wire: None,
@@ -2424,7 +2549,11 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 glyph: agent_voice(spec.id).glyph,
                 glyph_cycle: agent_voice(spec.id).glyph_cycle,
                 busy_word: agent_voice(spec.id).busy_word,
-                models_provider: agent_voice(spec.id).models_provider,
+                // The provider key the composer's model menu lists rows of —
+                // the row's model source ([`ModelSource::zo_provider`]); `None`
+                // for zo, which lists every row, and for every agent whose
+                // models zo does not serve.
+                models_provider: spec.harness.models.zo_provider(),
                 model_command: spec.harness.moves.model.and_then(MoveRoad::command),
                 model_command_takes_id: spec
                     .harness
@@ -2580,8 +2709,8 @@ mod tests {
         assert!(super::wire_road("zo").is_none());
         let silent = super::agent_voice("nobody");
         assert_eq!(silent, super::SILENT_CONSOLE);
-        let claude = super::agent_voice("claude");
-        assert_eq!(claude.models_provider, Some("claude"));
+        let claude = super::agent_spec("claude").expect("claude is in the catalog");
+        assert_eq!(claude.harness.models.zo_provider(), Some("claude"));
     }
 
     /// The composer chip's model road is the capability row's, so a chip

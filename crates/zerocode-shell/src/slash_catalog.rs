@@ -610,12 +610,12 @@ fn band_rank(band: Option<&str>) -> u8 {
 }
 
 fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> {
-    let other_provider = match agent {
-        "grok" => Some("xai"),
-        "kimi" => Some("kimi"),
-        _ => None,
-    };
-    if let Some(wanted) = other_provider {
+    use zerocode_core::capabilities::ModelSource;
+    // Where this agent's rows are, by its row's model source (t-124593 took
+    // the agent names this used to match on): another login zo holds, every
+    // provider's rows, one provider's, or none of them.
+    let source = zerocode_core::agent::agent_spec(agent).map(|spec| spec.harness.models);
+    if let Some(ModelSource::ZoOtherLogin(wanted)) = source {
         return catalog
             .get("otherLogins")
             .and_then(serde_json::Value::as_array)
@@ -637,13 +637,10 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
             .collect();
     }
 
-    let wanted_provider = if agent == "zo" {
-        None
-    } else {
-        let Some(provider) = zerocode_core::agent::agent_voice(agent).models_provider else {
-            return Vec::new();
-        };
-        Some(provider)
+    let wanted_provider = match source {
+        Some(ModelSource::ZoCatalogAll) => None,
+        Some(ModelSource::ZoCatalog(provider)) => Some(provider),
+        _ => return Vec::new(),
     };
 
     let rows = catalog
@@ -684,7 +681,9 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
     ranked.sort_by_key(|(rank, index, _)| (*rank, *index));
     let mut out: Vec<ModelRow> = ranked.into_iter().map(|(_, _, row)| row).collect();
 
-    if agent == "zo" {
+    // An agent that runs any provider's model takes the person's own
+    // connections too, as its lineup does (`Lineup::from_catalog_all`).
+    if source == Some(ModelSource::ZoCatalogAll) {
         let custom = catalog
             .get("customProviders")
             .and_then(serde_json::Value::as_array)
@@ -722,23 +721,27 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
     out
 }
 
-/// Today's lineup for `agent` — the same catalog [`agent_models`] reads, with
-/// the band, rungs and efforts zo's classifier put on each row: its one
-/// provider's rows, or every provider's for an agent that drives none in
-/// particular (zo, which runs any of them). `None` for a catalog with none
-/// of its rows (t-14437).
+/// Today's lineup for `agent` from zo's catalog — the same catalog
+/// [`agent_models`] reads, with the band, rungs and efforts zo's classifier
+/// put on each row: its one provider's rows, or every provider's for an
+/// agent that runs any of them, as its row's model source says. `None` for a
+/// catalog with none of its rows, and for an agent whose models zo does not
+/// serve (t-14437; its own list is the lineup's other feeder, t-124593).
 pub fn agent_lineup(
     agent: &str,
     home: &Path,
 ) -> Option<zerocode_core::summon_difficulty::lineup::Lineup> {
+    use zerocode_core::capabilities::ModelSource;
     use zerocode_core::summon_difficulty::lineup::Lineup;
-    let catalog = zo_models_catalog(home);
-    if agent == "zo" {
-        Lineup::from_catalog_all(&catalog)
-    } else if let Some(provider) = zerocode_core::agent::agent_voice(agent).models_provider {
-        Lineup::from_catalog(&catalog, provider)
-    } else {
-        None
+    match zerocode_core::agent::agent_spec(agent)?.harness.models {
+        ModelSource::ZoCatalogAll => Lineup::from_catalog_all(&zo_models_catalog(home)),
+        ModelSource::ZoCatalog(provider) => {
+            Lineup::from_catalog(&zo_models_catalog(home), provider)
+        }
+        ModelSource::ZoOtherLogin(provider) => {
+            Lineup::from_other_login(&zo_models_catalog(home), provider)
+        }
+        ModelSource::OwnList(_) | ModelSource::Unknown => None,
     }
 }
 
@@ -981,10 +984,13 @@ fn catalog_through(
     let bin = crate::zo_companion::zo_path_under(home);
     catalog_read(cache, |force_refresh| {
         let env = accounts.map(listing_env).unwrap_or_default();
+        // The one spelling of the catalog's words (`cli_models`); a refresh
+        // puts zo's own `--refresh` between them.
+        let [models, json] = zerocode_core::cli_models::ZO_CATALOG_WORDS;
         let args: &[&str] = if force_refresh {
-            &["models", "--refresh", "--json"]
+            &[models, "--refresh", json]
         } else {
-            &["models", "--json"]
+            &[models, json]
         };
         captured_lines_in(&bin, args, MODELS_WAIT, &env)
             .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())

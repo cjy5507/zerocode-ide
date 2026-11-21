@@ -36,6 +36,12 @@ use crate::jev::SMART_SETTINGS_KEY;
 
 /// How long a model counts as newly arrived after this window first saw it.
 pub const NEW_FOR_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// How long a read lineup stands before a reader sends another — zo's own
+/// connection rule for its sources (`model_discovery::LIVE_TTL_SECS`, an
+/// hour), which a CLI's own list keeps too: an earlier read would ask for
+/// the answer already held, and a list older than this is not today's
+/// (t-124593: an `--agent auto` summons takes no candidate on it).
+pub const REFRESH_AFTER_MS: i64 = 60 * 60 * 1000;
 /// One summons in this many, at a difficulty that takes a turn, tries a
 /// model this ledger has too little record of — how a new release earns the
 /// evidence the model seat reads (`crate::summon_model`).
@@ -246,9 +252,67 @@ impl Lineup {
         (!all.models.is_empty()).then_some(all)
     }
 
+    /// The models an agent's own CLI listed ([`crate::cli_models`],
+    /// t-124593), as lineup rows under the agent's own id: no band, no rung
+    /// and no efforts — the CLI says none — so each stands where a model
+    /// nothing ranks stands ([`LiveModel::difficulties`]). Every one counts
+    /// as the CLI's own from the window's first look (`builtin`): the window
+    /// cannot tell a model the CLI shipped with from one it found since, and
+    /// a whole list announced as news once is a notice about nothing. `None`
+    /// for an empty list.
+    #[must_use]
+    pub fn from_listed(agent: &str, listed: &[crate::cli_models::Listed]) -> Option<Self> {
+        let models: Vec<LiveModel> = listed
+            .iter()
+            .map(|one| LiveModel {
+                id: one.id.clone(),
+                provider: agent.to_string(),
+                band: None,
+                rungs: BTreeSet::new(),
+                tier_from: None,
+                tier_confidence_permille: None,
+                efforts: None,
+                builtin: true,
+                unlisted: false,
+                unlisted_since: None,
+                connection: false,
+                superseded_by: None,
+            })
+            .collect();
+        (!models.is_empty()).then(|| Self {
+            models,
+            aliases: BTreeMap::new(),
+        })
+    }
+
+    /// The rows of `provider` among the other logins a `zo models --json`
+    /// answer lists (`otherLogins`, t-124593) — the models zo reads through
+    /// a login of its own for an agent whose provider rows it does not keep.
+    /// Such a row says nothing of a band, a rung or whether zo shipped it, so
+    /// it stands unranked and counts as the agent's own from the first look,
+    /// as a CLI's own list does ([`Self::from_listed`]).
+    #[must_use]
+    pub fn from_other_login(catalog: &Value, provider: &str) -> Option<Self> {
+        let mut lineup = Self::from_rows_in(catalog, "otherLogins", |row| {
+            row.get("provider").and_then(Value::as_str) == Some(provider)
+        })?;
+        for model in &mut lineup.models {
+            model.builtin = true;
+        }
+        Some(lineup)
+    }
+
     fn from_rows(catalog: &Value, wanted: impl Fn(&Value) -> bool) -> Option<Self> {
+        Self::from_rows_in(catalog, "models", wanted)
+    }
+
+    fn from_rows_in(
+        catalog: &Value,
+        key: &str,
+        wanted: impl Fn(&Value) -> bool,
+    ) -> Option<Self> {
         let models: Vec<LiveModel> = catalog
-            .get("models")?
+            .get(key)?
             .as_array()?
             .iter()
             .filter(|row| wanted(row))
@@ -1650,9 +1714,12 @@ mod tests {
             if !crate::orchestration::takes_effort(spec.id) {
                 continue;
             }
-            let lineup = match crate::agent::agent_voice(spec.id).models_provider {
-                Some(provider) => Lineup::from_catalog(&catalog, provider),
-                None => Lineup::from_catalog_all(&catalog),
+            let lineup = match spec.harness.models {
+                crate::capabilities::ModelSource::ZoCatalog(provider) => {
+                    Lineup::from_catalog(&catalog, provider)
+                }
+                crate::capabilities::ModelSource::ZoCatalogAll => Lineup::from_catalog_all(&catalog),
+                _ => None,
             };
             let rows = rows(&Value::Null, spec.id, lineup.as_ref(), None, NOW).unwrap();
             println!(

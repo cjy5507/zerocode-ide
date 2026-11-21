@@ -1677,7 +1677,7 @@ pub(crate) fn fresh_command(
         return Err(format!("{agent}은(는) 이 창이 모르는 에이전트입니다"));
     };
     let plan = zerocode_core::launch_plan(spec.id, launch_override);
-    let mut argv: Vec<String> = spec.launch.split_whitespace().map(str::to_string).collect();
+    let mut argv: Vec<String> = spec.launch_argv().map(str::to_string).collect();
     argv.extend(
         spec.capabilities()
             .resume

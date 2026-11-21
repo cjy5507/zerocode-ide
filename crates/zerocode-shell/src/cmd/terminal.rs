@@ -1829,7 +1829,7 @@ pub(crate) fn launch_agent_tab(
     // measured context hook also receive it on session start, which covers a
     // person who opens an empty tab and asks it to orchestrate later.
     let prompt = zerocode_core::delegation::with_agent_selection_contract(&prompt).into_owned();
-    let mut argv: Vec<String> = spec.launch.split_whitespace().map(str::to_string).collect();
+    let mut argv: Vec<String> = spec.launch_argv().map(str::to_string).collect();
     // What lets the agent actually WORK, before anything about the prompt.
     //
     // A coding agent started from a terminal stops to ask before it edits or

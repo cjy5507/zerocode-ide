@@ -413,6 +413,13 @@ pub struct StoreResume {
 pub enum BlockedSignal {
     /// A first-run trust menu, pre-answered by the named artifact.
     TrustMenu(TrustMenu),
+    /// A first-run trust menu this CLI skips for one launch when its own
+    /// flag says so — these words. Said only by a summons into the checkout
+    /// the ledger cut from the person's repository (t-124593): the person
+    /// consented to that repository, which is the consent a trust-menu
+    /// artifact repeats, and the flag repeats it without writing the
+    /// person's CLI configuration. A pane a person opens answers its own.
+    TrustFlag(&'static [&'static str]),
     /// An account gate that repaints after the composer first appears, so
     /// the composer's Enter is discarded until it settles; the agent's longer
     /// quiet window is how the launch waits it out.
@@ -500,6 +507,117 @@ pub struct Harness {
     /// The agent's official one-shot mode, where the window has measured one
     /// (t-32787) — see [`OneShotRoad`]. `None`: not yet.
     pub one_shot: Option<OneShotRoad>,
+    /// How a summons names a model and an effort on this CLI's command line
+    /// ([`LaunchTuning`]); `None` for a CLI nobody measured a flag for.
+    pub tuning: Option<LaunchTuning>,
+    /// Where the models it can run are learned ([`ModelSource`]).
+    pub models: ModelSource,
+}
+
+/// How a launch-time reasoning-effort word rides an agent's command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffortRide {
+    /// `-c key=<effort>` — a config override, the spelling codex takes.
+    ConfigKv(&'static str),
+    /// `--flag <effort>` — a first-class flag, the spelling claude and
+    /// antigravity take. Their CLIs grew this dial after the launch table was
+    /// first written, which is exactly the drift it is measured against
+    /// rather than assumed.
+    Flag(&'static str),
+}
+
+/// How a summons tunes this agent's CLI at launch: a MEASUREMENT of that
+/// CLI's own `--help` on this machine, never a belief about it. The model id
+/// stays OPAQUE — passed through unread, never validated against a catalog
+/// that would go stale the day a vendor ships; the SPELLING is the CLI's own
+/// and cannot be. A row without one refuses tuning by name, which is the
+/// honest answer for a CLI nobody has measured. Re-measure when a vendor
+/// ships; do not infer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LaunchTuning {
+    /// The flag that names a model on the command the row launches.
+    pub model_flag: &'static str,
+    /// How an effort rides, where the CLI names the levels it takes.
+    pub effort: Option<EffortRide>,
+    /// Those levels, lowest first — what a model that names no efforts of
+    /// its own is offered at in the model seat's pair question; never one a
+    /// summons runs at by default (t-74181). Empty without a ride.
+    pub efforts: &'static [&'static str],
+}
+
+/// Where the models an agent can run are learned (t-124593) — one value per
+/// row, read by the lineup a summons picks from, by the composer's model
+/// menu and by `agent-list`, so no reader keeps a list or a name of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelSource {
+    /// Nowhere this window can read: zo's catalog serves none of its rows,
+    /// and the CLI's help names no command that lists them.
+    Unknown,
+    /// zo's own catalog (`zo models --json`), every provider's rows: an
+    /// agent that runs any provider's model.
+    ZoCatalogAll,
+    /// zo's catalog, the rows of this provider key (the catalog's
+    /// `provider`): an agent tied to one provider's models.
+    ZoCatalog(&'static str),
+    /// zo's catalog, the rows of another login zo holds for this provider key
+    /// (the catalog's `otherLogins`): an agent whose models zo reads through
+    /// that login rather than its own provider rows.
+    ZoOtherLogin(&'static str),
+    /// The CLI's own read-only list command ([`crate::cli_models`]).
+    OwnList(ListRoad),
+}
+
+impl ModelSource {
+    /// The provider key zo's catalog lists this agent's rows under; `None`
+    /// for every other source.
+    #[must_use]
+    pub const fn zo_provider(self) -> Option<&'static str> {
+        match self {
+            Self::ZoCatalog(provider) => Some(provider),
+            _ => None,
+        }
+    }
+
+    /// The CLI's own list command, where that is the source.
+    #[must_use]
+    pub const fn own_list(self) -> Option<ListRoad> {
+        match self {
+            Self::OwnList(road) => Some(road),
+            _ => None,
+        }
+    }
+}
+
+/// One CLI's own list command: the words after its program, read off its
+/// `--help` on this machine, and how its answer is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ListRoad {
+    /// A read-only list: never a session, never a model call.
+    pub words: &'static [&'static str],
+    pub shape: ListShape,
+}
+
+/// How a list command's answer is read — written as values, so a CLI whose
+/// answer is measured fills its row and no reader is written for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ListShape {
+    /// A JSON document, read by JSON pointers (RFC 6901): the list at
+    /// `list` ("" is the document itself), and within each entry the id the
+    /// CLI's model flag takes at `id` ("" is the entry itself, a string) and
+    /// the name it shows at `name`; the CLI's own default at `default`,
+    /// within the document.
+    Json {
+        list: &'static str,
+        id: &'static str,
+        name: Option<&'static str>,
+        default: Option<&'static str>,
+    },
+    /// Nobody has read this road's answer yet: it is asked, and no model is
+    /// read out of what it says.
+    Unmeasured,
 }
 
 impl Harness {
@@ -519,6 +637,8 @@ impl Harness {
         start_settle_ms: None,
         enter_retry_ms: None,
         one_shot: None,
+        tuning: None,
+        models: ModelSource::Unknown,
     };
 }
 
@@ -708,6 +828,16 @@ impl AgentCapabilities {
     pub fn trust_menu(&self) -> Option<TrustMenu> {
         self.blocked.iter().find_map(|signal| match signal {
             BlockedSignal::TrustMenu(menu) => Some(*menu),
+            _ => None,
+        })
+    }
+
+    /// The words that skip this agent's first-run trust menu for one launch,
+    /// where its row measured them ([`BlockedSignal::TrustFlag`]).
+    #[must_use]
+    pub fn trust_flag(&self) -> Option<&'static [&'static str]> {
+        self.blocked.iter().find_map(|signal| match signal {
+            BlockedSignal::TrustFlag(words) => Some(*words),
             _ => None,
         })
     }

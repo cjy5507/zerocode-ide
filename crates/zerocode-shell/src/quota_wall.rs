@@ -12,8 +12,8 @@
 //! record and never the screen: the record says when it was written, and a
 //! hold needs to know until when.
 //!
-//! A table of measured markers, one row per CLI and cause, the way `TUNABLE`
-//! is a table of measured launch dials: nothing here is guessed from
+//! A table of measured markers, one row per CLI and cause, the way a catalog
+//! row's launch tuning is a measured launch dial: nothing here is guessed from
 //! documentation. Each row was read off a real stop — the codex rollout and
 //! TUI of 2026-09-03 23:29 (`usage_limit_exceeded`), fifty-one Claude
 //! transcripts stopping on "You've hit your session limit", zo's own hint

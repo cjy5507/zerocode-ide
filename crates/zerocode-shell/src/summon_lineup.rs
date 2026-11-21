@@ -1,9 +1,15 @@
 //! Today's model lineup for every agent a summons can tune, as this window
 //! last read it (t-14437).
 //!
-//! The lineup is the catalog the model chip already reads (`zo models
+//! Two feeders, one shape (t-124593). An agent whose row says zo serves its
+//! models reads the catalog the model chip already reads (`zo models
 //! --json`, [`crate::slash_catalog::agent_lineup`]) — no second road to a
-//! provider. Readers inside the ledger actor only PEEK at what is held: a
+//! provider; an agent whose row names its own CLI's list command is asked
+//! that command ([`zerocode_core::cli_models`]) in the same read, and its
+//! answer becomes rows of the same kind (`Lineup::from_listed`). Which is
+//! which is the row's value, never a name here.
+//!
+//! Readers inside the ledger actor only PEEK at what is held: a
 //! summons's origin, `agent-list`, the settings pane. A reader that finds the
 //! held answer older than zo's own refresh rule sends ONE read on a thread of
 //! its own, and the next reader gets it — the readiness table's rule
@@ -20,12 +26,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::Emitter;
-use zerocode_core::summon_difficulty::lineup::{Change, Lineup, Seen};
-
-/// How long a read lineup stands before a reader sends another — zo's own
-/// connection rule for its sources (`model_discovery::LIVE_TTL_SECS`, an
-/// hour); an earlier read would ask zo for the answer it already holds.
-const REFRESH_AFTER_MS: i64 = 60 * 60 * 1000;
+use zerocode_core::cli_models;
+use zerocode_core::summon_difficulty::lineup::{Change, Lineup, REFRESH_AFTER_MS, Seen};
 /// How often the window's background ticker checks wall-clock staleness so an
 /// open window refreshes its catalog every hour (including right after wake
 /// from sleep) even if nothing in the ledger peeked at `snapshot()`.
@@ -98,6 +100,9 @@ struct Held {
     read_at_ms: Option<i64>,
     snapshot: Snapshot,
     sources: Sources,
+    /// What each agent whose row names its own list command said at the
+    /// read — kept whatever it said, so a failure is a fact a reader sees.
+    answers: BTreeMap<String, cli_models::Snapshot>,
     reading: bool,
     /// Somebody asked for a read while one was running: read once more
     /// after it, so the answer postdates the ask.
@@ -235,7 +240,17 @@ fn read_in_background(now_ms: i64, force: bool) {
 /// One read: every agent's lineup and what zo said of its sources, laid
 /// against the book, held, and told to the window.
 fn read_once(roots: &Roots, now_ms: i64) {
-    let lineups = lineups_of(|agent| crate::slash_catalog::agent_lineup(agent, &roots.home));
+    // The agents whose own CLI lists their models are asked first, each
+    // once; the rest read zo's catalog.
+    let answers: BTreeMap<String, cli_models::Snapshot> = lineup_agents()
+        .filter_map(|agent| Some((agent.to_string(), ask_own_list(agent, now_ms)?)))
+        .collect();
+    let lineups = lineups_of(|agent| match cli_models::road_of(agent) {
+        Some(_) => answers
+            .get(agent)
+            .and_then(|heard| Lineup::from_listed(agent, heard.answer.listed())),
+        None => crate::slash_catalog::agent_lineup(agent, &roots.home),
+    });
     // The same cached catalog the lineups were read from — never a second
     // `zo models` run.
     let sources = sources_of(&crate::slash_catalog::zo_model_list(&roots.home), now_ms);
@@ -252,6 +267,7 @@ fn read_once(roots: &Roots, now_ms: i64) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held.snapshot = Snapshot { lineups, seen };
         held.sources = sources;
+        held.answers = answers;
         held.read_at_ms = Some(now_ms);
         held.finished += 1;
     }
@@ -451,9 +467,79 @@ pub(crate) fn current_release(snapshot: &Snapshot, agent: &str, model: &str) -> 
 /// The lineup of every agent that takes a model at a difficulty and drives
 /// one provider — `read` is the catalog road, a test's synthetic one.
 fn lineups_of(read: impl Fn(&str) -> Option<Lineup>) -> BTreeMap<String, Lineup> {
-    tunable_agents()
+    lineup_agents()
         .filter_map(|agent| Some((agent.to_string(), read(agent)?)))
         .collect()
+}
+
+/// Every agent a lineup is read for: its row takes a model at launch and
+/// names where its models are learned (t-124593). The four zo serves read as
+/// before; a CLI that lists its own reads that list.
+fn lineup_agents() -> impl Iterator<Item = &'static str> {
+    zerocode_core::agent::AGENT_SPECS
+        .iter()
+        .filter(|spec| {
+            spec.harness.tuning.is_some()
+                && spec.harness.models != zerocode_core::capabilities::ModelSource::Unknown
+        })
+        .map(|spec| spec.id)
+}
+
+/// Ask `agent`'s own list command, on the binary a launch of it would start,
+/// from the window's own process (never a pane, so no nested agent run) and
+/// through its quiet spawn door; `None` when its row names no list or this
+/// machine does not hold it.
+fn ask_own_list(agent: &str, now_ms: i64) -> Option<cli_models::Snapshot> {
+    let road = cli_models::road_of(agent)?;
+    let path = crate::shell_path::launch_path();
+    let program = zerocode_core::agent::agent_spec(agent)?
+        .detect_names()
+        .find_map(|name| zerocode_core::agent::resolve_on_path(path.as_deref(), name))?;
+    let mut command = crate::proc::quiet_command(&program);
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    Some(cli_models::ask(
+        command,
+        agent,
+        &road,
+        cli_models::ASK_LIMIT,
+        now_ms,
+    ))
+}
+
+/// What `agent`'s models were last read as, for `agent-list`: its own CLI's
+/// answer, or the lineup zo's catalog gave it, said the same way; `None`
+/// while nothing has been read. An old read sends one more, as every peek
+/// here does.
+pub(crate) fn models_of(agent: &str) -> Option<cli_models::Snapshot> {
+    let lineups = snapshot().lineups;
+    let held = held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(heard) = held.answers.get(agent) {
+        return Some(heard.clone());
+    }
+    let read_at_ms = held.read_at_ms?;
+    let lineup = lineups.get(agent)?;
+    Some(cli_models::Snapshot {
+        agent: agent.to_string(),
+        asked: cli_models::said_as(cli_models::ZO_CATALOG_PROGRAM, &cli_models::ZO_CATALOG_WORDS),
+        answer: cli_models::Answer::Listed {
+            models: lineup
+                .models
+                .iter()
+                .filter(|model| !model.folded())
+                .map(|model| cli_models::Listed {
+                    id: model.id.clone(),
+                    name: None,
+                })
+                .collect(),
+            default: None,
+        },
+        read_at_ms,
+        took_ms: 0,
+    })
 }
 
 /// What one agent's lineup changed, as the notice line reads it.
@@ -512,15 +598,21 @@ mod tests {
         .unwrap()
     }
 
+    /// A lineup is read for every agent whose row takes a model and names
+    /// where its models are learned — the four zo serves and the CLIs that
+    /// list their own (t-124593) — and for no other.
     #[test]
-    fn only_agents_that_take_a_model_at_a_difficulty_get_a_lineup() {
+    fn only_agents_that_take_a_model_and_name_their_source_get_a_lineup() {
         let read = lineups_of(|_| Some(lineup(&[("model-a", true)])));
-        assert!(!read.is_empty());
-        for agent in read.keys() {
-            assert!(
-                zerocode_core::orchestration::takes_effort(agent),
-                "{agent} takes no effort"
-            );
+        let agents: Vec<&str> = read.keys().map(String::as_str).collect();
+        for old in ["zo", "claude", "codex", "antigravity"] {
+            assert!(agents.contains(&old), "{old} lost its lineup");
+        }
+        for listed in ["devin", "kiro", "grok"] {
+            assert!(agents.contains(&listed), "{listed} reads no lineup");
+        }
+        for unknown in ["qwen-code", "cursor", "opencode"] {
+            assert!(!agents.contains(&unknown), "{unknown} reads a lineup from nowhere");
         }
         assert!(lineups_of(|_| None).is_empty(), "no catalog, no lineup");
     }

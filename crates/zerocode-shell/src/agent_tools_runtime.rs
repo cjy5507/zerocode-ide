@@ -1828,6 +1828,12 @@ impl agent_teams::Host for TeamWindow {
             carry_worker_start_refusal(token, worker_surface, &reason);
             return None;
         }
+        // A CLI whose trust menu is answered by a one-launch flag rather than
+        // an artifact (devin, t-124593) is told that flag here, and only for
+        // the checkout this very split cut from the person's repository
+        // (`--worktree`, `--bare` too): never a person's pane, never another
+        // folder, never an inherited or reopened tree.
+        args.extend(trust_flag_words(caps, isolated.is_some()));
         // Codex workers get an optional, per-process app server only after the
         // final environment, account, worktree and trust decisions exist. A
         // capability or sidecar refusal leaves argv untouched and the proven
@@ -10340,11 +10346,31 @@ pub(super) fn write_agent_screenshot(
         .into_owned())
 }
 
+/// The words a summons adds so its CLI's first-run trust menu does not stand
+/// in front of the briefing (t-124593): the row's one-launch flag
+/// (`BlockedSignal::TrustFlag`), for the checkout the split itself just cut
+/// from the person's repository, and nowhere else. A CLI whose trust is an
+/// artifact gets the artifact instead (`agent_trust_presets`); a person's
+/// pane, another folder, an inherited or a reopened tree keep the CLI's own
+/// question.
+fn trust_flag_words(
+    caps: Option<zerocode_core::capabilities::AgentCapabilities>,
+    cut_by_this_split: bool,
+) -> Vec<String> {
+    caps.filter(|_| cut_by_this_split)
+        .and_then(|caps| caps.trust_flag())
+        .map_or_else(Vec::new, |words| {
+            words.iter().map(|word| (*word).to_string()).collect()
+        })
+}
+
 // The source contracts read everything above the first test-only marker as
 // the shipped code, and that marker must open `mod tests` (shipped_backend).
 #[cfg(test)]
 mod tests {
-    use super::{briefing_recorded, briefing_turn_reported, briefing_work_reported};
+    use super::{
+        briefing_recorded, briefing_turn_reported, briefing_work_reported, trust_flag_words,
+    };
     use zerocode_core::hook::HookState;
 
     /// A launch briefing as the window types it: its preamble, the same for
@@ -10490,6 +10516,41 @@ mod tests {
         ] {
             assert!(briefing_work_reported(state, false), "{state:?}");
         }
+    }
+
+    /// devin is told to skip its trust menu only in the checkout the split
+    /// itself cut; an agent whose trust is an artifact, or any other tree,
+    /// gets no words (t-124593).
+    #[test]
+    fn a_trust_flag_rides_only_a_summons_into_the_checkout_the_ledger_cut() {
+        let devin = zerocode_core::agent_capabilities("devin");
+        assert_eq!(
+            trust_flag_words(devin, true),
+            ["--respect-workspace-trust", "false"]
+        );
+        assert!(trust_flag_words(devin, false).is_empty());
+        for artifact in ["claude", "codex", "zo", "antigravity"] {
+            assert!(
+                trust_flag_words(zerocode_core::agent_capabilities(artifact), true).is_empty(),
+                "{artifact} got a trust flag beside its artifact"
+            );
+        }
+        assert!(trust_flag_words(None, true).is_empty());
+
+        // And the split says it before the spawn, in the cut's own terms —
+        // read in the shipped half only, where this test's own words are not.
+        let shipped = include_str!("agent_tools_runtime.rs")
+            .split_once("#[cfg(test)]")
+            .expect("the file has a test half")
+            .0;
+        let split = shipped
+            .split_once("args.extend(trust_flag_words(caps, isolated.is_some()));")
+            .expect("the split tells the CLI its trust flag")
+            .1;
+        assert!(
+            split.contains("PtyLane::spawn("),
+            "the trust flag is added after the pane is spawned"
+        );
     }
 }
 

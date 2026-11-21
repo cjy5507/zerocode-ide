@@ -150,6 +150,54 @@ fn no_write_door_branches_on_an_agents_name() {
     }
 }
 
+/// The model roads branch on no agent's name (t-124593; the person,
+/// 2026-11-21: 「하드코딩금지 중복코드 금지 지금 모든 모델 오케스트레이션이
+/// 일반화 되야해」): how a summons names a model and an effort, where an
+/// agent's models are learned and read, the lineup a summons picks from, the
+/// composer's model menu, the auto summons' candidates and the trust flag a
+/// worker split adds each read the agent's row. A CLI added later is a row,
+/// and a branch added here fails this.
+#[test]
+fn the_model_roads_branch_on_no_agents_name() {
+    let branches = agent_name_branches();
+    let core_orchestration = strip_rust_comments(&core_source("orchestration.rs"));
+    let slash_catalog = shipped_code(&shell_source("slash_catalog.rs"));
+    let backend = shipped_code(shipped_backend());
+    let whole = [
+        ("cli_models.rs", shipped_code(&core_source("cli_models.rs"))),
+        (
+            "summon_lineup.rs",
+            shipped_code(&shell_source("summon_lineup.rs")),
+        ),
+    ];
+    let roads = [
+        ("tuning_of", block_after(&core_orchestration, "fn tuning_of(")),
+        ("launch_tuning", block_after(&core_orchestration, "fn launch_tuning(")),
+        ("takes_effort", block_after(&core_orchestration, "pub fn takes_effort(")),
+        ("ladder_efforts", block_after(&core_orchestration, "pub fn ladder_efforts(")),
+        ("carries_model", block_after(&core_orchestration, "fn carries_model(")),
+        ("agent_row", block_after(&core_orchestration, "fn agent_row(")),
+        ("agent_lineup", block_after(&slash_catalog, "pub fn agent_lineup(")),
+        (
+            "agent_models_from",
+            block_after(&slash_catalog, "fn agent_models_from("),
+        ),
+        ("trust_flag_words", block_after(&backend, "fn trust_flag_words(")),
+    ];
+    for (road, text) in whole
+        .iter()
+        .map(|(file, text)| (*file, text.as_str()))
+        .chain(roads)
+    {
+        for spelled in &branches {
+            assert!(
+                !text.contains(spelled.as_str()),
+                "{road} branches on `{spelled}` — the agent's row answers this"
+            );
+        }
+    }
+}
+
 /// Each door reads the decision it used to spell off the agent's row.
 #[test]
 fn every_write_door_reads_its_decision_off_the_table() {

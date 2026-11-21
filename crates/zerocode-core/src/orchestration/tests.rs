@@ -13343,15 +13343,6 @@ fn a_worker_is_tuned_only_as_its_agent_spells_it() {
         "{}",
         outside.reply.stderr
     );
-
-    // And every id the tuning table names exists in the agent catalog,
-    // so the two registries cannot drift apart.
-    for (id, _, _, _) in TUNABLE {
-        assert!(
-            crate::agent::AGENT_SPECS.iter().any(|spec| spec.id == *id),
-            "TUNABLE names {id}, which the agent catalog does not know"
-        );
-    }
 }
 
 /// A CLI whose own help names a model flag on the very command its row
@@ -13469,6 +13460,139 @@ fn every_catalog_row_says_what_its_cli_listed_or_why_not() {
     assert_eq!(row_for(&said, "devin")["models"]["state"], "not-asked");
 }
 
+/// A machine that holds these commands, and whose window last asked each
+/// CLI in `heard` for its models and got that answer.
+struct Heard {
+    looked: Looked,
+    heard: Vec<crate::cli_models::Snapshot>,
+}
+
+impl Launcher for Heard {
+    fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
+        self.looked.command_for(agent, prompt, tuning)
+    }
+
+    fn presence(&self) -> Option<Vec<crate::agent::AgentPresence>> {
+        self.looked.presence()
+    }
+
+    fn model_list(&self, agent: &str) -> Option<crate::cli_models::Snapshot> {
+        self.heard.iter().find(|one| one.agent == agent).cloned()
+    }
+}
+
+/// `agent-list` says what each installed CLI listed when the window asked
+/// it, with when (t-124593: 「거기안에 모델들도 보고」) — the CLI's own
+/// ids and its own default, unread where the answer's shape is not
+/// measured, `not-asked` where nobody asked yet, and `unknown` for a CLI
+/// whose help names no list. An agent that is not installed is not asked.
+#[test]
+fn the_catalog_says_the_models_each_installed_cli_listed_and_when() {
+    use crate::cli_models::{Answer, Listed, Snapshot, UnreadWhy};
+    let heard = |agent: &str, answer: Answer| Snapshot {
+        agent: agent.to_string(),
+        asked: format!("{agent} models"),
+        answer,
+        read_at_ms: 400,
+        took_ms: 90,
+    };
+    let machine = Heard {
+        looked: Looked::at(&["kiro-cli", "devin", "grok", "qwen"]),
+        heard: vec![
+            heard(
+                "kiro",
+                Answer::Listed {
+                    models: vec![
+                        Listed {
+                            id: "auto".into(),
+                            name: None,
+                        },
+                        Listed {
+                            id: "example-model".into(),
+                            name: Some("Example Model".into()),
+                        },
+                    ],
+                    default: Some("auto".into()),
+                },
+            ),
+            heard(
+                "devin",
+                Answer::Unread {
+                    bytes: 512,
+                    why: UnreadWhy::Unmeasured,
+                },
+            ),
+            // Asked, but the machine does not hold it: never shown.
+            heard("opencode", Answer::NoAnswer),
+        ],
+    };
+    let said = answered(&machine, "agent-list");
+
+    let kiro = &row_for(&said, "kiro")["models"];
+    assert_eq!(kiro["state"], "listed");
+    assert_eq!(kiro["ids"], serde_json::json!(["auto", "example-model"]));
+    assert_eq!(kiro["default"], "auto");
+    assert_eq!(kiro["readAtMs"], 400);
+    assert_eq!(kiro["ageMs"], 600, "asked at 400, answered at 1000");
+    assert_eq!(row_for(&said, "kiro")["takesModel"], true);
+
+    let devin = &row_for(&said, "devin")["models"];
+    assert_eq!(devin["state"], "unread");
+    assert!(devin.get("ids").is_none(), "an unread answer listed ids: {devin}");
+
+    assert_eq!(row_for(&said, "grok")["models"]["state"], "not-asked");
+    assert_eq!(row_for(&said, "qwen-code")["models"]["state"], "unknown");
+    // Its CLI lists models and takes no measured --model, so nothing it
+    // lists is read — and this machine does not hold it anyway.
+    assert_eq!(row_for(&said, "opencode")["models"]["state"], "not-read");
+}
+
+/// An `--agent auto` summons pinned to a model takes a CLI whose models come
+/// from its own list only when that list was read, is no older than the
+/// lineup's refresh rule, and holds the model (t-124593) — an unread or old
+/// list is "unknown", never "yes". An agent zo's catalog serves keeps the
+/// family rule it had.
+#[test]
+fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model() {
+    use crate::cli_models::{Answer, Listed, Snapshot};
+    use crate::summon_difficulty::lineup::REFRESH_AFTER_MS;
+    let now_ms = 10 * REFRESH_AFTER_MS;
+    let listing = |agent: &str, read_at_ms: i64| Snapshot {
+        agent: agent.to_string(),
+        asked: format!("{agent} models"),
+        answer: Answer::Listed {
+            models: vec![Listed {
+                id: "example-model".into(),
+                name: None,
+            }],
+            default: None,
+        },
+        read_at_ms,
+        took_ms: 1,
+    };
+    let machine = Heard {
+        looked: Looked::at(&["devin", "kiro-cli", "grok", "agy"]),
+        heard: vec![
+            listing("devin", now_ms - 60_000),
+            listing("kiro", now_ms - REFRESH_AFTER_MS),
+        ],
+    };
+    let chosen = |model: &str| -> Vec<String> {
+        summonable(&machine, &Ledger::new(), now_ms, Some(model))
+            .into_iter()
+            .map(|room| room.id)
+            .collect()
+    };
+    let example = chosen("example-model");
+    assert!(example.contains(&"devin".to_string()), "{example:?}");
+    assert!(!example.contains(&"kiro".to_string()), "an old list said yes: {example:?}");
+    assert!(!example.contains(&"grok".to_string()), "an unread list said yes: {example:?}");
+    assert!(example.contains(&"antigravity".to_string()), "{example:?}");
+    let other = chosen("another-model");
+    assert!(!other.contains(&"devin".to_string()), "{other:?}");
+    assert!(other.contains(&"antigravity".to_string()), "{other:?}");
+}
+
 /// Ask one launcher one read verb, with no ledger state in the way.
 fn asked(launcher: &dyn Launcher, line: &str) -> Decided {
     let mut ledger = Ledger::new();
@@ -13547,8 +13671,8 @@ fn agent_list_says_what_is_installed_and_what_takes_a_dial() {
     assert_eq!(untunable["takesModel"], false);
     assert_eq!(untunable["takesEffort"], false);
     assert!(
-        !TUNABLE.iter().any(|(id, _, _, _)| *id == "copilot"),
-        "the test's example moved into the table"
+        tuning_of("copilot").is_none(),
+        "the test's example took a launch tuning"
     );
 
     // One agent, by name — and a name nobody knows is refused rather than
