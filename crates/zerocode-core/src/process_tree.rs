@@ -59,9 +59,11 @@ pub fn lead_own_tree(command: &mut Command) {
 /// How often [`run_bounded`] looks whether its child has ended.
 const LOOK_EVERY: Duration = Duration::from_millis(10);
 
-/// The most of one output [`run_bounded`] reads: a CLI's help or list is
-/// kilobytes, and one that writes more than this has said something else.
-const OUTPUT_CAP: u64 = 1024 * 1024;
+/// The most of one output [`run_bounded`] reads — a bound for a writer that
+/// never stops, set far above every answer measured: a CLI's help is
+/// kilobytes, and the largest model list seen, devin's 1,302 models
+/// (2026-11-21), was 0.68 MB.
+const OUTPUT_CAP: u64 = 16 * 1024 * 1024;
 
 /// What one bounded run of a command returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
