@@ -5222,6 +5222,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_shim_dir_installs_executable_worker_open_shim() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mirror = dir.path().join("zerocode-mirror");
+        std::fs::write(&mirror, "").expect("mirror stub");
+        let shims = dir.path().join("shims");
+        write_shim_dir(&shims, &mirror, &[]).expect("write shim dir");
+
+        let open_shim = shims.join("open");
+        let body =
+            std::fs::read_to_string(&open_shim).expect("open shim is installed in the pane PATH");
+        assert!(body.starts_with("#!/bin/sh\n"), "{body}");
+        for needle in [
+            zerocode_core::agent_teams::TEAM_PANE_VAR,
+            zerocode_core::agent_teams::LEADER_PANE,
+            zerocode_core::agent_teams::TEAM_ID_VAR,
+            zerocode_hookd::env_var::TEAM_TOKEN_FILE,
+            zerocode_core::agent_teams::TEAM_TOKEN_VAR,
+            "ZEROCODE_OPEN_GUARD=1",
+            "/usr/bin/open",
+        ] {
+            assert!(
+                body.contains(needle),
+                "open shim is missing `{needle}`:\n{body}"
+            );
+        }
+        assert!(
+            body.contains(&mirror.to_string_lossy().into_owned()),
+            "open shim does not name the window's mirror binary:\n{body}"
+        );
+        let mode = std::fs::metadata(&open_shim)
+            .expect("open shim metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755, "open shim is not executable");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn write_shim_dir_does_not_install_open_shim_off_macos() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mirror = dir.path().join("zerocode-mirror");
+        std::fs::write(&mirror, "").expect("mirror stub");
+        let shims = dir.path().join("shims");
+        write_shim_dir(&shims, &mirror, &[]).expect("write shim dir");
+        assert!(
+            !shims.join("open").exists(),
+            "open shim must only be installed on macOS"
+        );
+    }
+
     /// Mirror discovery must wait for the same shell PATH that agent
     /// detection uses.  A Finder-launched window starts with launchd's
     /// minimal PATH; reading only the non-blocking cache lets a first pane
