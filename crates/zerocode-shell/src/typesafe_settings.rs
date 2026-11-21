@@ -423,9 +423,14 @@ pub fn read_settings(
             .collect(),
         summon_sources: crate::summon_lineup::sources(),
         summon_rows,
+        // The screen draws a lineup only beside an agent's difficulty rows
+        // (`summonRows`), and an agent whose launch takes no effort has none
+        // (`lineup::build`): its list — devin's alone some 200 KB — is not
+        // carried (the review's I4, t-124593).
         summon_lineup: lineup
             .lineups
             .iter()
+            .filter(|(agent, _)| zerocode_core::orchestration::takes_effort(agent))
             .map(|(agent, held)| (agent.clone(), held.picks(agent, Some(&lineup.seen), now_ms)))
             .collect(),
         switches: JEV_USES

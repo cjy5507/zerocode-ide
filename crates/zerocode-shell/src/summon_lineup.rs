@@ -625,10 +625,16 @@ pub(crate) struct AgentChange {
     pub(crate) change: Change,
 }
 
-/// Lay every lineup against the book; the agents whose lineup moved.
+/// Lay every lineup with difficulty rows against the book; the agents whose
+/// lineup moved. An agent whose launch takes no effort has no rows
+/// (`lineup::build`) and its models are only ever called by name, so a
+/// model arriving there is no news: the notice says 「…의 쉬운 일부터 써
+/// 봅니다」, a promise only a row keeps (the review's F2, t-124593 — devin,
+/// kiro and grok's lists move often).
 fn observe(seen: &mut Seen, lineups: &BTreeMap<String, Lineup>, now_ms: i64) -> Vec<AgentChange> {
     lineups
         .iter()
+        .filter(|(agent, _)| zerocode_core::orchestration::takes_effort(agent))
         .filter_map(|(agent, lineup)| {
             let change = seen.observe(agent, lineup, now_ms);
             (!change.is_empty()).then(|| AgentChange {
@@ -693,6 +699,28 @@ mod tests {
             );
         }
         assert!(lineups_of(|_| None).is_empty(), "no catalog, no lineup");
+    }
+
+    /// A model arriving beside an agent with no difficulty rows is no news —
+    /// nothing promises to use it (the review's F2, t-124593); the same
+    /// arrival beside an agent with rows is.
+    #[test]
+    fn only_an_agent_with_difficulty_rows_is_told_of_a_model_that_arrived() {
+        let mut seen = Seen::default();
+        let first = BTreeMap::from([
+            ("claude".to_string(), lineup(&[("model-a", true)])),
+            ("devin".to_string(), lineup(&[("model-a", true)])),
+        ]);
+        assert!(observe(&mut seen, &first, 1_000).is_empty(), "a first look is no news");
+        let grown = BTreeMap::from([
+            ("claude".to_string(), lineup(&[("model-a", true), ("model-b", false)])),
+            ("devin".to_string(), lineup(&[("model-a", true), ("model-b", false)])),
+        ]);
+        let told: Vec<String> = observe(&mut seen, &grown, 2_000)
+            .into_iter()
+            .map(|one| one.agent)
+            .collect();
+        assert_eq!(told, ["claude"]);
     }
 
     /// A CLI's list is asked again only when none is held or the one held is
