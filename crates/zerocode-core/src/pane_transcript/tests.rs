@@ -411,7 +411,8 @@ fn a_pane_let_go_asks_the_disk_again_at_once() {
     ));
     let memo = Mutex::new(Memo::<u32>::default());
     let none = disk_of(vec![]);
-    let ask = |facts: &Disk| bind_remembered(&memo, 7, "devin", None, Some("example-session"), facts);
+    let ask =
+        |facts: &Disk| bind_remembered(&memo, 7, "devin", None, Some("example-session"), facts);
     assert_eq!(ask(&none), Err(Absent::NoSessionFile));
     let written = disk_of(vec![devin.clone()]);
     assert_eq!(
