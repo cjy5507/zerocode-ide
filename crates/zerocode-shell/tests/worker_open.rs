@@ -112,7 +112,7 @@ fn mirror_path() -> &'static Path {
 }
 
 fn install_worker_open_shim(dir: &Path, mirror: &Path, real_open: &Path) -> PathBuf {
-    let worker_dir = dir.join("worker-open");
+    let worker_dir = worker_open::worker_shim_dir(dir);
     fs::create_dir_all(&worker_dir).expect("worker-open dir");
     let shim = worker_dir.join(worker_open::SHIM_NAME);
     let body = worker_open::open_shim_script(mirror, real_open);
@@ -295,11 +295,7 @@ fn codex_stripped_env_opens_web_url_in_background_via_worker_shim() {
     let fake = FakeOpen::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let worker_dir = install_worker_open_shim(dir.path(), mirror_path(), &fake.bin);
-    let path_value = format!(
-        "{}:{}:/bin",
-        worker_dir.display(),
-        fake.bin_dir.display()
-    );
+    let path_value = format!("{}:{}:/bin", worker_dir.display(), fake.bin_dir.display());
 
     let first_url = "https://auth.example.com/oauth?state=one#a";
     let second_url = "https://auth.example.com/oauth?state=two#b";
@@ -350,7 +346,11 @@ fn codex_stripped_env_opens_web_url_in_background_via_worker_shim() {
             },
             RecordedCall {
                 guard_env: "unset".to_string(),
-                args: vec!["-a".to_string(), "Safari".to_string(), first_url.to_string()],
+                args: vec![
+                    "-a".to_string(),
+                    "Safari".to_string(),
+                    first_url.to_string()
+                ],
             },
             RecordedCall {
                 guard_env: "unset".to_string(),
@@ -378,11 +378,7 @@ fn human_pane_path_without_worker_dir_runs_real_open_without_mirror() {
     let _worker_dir = install_worker_open_shim(&shared_shims, &poison_mirror, &fake.bin);
 
     // Human pane PATH includes shared shims and fake open dir, never worker-open.
-    let human_path = format!(
-        "{}:{}:/bin",
-        shared_shims.display(),
-        fake.bin_dir.display()
-    );
+    let human_path = format!("{}:{}:/bin", shared_shims.display(), fake.bin_dir.display());
     let url = "https://auth.example.com/authorize?state=human";
 
     for attempt in 0..2 {
@@ -396,8 +392,14 @@ fn human_pane_path_without_worker_dir_runs_real_open_without_mirror() {
             .output()
             .expect("run human open");
         assert_eq!(out.status.code(), Some(5));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("stdout-{attempt}"));
-        assert_eq!(String::from_utf8_lossy(&out.stderr), format!("stderr-{attempt}"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("stdout-{attempt}")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("stderr-{attempt}")
+        );
     }
 
     assert!(
@@ -425,11 +427,7 @@ fn worker_open_shim_falls_back_to_real_open_when_mirror_is_missing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let missing_mirror = dir.path().join("gone-mirror");
     let worker_dir = install_worker_open_shim(dir.path(), &missing_mirror, &fake.bin);
-    let path_value = format!(
-        "{}:{}:/bin",
-        worker_dir.display(),
-        fake.bin_dir.display()
-    );
+    let path_value = format!("{}:{}:/bin", worker_dir.display(), fake.bin_dir.display());
 
     let url = "https://auth.example.com/fallback?x=1";
     let out = codex_stripped_command("open", &path_value, dir.path())

@@ -1798,7 +1798,12 @@ impl agent_teams::Host for TeamWindow {
             .find(|(name, _)| name == "PATH")
             .map(|(_, value)| value.as_str())
             .unwrap_or_default();
-        if let Some(path) = agent_teams::teammate_path(state.local_data_root(), dialect, base) {
+        if let Some(path) = agent_teams::teammate_path(
+            state.local_data_root(),
+            dialect,
+            base,
+            hooks::worker_open_shim_dir().as_deref(),
+        ) {
             env.push(("PATH".into(), path));
         }
         // A worker that does not speak tmux is not told it is inside one. The

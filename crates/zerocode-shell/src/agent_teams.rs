@@ -606,22 +606,35 @@ pub(crate) fn teammate_path(
     local_data_root: &Path,
     dialect: Dialect,
     base: &str,
+    worker_open_dir: Option<&Path>,
 ) -> Option<String> {
-    let installed = install_shim(local_data_root)?;
-    let dirs = dirs_for(dialect, &installed);
-    if dirs.is_empty() {
-        return None;
-    }
+    let installed = install_shim(local_data_root);
+    let mut dirs: Vec<String> = installed
+        .as_deref()
+        .map(|dirs| dirs_for(dialect, dirs))
+        .unwrap_or_default();
     // The LEADER's shims come out first. A worker's environment is a copy of
     // its leader's, so the leader's directories are sitting in that `PATH`
     // already — and one of them may be the fake `tmux` this worker must not
     // find. Adding this worker's own in front of them would leave the other
     // dialect reachable one entry further down, which is the same wrong answer
     // arrived at more slowly.
-    let ours: Vec<String> = installed
-        .iter()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect();
+    let mut ours: Vec<String> = installed
+        .as_deref()
+        .map(|dirs| {
+            dirs.iter()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(open_dir) = worker_open_dir {
+        let open_dir = open_dir.to_string_lossy().into_owned();
+        dirs.push(open_dir.clone());
+        ours.push(open_dir);
+    }
+    if dirs.is_empty() {
+        return None;
+    }
     let sep = zerocode_core::agent_teams::PATH_SEPARATOR;
     let cleaned: Vec<&str> = base
         .split(sep)
@@ -2889,7 +2902,7 @@ mod tests {
         let sep = zerocode_core::agent_teams::PATH_SEPARATOR;
         let base = format!("/mirror-shims{sep}/usr/bin");
 
-        let ledger = teammate_path(local_data.path(), Dialect::Ledger, &base)
+        let ledger = teammate_path(local_data.path(), Dialect::Ledger, &base, None)
             .expect("a worker with no road back to the ledger");
         assert!(
             ledger.ends_with(&base),
@@ -2908,7 +2921,8 @@ mod tests {
 
         // And a worker that DOES speak tmux gets both, in the same order its
         // own leader would have got them.
-        let tmux = teammate_path(local_data.path(), Dialect::Tmux, &base).expect("a tmux worker");
+        let tmux =
+            teammate_path(local_data.path(), Dialect::Tmux, &base, None).expect("a tmux worker");
         assert!(tmux.contains(SHIM_DIR_NAME) && tmux.contains(ORC_DIR_NAME));
         assert!(tmux.ends_with(&base));
 
@@ -2920,8 +2934,8 @@ mod tests {
             local_data.path().join(SHIM_DIR_NAME).to_string_lossy(),
             local_data.path().join(ORC_DIR_NAME).to_string_lossy(),
         );
-        let inherited =
-            teammate_path(local_data.path(), Dialect::Ledger, &leader).expect("a ledger worker");
+        let inherited = teammate_path(local_data.path(), Dialect::Ledger, &leader, None)
+            .expect("a ledger worker");
         assert!(
             !inherited.contains(SHIM_DIR_NAME),
             "the leader's fake tmux survived into a codex worker: {inherited}"
@@ -2934,6 +2948,155 @@ mod tests {
         assert!(
             inherited.ends_with(&base),
             "cleaning the leader's shims took the real PATH with them: {inherited}"
+        );
+    }
+
+    #[test]
+    fn worker_path_puts_worker_open_dir_ahead_of_shared_shims_and_human_roads_omit_it() {
+        crate::hooks::tests::bridge_for_tests();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_data = dir.path().join("local-data");
+        std::fs::create_dir_all(&local_data).expect("local data");
+        let mirror = dir.path().join("zerocode-mirror");
+        std::fs::write(&mirror, "").expect("mirror stub");
+        let shims = dir.path().join("shims");
+        crate::hooks::write_shim_dir(&shims, &mirror, &[]).expect("write shim dir");
+        let worker_open_dir = zerocode_core::worker_open::worker_shim_dir(&shims);
+
+        let fake_sys_bin = dir.path().join("sys-bin");
+        std::fs::create_dir_all(&fake_sys_bin).expect("fake sys bin");
+        let fake_open = fake_sys_bin.join(zerocode_core::worker_open::SHIM_NAME);
+        std::fs::write(&fake_open, "#!/bin/sh\nexit 0\n").expect("write fake open");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_open, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake open");
+        }
+
+        let sep = zerocode_core::agent_teams::PATH_SEPARATOR;
+        let shims_str = shims.to_string_lossy().into_owned();
+        let worker_open_str = worker_open_dir.to_string_lossy().into_owned();
+        let sys_bin_str = fake_sys_bin.to_string_lossy().into_owned();
+
+        // Human plain shell: shared shims before system bin, never worker-open.
+        let human_shell_path =
+            crate::hooks::pty_env_path(Some(&shims), Some(&sys_bin_str)).expect("human shell path");
+        assert!(
+            !human_shell_path
+                .split(sep)
+                .any(|entry| entry == worker_open_str),
+            "human shell PATH must not contain worker-open dir: {human_shell_path}"
+        );
+
+        // Human %1 leader panes: team shims + shared shims, never worker-open.
+        for (term_id, program) in [(77_001, "claude"), (77_002, "codex")] {
+            let team_env = open_team(
+                &local_data,
+                term_id,
+                TeamsMode::Panes,
+                &human_shell_path,
+                program,
+            );
+            let leader_path = team_env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_str())
+                .expect("leader PATH");
+            assert!(
+                !leader_path.split(sep).any(|entry| entry == worker_open_str),
+                "leader `{program}` PATH must not contain worker-open dir: {leader_path}"
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                zerocode_core::agent::resolve_on_path(
+                    Some(std::ffi::OsStr::new(leader_path)),
+                    zerocode_core::worker_open::SHIM_NAME,
+                ),
+                Some(fake_open.clone()),
+                "leader `{program}` must resolve `open` straight to system open"
+            );
+            forget_term(term_id);
+        }
+
+        // Summoned worker panes: worker-open strictly ahead of shared shims and sys bin.
+        for dialect in [Dialect::Ledger, Dialect::Tmux] {
+            let worker_path = teammate_path(
+                &local_data,
+                dialect,
+                &human_shell_path,
+                Some(worker_open_dir.as_path()),
+            )
+            .expect("worker PATH");
+            let entries: Vec<&str> = worker_path.split(sep).collect();
+            let open_pos = entries
+                .iter()
+                .position(|entry| *entry == worker_open_str)
+                .expect("worker PATH must include worker-open dir");
+            let shared_pos = entries
+                .iter()
+                .position(|entry| *entry == shims_str)
+                .expect("worker PATH must keep shared shims dir");
+            let sys_pos = entries
+                .iter()
+                .position(|entry| *entry == sys_bin_str)
+                .expect("worker PATH must keep system bin dir");
+            assert!(
+                open_pos < shared_pos && shared_pos < sys_pos,
+                "dialect={dialect:?} wrong PATH order: {worker_path}"
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| **entry == worker_open_str)
+                    .count(),
+                1,
+                "worker-open dir duplicated: {worker_path}"
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                zerocode_core::agent::resolve_on_path(
+                    Some(std::ffi::OsStr::new(&worker_path)),
+                    zerocode_core::worker_open::SHIM_NAME,
+                ),
+                Some(worker_open_dir.join(zerocode_core::worker_open::SHIM_NAME)),
+                "worker `{dialect:?}` must resolve `open` to worker-only shim"
+            );
+        }
+
+        // Deduplicates if base already carried worker-open after shared shims.
+        let duplicated_base = format!("{shims_str}{sep}{worker_open_str}{sep}{sys_bin_str}");
+        let cleaned = teammate_path(
+            &local_data,
+            Dialect::Ledger,
+            &duplicated_base,
+            Some(worker_open_dir.as_path()),
+        )
+        .expect("deduped worker PATH");
+        let entries: Vec<&str> = cleaned.split(sep).collect();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| **entry == worker_open_str)
+                .count(),
+            1,
+            "{cleaned}"
+        );
+        assert!(
+            entries.iter().position(|e| *e == worker_open_str)
+                < entries.iter().position(|e| *e == shims_str),
+            "{cleaned}"
+        );
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            zerocode_core::agent::resolve_on_path(
+                Some(std::ffi::OsStr::new(&human_shell_path)),
+                zerocode_core::worker_open::SHIM_NAME,
+            ),
+            Some(fake_open),
+            "human shell must resolve `open` straight to system open"
         );
     }
 

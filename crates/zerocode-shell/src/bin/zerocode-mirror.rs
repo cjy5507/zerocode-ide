@@ -203,18 +203,7 @@ fn serve_worker_open() -> ! {
         std::process::exit(127);
     };
     let rest: Vec<std::ffi::OsString> = args.collect();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        });
-    let decision = zerocode_core::worker_open::decide(&rest, mirror_dir().as_deref(), now_ms);
-    for notice in &decision.notices {
-        eprintln!("{notice}");
-    }
-    let Some(argv) = decision.exec_args else {
-        std::process::exit(0);
-    };
+    let argv = zerocode_core::worker_open::decide(&rest);
     let error = std::process::Command::new(&real)
         .env_remove(zerocode_core::worker_open::MARKER)
         .args(&argv)
