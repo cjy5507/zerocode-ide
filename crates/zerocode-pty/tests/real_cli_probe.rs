@@ -18,15 +18,23 @@
 //! and `ZEROCODE_REAL_CLI_PROBE_OUT` an existing folder for what it saw. A
 //! prompt is pasted only when `ZEROCODE_REAL_CLI_PROBE_PROMPT` gives one: one
 //! model call, at most once a run.
+//!
+//! When `ZEROCODE_REAL_CLI_PROBE_WATCH` names the folder a CLI keeps its
+//! session files in, the file the hooks' `session_id` names there
+//! (`<id>.<ZEROCODE_REAL_CLI_PROBE_WATCH_EXT>`, `json` by default) is looked
+//! at every beat: each change is kept as its size, its write and birth
+//! moments on the probe's clock and how many steps it holds — never a word of
+//! it. That answers when a CLI that writes its session as one document
+//! (Devin's ATIF file) writes it: as the turn goes, or once at its end.
 
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use zerocode_pty::PtyLane;
 use zerocode_pty::ready::QUIET;
@@ -42,12 +50,80 @@ const ENTER_AGAIN_AFTER: Duration = Duration::from_secs(4);
 /// anyway — so a start that never settles still spends its one model call on
 /// a question the facts can answer, and says it did.
 const QUIET_FALLBACK: Duration = Duration::from_secs(10);
+/// How long the session file is watched after the turn's `Stop`, for a write
+/// that follows it.
+const AFTER_STOP_WATCH: Duration = Duration::from_secs(3);
 /// The moments of the start whose screens are kept, from the spawn.
 const START_SHOTS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(5),
     Duration::from_secs(15),
 ];
+
+/// The session file a CLI keeps for the probe's own session, looked at each
+/// beat (see the module doc): every change it was seen to make.
+struct SessionFile {
+    folder: Option<PathBuf>,
+    extension: String,
+    /// The wall clock at the probe's start, which file moments are read against.
+    wall: SystemTime,
+    last: Option<(u64, Option<SystemTime>)>,
+    seen: Vec<serde_json::Value>,
+}
+
+impl SessionFile {
+    fn from_env(wall: SystemTime) -> Self {
+        Self {
+            folder: std::env::var_os("ZEROCODE_REAL_CLI_PROBE_WATCH").map(PathBuf::from),
+            extension: std::env::var("ZEROCODE_REAL_CLI_PROBE_WATCH_EXT")
+                .unwrap_or_else(|_| "json".to_string()),
+            wall,
+            last: None,
+            seen: Vec::new(),
+        }
+    }
+
+    fn look(&mut self, began: Instant, events: &[Heard]) {
+        let Some(folder) = self.folder.as_ref() else {
+            return;
+        };
+        let Some(id) = events
+            .iter()
+            .find_map(|one| one.payload["session_id"].as_str())
+        else {
+            return;
+        };
+        let path = folder.join(format!("{id}.{}", self.extension));
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        let key = (meta.len(), meta.modified().ok());
+        if self.last == Some(key) {
+            return;
+        }
+        self.last = Some(key);
+        let wall = self.wall;
+        let on_our_clock =
+            |at: Option<SystemTime>| at.and_then(|at| at.duration_since(wall).ok()).map(ms);
+        let steps = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|document| {
+                document
+                    .pointer("/steps")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+            });
+        self.seen.push(serde_json::json!({
+            "atMs": ms(began.elapsed()),
+            "bytes": meta.len(),
+            "modifiedMs": on_our_clock(meta.modified().ok()),
+            "bornMs": on_our_clock(meta.created().ok()),
+            "parsed": steps.is_some(),
+            "steps": steps.flatten(),
+        }));
+    }
+}
 
 /// A moment as the facts keep it: whole milliseconds.
 fn ms(moment: Duration) -> u64 {
@@ -199,6 +275,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
     assert!(git.success(), "git init failed");
 
     let began = Instant::now();
+    let mut session_file = SessionFile::from_env(SystemTime::now());
     let (port, heard) = listen(began);
     // An empty value takes the name out of the child's environment.
     let mut env: Vec<(String, String)> = std::env::vars_os()
@@ -231,6 +308,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
     while began.elapsed() < START_PATIENCE {
         lane.pump();
         events.extend(heard.try_iter());
+        session_file.look(began, &events);
         let screen = lane.terminal().grid().visible_text();
         let handshake = lane.terminal().grid().bracketed_paste();
         if handshake {
@@ -292,6 +370,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         while entered.elapsed() < TURN_PATIENCE {
             lane.pump();
             events.extend(heard.try_iter());
+            session_file.look(began, &events);
             let taken = events.iter().any(|one| one.event == "UserPromptSubmit");
             if !taken && !pressed_again && entered.elapsed() >= ENTER_AGAIN_AFTER {
                 lane.write_input(b"\r").expect("the Enter again");
@@ -303,6 +382,13 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        let stopped = Instant::now();
+        while stopped.elapsed() < AFTER_STOP_WATCH {
+            lane.pump();
+            events.extend(heard.try_iter());
+            session_file.look(began, &events);
+            std::thread::sleep(Duration::from_millis(50));
+        }
         lane.pump();
         screens.push(("after-turn".into(), lane.terminal().grid().visible_text()));
     }
@@ -312,12 +398,17 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         let _ = lane.write_input(b"\x03");
         std::thread::sleep(Duration::from_millis(600));
         lane.pump();
+        events.extend(heard.try_iter());
+        session_file.look(began, &events);
     }
     events.extend(heard.try_iter());
+    std::thread::sleep(Duration::from_millis(500));
+    session_file.look(began, &events);
     screens.push(("at-exit".into(), lane.terminal().grid().visible_text()));
     let _ = lane.kill();
 
     facts.insert("argv".into(), serde_json::json!(masked(&argv, &cwd)));
+    facts.insert("sessionFile".into(), serde_json::json!(session_file.seen));
     facts.insert("promptPasted".into(), serde_json::json!(pasted));
     let transcript = events
         .iter()
