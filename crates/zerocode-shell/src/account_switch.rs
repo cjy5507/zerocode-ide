@@ -3132,12 +3132,19 @@ mod tests {
         );
         assert_eq!(scanned.usage.status, "ok");
         assert_eq!(scanned.usage.account.as_deref(), Some("t7538-land-b"));
+        let seen = claude_account_readings_seen();
         assert!(land_claude_account_usage(
             config.path(),
             data.path(),
             &b,
             scanned.usage.clone()
         ));
+        // A reading that lands moves the count the switch's beat compares
+        // before it reads anything (t-124254).
+        assert!(
+            claude_account_readings_seen() > seen,
+            "a landed reading left the beat's count where it was"
+        );
         // An older answer after it: the newer stands.
         let mut older = scanned.usage.clone();
         older.updated_at -= 60_000;
