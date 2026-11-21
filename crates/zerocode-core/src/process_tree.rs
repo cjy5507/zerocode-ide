@@ -16,7 +16,9 @@
 //! program loses nothing by it either. The window's own `taskkill`s go through
 //! its quiet door (`proc.rs`), with the same [`TASKKILL_TREE`] words.
 
+use std::io::Read as _;
 use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 /// `taskkill`'s words for one pid and every process it started, forced: the
 /// pid follows them. Spelled once for every Windows caller that ends a tree.
@@ -52,6 +54,93 @@ pub fn lead_own_tree(command: &mut Command) {
     {
         let _ = command;
     }
+}
+
+/// How often [`run_bounded`] looks whether its child has ended.
+const LOOK_EVERY: Duration = Duration::from_millis(10);
+
+/// The most of one output [`run_bounded`] reads: a CLI's help or list is
+/// kilobytes, and one that writes more than this has said something else.
+const OUTPUT_CAP: u64 = 1024 * 1024;
+
+/// What one bounded run of a command returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ran {
+    /// It ended with this code (`None`: by a signal), and what it wrote on
+    /// each output that was piped — `None` for one that was not, or that
+    /// did not finish reaching this side within what was left of the limit.
+    Ended {
+        code: Option<i32>,
+        stdout: Option<String>,
+        stderr: Option<String>,
+    },
+    /// It did not end within the limit, and was ended with every process it
+    /// started ([`end_tree`]).
+    TimedOut,
+    /// It could not be started.
+    NotStarted(String),
+}
+
+/// Make `command` a question rather than a session: its input closed, and
+/// its colour off whatever the person's shell exported, so a coloured
+/// heading never reads as an answer without a list (t-97498 P3-A). Every
+/// question [`run_bounded`] asks is built through here.
+pub fn as_a_question(command: &mut Command) -> &mut Command {
+    command
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .stdin(std::process::Stdio::null())
+}
+
+/// Ask `command` one question within `limit` — its outputs piped or not as
+/// the caller set them — as the head of a tree of its own
+/// ([`lead_own_tree`]): each piped output is read beside the wait (to
+/// [`OUTPUT_CAP`]) so a long answer cannot stall it against a full pipe, a
+/// run past the limit is ended whole, and an output that has not reached
+/// this side when the run ends is waited for no longer than the limit's
+/// rest. The one bounded question this crate asks a CLI with (t-124593):
+/// the mirror's help question and a CLI's model list.
+pub fn run_bounded(command: &mut Command, limit: Duration) -> Ran {
+    lead_own_tree(command);
+    let began = Instant::now();
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Ran::NotStarted(error.to_string()),
+    };
+    let stdout = child.stdout.take().map(read_beside);
+    let stderr = child.stderr.take().map(read_beside);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let heard = |output: Option<std::sync::mpsc::Receiver<String>>| {
+                    output?
+                        .recv_timeout(limit.saturating_sub(began.elapsed()))
+                        .ok()
+                };
+                return Ran::Ended {
+                    code: status.code(),
+                    stdout: heard(stdout),
+                    stderr: heard(stderr),
+                };
+            }
+            Ok(None) if began.elapsed() < limit => std::thread::sleep(LOOK_EVERY),
+            _ => {
+                end_tree(&mut child);
+                return Ran::TimedOut;
+            }
+        }
+    }
+}
+
+/// Read one output to its end, or [`OUTPUT_CAP`], on a thread of its own.
+fn read_beside(pipe: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+    let (said, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.take(OUTPUT_CAP).read_to_end(&mut bytes);
+        let _ = said.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    heard
 }
 
 /// End `child`, started with [`lead_own_tree`], and every process it

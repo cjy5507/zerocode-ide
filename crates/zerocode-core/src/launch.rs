@@ -753,22 +753,20 @@ fn keep_answer(file: &std::path::Path, key: &str, answer: &TerminalArgsAnswer) {
 
 /// The question [`ask_terminal_args`] asks: `program <words> --help`, its
 /// help uncoloured whatever the person's shell exported, so a heading is
-/// read as the words it is. It reads nothing from the terminal, and leads a
-/// tree of its own ([`crate::process_tree::lead_own_tree`]): npm's codex is
+/// read as the words it is. It reads nothing from the terminal, and is run as
+/// the head of a tree of its own ([`crate::process_tree::run_bounded`]): npm's codex is
 /// a script whose binary runs under it (under `cmd.exe` and node on
 /// Windows), and a question not answered in time is ended with all of it.
 fn terminal_args_question(program: &std::path::Path, words: &[String]) -> std::process::Command {
     use std::process::{Command, Stdio};
     let mut question = Command::new(program);
-    question
-        .args(words)
-        .arg("--help")
-        .env("NO_COLOR", "1")
-        .env_remove("CLICOLOR_FORCE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    crate::process_tree::lead_own_tree(&mut question);
+    crate::process_tree::as_a_question(
+        question
+            .args(words)
+            .arg("--help")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
     question
 }
 
@@ -782,48 +780,27 @@ fn ask_terminal_args(
     words: &[String],
     limit: std::time::Duration,
 ) -> Asked {
-    use std::io::Read as _;
-    let began = std::time::Instant::now();
-    let Ok(mut child) = terminal_args_question(program, words).spawn() else {
-        return Asked::NotStarted;
-    };
-    // Read beside the wait: a help longer than a pipe holds would stall the
-    // binary until the limit. Received with what is left of the limit, so a
-    // child that hands its output on to one that stays cannot hold the run.
-    let (said, heard) = std::sync::mpsc::channel();
-    if let Some(mut out) = child.stdout.take() {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = out.read_to_end(&mut bytes);
-            let _ = said.send(String::from_utf8_lossy(&bytes).into_owned());
-        });
-    }
-    loop {
-        match child.try_wait() {
-            // The argument parser's own refusal; nothing else is one.
-            Ok(Some(status)) if status.code() == Some(2) => {
-                return Asked::Answer(TerminalArgsAnswer::Refused);
-            }
-            Ok(Some(status)) if !status.success() => return Asked::Failed,
-            Ok(Some(_)) => {
-                let Ok(help) = heard.recv_timeout(limit.saturating_sub(began.elapsed())) else {
-                    return Asked::NoAnswer;
-                };
-                let help = HelpWords::of(&help);
-                return Asked::Answer(if help.commands.is_empty() {
-                    TerminalArgsAnswer::Unreadable
-                } else {
-                    TerminalArgsAnswer::Knows(help)
-                });
-            }
-            Ok(None) if began.elapsed() < limit => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            _ => {
-                crate::process_tree::end_tree(&mut child);
-                return Asked::NoAnswer;
-            }
+    use crate::process_tree::{Ran, run_bounded};
+    // Read beside the wait — a help longer than a pipe holds would stall the
+    // binary until the limit — and received with what is left of the limit,
+    // so a child that hands its output on to one that stays cannot hold the
+    // run: the one bounded run (`run_bounded`).
+    match run_bounded(&mut terminal_args_question(program, words), limit) {
+        // The argument parser's own refusal; nothing else is one.
+        Ran::Ended { code: Some(2), .. } => Asked::Answer(TerminalArgsAnswer::Refused),
+        Ran::Ended { code, .. } if code != Some(0) => Asked::Failed,
+        Ran::Ended {
+            stdout: Some(help), ..
+        } => {
+            let help = HelpWords::of(&help);
+            Asked::Answer(if help.commands.is_empty() {
+                TerminalArgsAnswer::Unreadable
+            } else {
+                TerminalArgsAnswer::Knows(help)
+            })
         }
+        Ran::Ended { stdout: None, .. } | Ran::TimedOut => Asked::NoAnswer,
+        Ran::NotStarted(_) => Asked::NotStarted,
     }
 }
 

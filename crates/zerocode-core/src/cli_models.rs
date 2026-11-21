@@ -21,22 +21,18 @@
 //! The ids stay opaque, as in the launch tuning: a summons naming a model the
 //! list does not hold is the CLI's to refuse, and the list is not a gate.
 
-use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::capabilities::{ListRoad, ListShape, ModelSource};
+pub use crate::process_tree::Ran;
 
 /// How long one ask may run. A list that needs the account's server answers
 /// in seconds; one that has not answered in this long is ended, its whole
 /// process tree with it.
 pub const ASK_LIMIT: Duration = Duration::from_secs(30);
-
-/// The most of an answer that is read. A model list is kilobytes; a CLI
-/// that writes more than this has said something that is not one.
-const ANSWER_CAP: u64 = 1024 * 1024;
 
 /// The most of a failure's first line kept for a reader — enough to name
 /// the cause, short of carrying a page of somebody's output around.
@@ -121,21 +117,6 @@ pub struct Snapshot {
     pub took_ms: u64,
 }
 
-/// What one run of a road returned, before anything is read out of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ran {
-    /// It ended: its code (`None`: by a signal) and what it wrote.
-    Ended {
-        code: Option<i32>,
-        stdout: String,
-        stderr: String,
-    },
-    /// It did not end within the limit and was ended.
-    TimedOut,
-    /// It could not be started.
-    NotStarted(String),
-}
-
 /// The list command of `agent`'s CLI, where its row names one.
 #[must_use]
 pub fn road_of(agent: &str) -> Option<ListRoad> {
@@ -144,61 +125,16 @@ pub fn road_of(agent: &str) -> Option<ListRoad> {
 
 /// Run `road` on `command` — a command whose program the caller has set
 /// (the window's own spawn door, so a Windows window opens no console) —
-/// within `limit`. Nothing is read from the terminal: input is closed and
-/// both outputs are read beside the wait, so a long answer cannot stall the
-/// CLI against a full pipe. A run past the limit is ended with every process
-/// it started ([`crate::process_tree::end_tree`]).
+/// within `limit`, both outputs read: the one bounded question
+/// ([`crate::process_tree::run_bounded`]).
 pub fn run(mut command: Command, road: &ListRoad, limit: Duration) -> Ran {
-    command
-        .args(road.words)
-        .env("NO_COLOR", "1")
-        .env_remove("CLICOLOR_FORCE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::process_tree::lead_own_tree(&mut command);
-    let began = Instant::now();
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return Ran::NotStarted(error.to_string()),
-    };
-    let stdout = read_beside(child.stdout.take());
-    let stderr = read_beside(child.stderr.take());
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let left = || limit.saturating_sub(began.elapsed());
-                return Ran::Ended {
-                    code: status.code(),
-                    stdout: stdout.recv_timeout(left()).unwrap_or_default(),
-                    stderr: stderr.recv_timeout(left()).unwrap_or_default(),
-                };
-            }
-            Ok(None) if began.elapsed() < limit => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            _ => {
-                crate::process_tree::end_tree(&mut child);
-                return Ran::TimedOut;
-            }
-        }
-    }
-}
-
-/// Read one output to its end (or [`ANSWER_CAP`]) on a thread of its own,
-/// so the CLI never stalls against a full pipe while the run is waited for.
-fn read_beside<R: std::io::Read + Send + 'static>(
-    pipe: Option<R>,
-) -> std::sync::mpsc::Receiver<String> {
-    let (said, heard) = std::sync::mpsc::channel();
-    if let Some(pipe) = pipe {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.take(ANSWER_CAP).read_to_end(&mut bytes);
-            let _ = said.send(String::from_utf8_lossy(&bytes).into_owned());
-        });
-    }
-    heard
+    crate::process_tree::as_a_question(
+        command
+            .args(road.words)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    crate::process_tree::run_bounded(&mut command, limit)
 }
 
 /// What `ran` says, read by `shape`.
@@ -206,10 +142,16 @@ fn read_beside<R: std::io::Read + Send + 'static>(
 pub fn read(shape: ListShape, ran: &Ran) -> Answer {
     match ran {
         Ran::NotStarted(why) => Answer::NotStarted(why.clone()),
-        Ran::TimedOut => Answer::NoAnswer,
+        // An answer that never reached this side is no answer.
+        Ran::TimedOut
+        | Ran::Ended {
+            code: Some(0),
+            stdout: None,
+            ..
+        } => Answer::NoAnswer,
         Ran::Ended {
             code: Some(0),
-            stdout,
+            stdout: Some(stdout),
             ..
         } => {
             let unread = |why| Answer::Unread {
@@ -235,11 +177,13 @@ pub fn read(shape: ListShape, ran: &Ran) -> Answer {
             stderr,
         } => Answer::Failed {
             code: *code,
-            said: first_line(if stderr.trim().is_empty() {
-                stdout
-            } else {
+            said: first_line(
                 stderr
-            }),
+                    .as_deref()
+                    .filter(|said| !said.trim().is_empty())
+                    .or(stdout.as_deref())
+                    .unwrap_or_default(),
+            ),
         },
     }
 }
@@ -418,8 +362,8 @@ mod tests {
     fn ended(code: i32, stdout: &str, stderr: &str) -> Ran {
         Ran::Ended {
             code: Some(code),
-            stdout: stdout.to_string(),
-            stderr: stderr.to_string(),
+            stdout: Some(stdout.to_string()),
+            stderr: Some(stderr.to_string()),
         }
     }
 
@@ -599,7 +543,11 @@ mod tests {
                     code,
                     stdout,
                     stderr,
-                } => (*code, stdout.clone(), stderr.clone()),
+                } => (
+                    *code,
+                    stdout.clone().unwrap_or_default(),
+                    stderr.clone().unwrap_or_default(),
+                ),
                 Ran::TimedOut => (None, String::new(), "timed out".to_string()),
                 Ran::NotStarted(why) => (None, String::new(), why.clone()),
             };
