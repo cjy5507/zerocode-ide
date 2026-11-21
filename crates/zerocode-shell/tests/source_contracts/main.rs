@@ -41303,7 +41303,8 @@ fn worker_open_shim_rides_only_worker_pane_path_and_mirror_on_macos() {
         );
     }
     assert!(
-        !writing.contains("dir.join(zerocode_core::worker_open::SHIM_NAME)"),
+        writing.contains("worker_dir.join(zerocode_core::worker_open::SHIM_NAME)")
+            && !writing.contains(" dir.join(zerocode_core::worker_open::SHIM_NAME)"),
         "open shim must live in worker-only subdir, not shared shim dir:\n{writing}"
     );
 
