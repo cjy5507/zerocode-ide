@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::vault::{self, AgentSource, IdPlacement};
+use crate::vault::{self, AgentSource, Format, IdPlacement};
 
 /// The wait after a "no file" answer before the rule asks the disk again
 /// (herdr 4 follow-up, t-42948). Each further "no file" answer in a row doubles
@@ -183,6 +183,26 @@ pub fn bind(
         }
     }
     Err(last)
+}
+
+/// The shape of a file [`bind`] named for `slug`: the format of the readable
+/// store row that keeps it — under one of its roots, and a file it lists
+/// ([`vault::wanted`]) — asked of the row's value, never of the agent's name
+/// (t-124593). `None` for a file no such row keeps, such as a transcript an
+/// agent reported from outside its store: the reader reads that as lines, as
+/// it read every file before one store wrote a document.
+pub fn format_of(slug: &str, path: &Path, facts: &dyn Facts) -> Option<Format> {
+    vault::AGENT_SOURCES
+        .iter()
+        .filter(|row| row.slug == slug && row.format.readable())
+        .find(|row| {
+            vault::wanted(row, path)
+                && facts
+                    .roots(row)
+                    .iter()
+                    .any(|root| path.starts_with(root))
+        })
+        .map(|row| row.format)
 }
 
 /// Whether a file carries the session id, by the way its store writes the id.

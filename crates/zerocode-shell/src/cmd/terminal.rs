@@ -355,7 +355,14 @@ pub(crate) fn pane_log(
     if archive && state.agent_terms().get(&term).copied() != Some("zo") {
         return Ok(SubagentLog::not_found(0));
     }
-    let mut log = transcript_log_source(&path, read, whole.unwrap_or(false), archive)?;
+    // A store that writes its session as one document is read whole, by
+    // step — asked of the store row that keeps the file, never of the
+    // agent's name (t-124593).
+    let mut log = if crate::pane_transcript::written_whole(&state, term, &path) {
+        document_log(&path, read, whole.unwrap_or(false))?
+    } else {
+        transcript_log_source(&path, read, whole.unwrap_or(false), archive)?
+    };
     if state.pane_sessions().get(&term).map(|session| &session.id) != session_id.as_ref() {
         return Err("conversation-session-changed".into());
     }
@@ -748,6 +755,143 @@ pub(crate) fn transcript_log_detail(
         LogRead::Before(before) => transcript_log_back(&mut file, size, before, PAGE_REACH, detail),
     }
     .map_err(|error| error.to_string())
+}
+
+/// A pane's conversation out of a session document its CLI writes whole
+/// ([`zerocode_core::vault::Format::written_whole`]; Devin's ATIF file,
+/// t-124593), read whole every time — a document has no end to read on
+/// from — with its place kept by step where the line reader keeps a byte:
+/// a turn's `line` is its step's place in the document, `next` the settled
+/// steps read, `start` the first step the answer holds. The three asks and
+/// the reaches are the line reader's, counted in turns rather than bytes
+/// ([`FIRST_REACH`] from the end, [`PAGE_REACH`] back from a place), and a
+/// document shorter than the place a page holds is a replaced one, as a
+/// shorter file is.
+///
+/// A document that does not parse — read while its CLI was writing it — is
+/// answered as a line still being written is: nothing new, the cursor where
+/// it was. One past [`LONG_LINE_CAP`] is said (`skipped`), never read, as a
+/// line past it is. A last step whose call has no result yet is held back
+/// ([`zerocode_core::transcript::DocumentRead::settled`]).
+pub(crate) fn document_log(
+    path: impl AsRef<std::path::Path>,
+    read: LogRead,
+    whole: bool,
+) -> Result<SubagentLog, String> {
+    document_log_within(path.as_ref(), read, whole, LONG_LINE_CAP)
+}
+
+/// [`document_log`] with the cap handed in, for the test of a document past it.
+pub(crate) fn document_log_within(
+    path: &std::path::Path,
+    read: LogRead,
+    whole: bool,
+    cap: u64,
+) -> Result<SubagentLog, String> {
+    let held = match read {
+        LogRead::After(at) | LogRead::Before(at) => at,
+        LogRead::Tail => 0,
+    };
+    let nothing_new = |skipped: bool| SubagentLog {
+        skipped,
+        turns: Vec::new(),
+        model: None,
+        next: held,
+        found: true,
+        more: false,
+        folded: false,
+        start: held,
+        usage: None,
+        about: None,
+    };
+    let size = std::fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .len();
+    if size > cap {
+        return Ok(nothing_new(true));
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let detail = if whole {
+        zerocode_core::transcript::Detail::Whole
+    } else {
+        zerocode_core::transcript::Detail::Clipped
+    };
+    let Some(document) =
+        zerocode_core::transcript::document_read(&String::from_utf8_lossy(&bytes), detail)
+    else {
+        return Ok(nothing_new(false));
+    };
+    let steps: Vec<Vec<LineTurn>> = document
+        .steps
+        .into_iter()
+        .take(document.settled)
+        .enumerate()
+        .map(|(place, turns)| {
+            turns
+                .into_iter()
+                .map(|turn| LineTurn {
+                    line: place as u64,
+                    message_index: None,
+                    session_id: None,
+                    turn,
+                })
+                .collect()
+        })
+        .collect();
+    let settled = steps.len();
+    let (from, to) = match read {
+        // A document with fewer settled steps than the cursor was replaced:
+        // read from its first step, as a file that shrank is read from its
+        // first byte.
+        LogRead::After(after) => {
+            let after = usize::try_from(after).unwrap_or(usize::MAX);
+            (if after > settled { 0 } else { after }, settled)
+        }
+        LogRead::Tail => (steps_back(&steps, settled, &FIRST_REACH), settled),
+        LogRead::Before(before) if before > settled as u64 => {
+            return Err(format!(
+                "the transcript holds {settled} steps, fewer than the place {before} the page \
+                 reads back from — it was replaced"
+            ));
+        }
+        LogRead::Before(before) => {
+            let before = usize::try_from(before).unwrap_or(settled);
+            (steps_back(&steps, before, &PAGE_REACH), before)
+        }
+    };
+    Ok(SubagentLog {
+        skipped: false,
+        turns: steps.into_iter().take(to).skip(from).flatten().collect(),
+        model: document.model,
+        next: if matches!(read, LogRead::Before(_)) { to as u64 } else { settled as u64 },
+        found: true,
+        more: matches!(read, LogRead::Before(_)) && to < settled,
+        folded: !matches!(read, LogRead::After(_)) && from > 0,
+        start: from as u64,
+        usage: document.usage,
+        about: None,
+    })
+}
+
+/// Where a read back from step `before` begins: as far up as the newest
+/// `reach.said` said turns or `reach.rows` turns of any kind go — and the
+/// document's first step when nothing a person reads stands above that, so
+/// a short session's system steps fold nothing away.
+fn steps_back(steps: &[Vec<LineTurn>], before: usize, reach: &BackReach) -> usize {
+    let (mut said, mut rows, mut start) = (0, 0, before);
+    while start > 0 && said < reach.said && rows < reach.rows {
+        start -= 1;
+        rows += steps[start].len();
+        said += steps[start]
+            .iter()
+            .filter(|one| said_turn(&one.turn))
+            .count();
+    }
+    if steps[..start].iter().all(Vec::is_empty) {
+        0
+    } else {
+        start
+    }
 }
 
 /// The `step` bytes below `cursor` — fewer at the file's start — and the

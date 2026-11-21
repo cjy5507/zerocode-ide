@@ -126,6 +126,24 @@ pub(crate) fn pane_transcript(
     .map(|(path, _)| path)
 }
 
+/// Whether the file [`pane_transcript`] named for `term` is one document its
+/// CLI writes whole ([`vault::Format::written_whole`]) — asked of the store
+/// row that keeps it ([`zerocode_core::pane_transcript::format_of`]), never
+/// of the agent's name (t-124593). A file no store row keeps is read as
+/// lines, as every file was.
+pub(crate) fn written_whole(state: &crate::AppState, term: crate::TermId, path: &Path) -> bool {
+    let Some(slug) = state.agent_terms().get(&term).copied() else {
+        return false;
+    };
+    let facts = PaneFacts {
+        home: dirs::home_dir(),
+        pane: None,
+        read_env: true,
+    };
+    zerocode_core::pane_transcript::format_of(slug, path, &facts)
+        .is_some_and(vault::Format::written_whole)
+}
+
 /// The first line of a file, read through at most [`FIRST_LINE_BYTES`].
 fn first_line(path: &Path) -> Option<String> {
     use std::io::{BufRead as _, Read as _};

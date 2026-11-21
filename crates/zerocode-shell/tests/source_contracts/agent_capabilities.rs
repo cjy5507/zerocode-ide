@@ -222,6 +222,45 @@ fn the_model_roads_branch_on_no_agents_name() {
     }
 }
 
+/// The conversation view's road for a session its CLI writes as one document
+/// (t-124593) is chosen by the shape of the store row that keeps the file
+/// and read by the document's own schema — never by the agent's name, the
+/// one test the pane's door kept before it (`Some("zo")` for zo's archive).
+#[test]
+fn the_document_road_branches_on_no_agents_name() {
+    let branches = agent_name_branches();
+    let core_transcript = shipped_code(&core_source("transcript.rs"));
+    let core_binding = shipped_code(&core_source("pane_transcript.rs"));
+    let core_vault = shipped_code(&core_source("vault.rs"));
+    let terminal = shipped_code(&shell_source("cmd/terminal.rs"));
+    let binding = shipped_code(&shell_source("pane_transcript.rs"));
+    let roads = [
+        ("document_read", block_after(&core_transcript, "pub fn document_read(")),
+        ("step_turns", block_after(&core_transcript, "fn step_turns(")),
+        ("call_result", block_after(&core_transcript, "fn call_result(")),
+        ("format_of", block_after(&core_binding, "pub fn format_of(")),
+        ("written_whole", block_after(&core_vault, "pub const fn written_whole(")),
+        ("carded", block_after(&core_vault, "pub const fn carded(")),
+        ("document_log_within", block_after(&terminal, "fn document_log_within(")),
+        ("steps_back", block_after(&terminal, "fn steps_back(")),
+        ("the pane's shape", block_after(&binding, "pub(crate) fn written_whole(")),
+    ];
+    for (road, text) in roads {
+        for spelled in &branches {
+            assert!(
+                !text.contains(spelled.as_str()),
+                "{road} branches on `{spelled}` — the store row's shape answers this"
+            );
+        }
+    }
+    let pane = block_after(&terminal, "fn pane_log(");
+    assert!(
+        pane.contains("crate::pane_transcript::written_whole(&state, term, &path)")
+            && pane.contains("document_log(&path, read, whole.unwrap_or(false))"),
+        "the pane's door no longer picks its road by the shape of the file it named:\n{pane}"
+    );
+}
+
 /// Each door reads the decision it used to spell off the agent's row.
 #[test]
 fn every_write_door_reads_its_decision_off_the_table() {

@@ -192,6 +192,15 @@ pub enum Format {
     /// 프로젝트는 0.5%뿐, 나머지 전부가 plain 로그였다 — 1,157 파일 전수에서
     /// 첫 줄은 모두 `session_meta`, 턴 type은 `message`와 `compaction`뿐).
     ZoLines,
+    /// One JSON document per session in the Agent Trajectory Interchange
+    /// Format (`schema_version` `ATIF-v1.7`): `{session_id, agent, steps:
+    /// [{step_id, timestamp, source, message, reasoning_content?,
+    /// tool_calls?, observation?, metrics?}], final_metrics}`, named
+    /// `<session_id>.json` and written whole, never appended to. Verified
+    /// against Devin CLI 3000.14.30821's `~/.local/share/devin/cli/transcripts`
+    /// (2026-11-21, t-124593: the measured session's file, pretty-printed,
+    /// 1,052 lines; the five on this machine run 0.1–1.6 MB).
+    AtifDocument,
     /// Found, not parsed. See the module doc.
     Unread,
 }
@@ -222,13 +231,34 @@ impl Format {
             Self::CodexRollout => IdPlacement::FirstLineNamed,
             Self::ZoLines => IdPlacement::FirstLine,
             Self::AntigravityTranscript => IdPlacement::Folder,
+            Self::AtifDocument => IdPlacement::FileStem,
             Self::Unread => IdPlacement::Unstated,
         }
     }
 
     /// Whether this window's conversation reader can read this shape.
     pub const fn readable(self) -> bool {
-        matches!(self, Self::ClaudeLines | Self::CodexRollout | Self::ZoLines)
+        matches!(
+            self,
+            Self::ClaudeLines | Self::CodexRollout | Self::ZoLines | Self::AtifDocument
+        )
+    }
+
+    /// Whether a session in this shape is one document its CLI writes whole,
+    /// rather than lines it appends: the conversation reader then reads the
+    /// file whole and keeps its place by step, not by byte
+    /// ([`crate::transcript::document_read`]).
+    pub const fn written_whole(self) -> bool {
+        matches!(self, Self::AtifDocument)
+    }
+
+    /// Whether the session list reads a card out of this shape's head
+    /// ([`MAX_HEAD_BYTES`]). A document written whole does not parse from a
+    /// head cut short, so its sessions are counted as unread ones are rather
+    /// than listed with an empty card — as they were before the conversation
+    /// reader could read it (t-124593).
+    pub const fn carded(self) -> bool {
+        !matches!(self, Self::Unread | Self::AtifDocument)
     }
 
     /// Whether the store's own CLI compresses a session file where it lies:
@@ -423,7 +453,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         path_segment: None,
         segment_level: None,
         child_dir: None,
-        format: Format::Unread,
+        format: Format::AtifDocument,
     },
     AgentSource {
         slug: "droid",
@@ -1747,7 +1777,7 @@ pub fn scan_homes(
                         continue;
                     }
                     // An agent we can find but not read is counted, not faked.
-                    if source.format == Format::Unread {
+                    if !source.format.carded() {
                         unread += 1;
                         unread_at = unread_at.or_else(|| Some(root.clone()));
                         continue;
@@ -2296,7 +2326,7 @@ fn read_session(candidate: &Candidate) -> Result<Option<VaultSession>, String> {
         Format::CodexRollout => codex_session(&text),
         Format::AntigravityTranscript => antigravity_session(&text),
         Format::ZoLines => zo_session(&text),
-        Format::Unread => None,
+        Format::AtifDocument | Format::Unread => None,
     }
     .unwrap_or_default();
     session.cut_short = cut_short;
@@ -3955,6 +3985,46 @@ mod tests {
             card.resume.as_deref(),
             Some("zo --resume 'session-1785288389469-0'")
         );
+    }
+
+    /// A Devin session is one ATIF document, which the conversation view now
+    /// reads whole — and which the session list still counts and does not
+    /// card, as before it was read (t-124593): a head cut at
+    /// [`MAX_HEAD_BYTES`] does not parse, and a card with nothing in it would
+    /// be a new row on every visit.
+    #[test]
+    fn a_session_document_is_still_counted_not_carded() {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let devin = home.join(".local/share/devin/cli/transcripts");
+        std::fs::create_dir_all(&devin).expect("mkdir");
+        std::fs::write(
+            devin.join("example-session.json"),
+            r#"{"schema_version":"ATIF-v1.7","session_id":"example-session","steps":[]}"#,
+        )
+        .expect("write");
+
+        let (sessions, issues, _) = scan_with(home, DEFAULT_SCAN_LIMIT, &|_source| None);
+        assert!(
+            !sessions.iter().any(|one| one.agent == "devin"),
+            "a Devin document became a card"
+        );
+        let devin_issue = issues
+            .iter()
+            .find(|issue| issue.agent == "devin")
+            .expect("an issue for devin");
+        assert_eq!(devin_issue.reason, "unread-format");
+        assert_eq!(devin_issue.count, 1);
+        assert!(Format::AtifDocument.readable() && Format::AtifDocument.written_whole());
+        assert!(!Format::AtifDocument.carded() && !Format::Unread.carded());
+        for format in [
+            Format::ClaudeLines,
+            Format::CodexRollout,
+            Format::AntigravityTranscript,
+            Format::ZoLines,
+        ] {
+            assert!(format.carded() && !format.written_whole(), "{format:?}");
+        }
     }
 
     /// The scan against a real directory tree: the two formats read, the rest

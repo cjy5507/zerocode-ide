@@ -38462,11 +38462,16 @@ mod tests {
             "the helper's sidecar is looked at by path and then opened by it, or read without its \
              bound:\n{about}"
         );
+        // A file its CLI writes as one document is read whole, by step, down
+        // the document road — chosen by the shape of the store row that keeps
+        // it (t-124593); every other file goes down the line road as before.
         let pane = block_after(shipped, "fn pane_log(");
         assert!(
             !pane.contains("path: String")
                 && pane.contains("pane_transcript::pane_transcript(&state, term)")
                 && pane.contains("let read = LogRead::asked(after, before)?;")
+                && pane.contains("crate::pane_transcript::written_whole(&state, term, &path)")
+                && pane.contains("document_log(&path, read, whole.unwrap_or(false))")
                 && pane.contains(
                     "transcript_log_source(&path, read, whole.unwrap_or(false), archive)"
                 ),

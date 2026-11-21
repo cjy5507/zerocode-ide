@@ -414,12 +414,38 @@ fn each_shape_says_where_its_id_shows_and_which_shapes_are_readable() {
         Format::AntigravityTranscript.id_placement(),
         IdPlacement::Folder
     );
+    assert_eq!(Format::AtifDocument.id_placement(), IdPlacement::FileStem);
     assert_eq!(Format::Unread.id_placement(), IdPlacement::Unstated);
     assert!(Format::ClaudeLines.readable());
     assert!(Format::CodexRollout.readable());
     assert!(Format::ZoLines.readable());
+    assert!(Format::AtifDocument.readable());
     assert!(!Format::AntigravityTranscript.readable());
     assert!(!Format::Unread.readable());
+}
+
+/// The reader reads a file by the shape of the store row that keeps it, not
+/// by the agent's name: a Devin pane's document is a document, a Claude
+/// pane's lines are lines, and a file no store keeps is read as lines, as
+/// every file was (t-124593).
+#[test]
+fn a_bound_file_is_read_by_the_shape_of_the_store_that_keeps_it() {
+    let devin = PathBuf::from(format!(
+        "{HOME}/.local/share/devin/cli/transcripts/example-session.json"
+    ));
+    let disk = disk_of(vec![devin.clone(), claude("aaa")]);
+    assert_eq!(
+        format_of("devin", &devin, &disk),
+        Some(Format::AtifDocument)
+    );
+    assert_eq!(
+        format_of("claude", &claude("aaa"), &disk),
+        Some(Format::ClaudeLines)
+    );
+    let elsewhere = PathBuf::from("/tmp/reported/example-session.json");
+    assert_eq!(format_of("devin", &elsewhere, &disk), None);
+    // Another agent's row never answers for a file it does not keep.
+    assert_eq!(format_of("claude", &devin, &disk), None);
 }
 
 #[test]

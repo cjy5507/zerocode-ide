@@ -34626,6 +34626,99 @@ fn transcript_archive_keeps_evicted_messages_without_retained_duplicates() {
     assert_eq!(current.turns[0].message_index, Some(10));
 }
 
+/// A made-up ATIF session document (t-124593): a system step, then `pairs`
+/// of the person's words and an answer, and `tail` steps after them. No
+/// words of a real session.
+fn atif_document(pairs: usize, tail: &[serde_json::Value]) -> String {
+    let mut steps = vec![serde_json::json!({"step_id": 1, "source": "system", "message": "You are an example agent."})];
+    for at in 0..pairs {
+        steps.push(serde_json::json!({"step_id": steps.len() + 1, "source": "user", "message": format!("example question {at}")}));
+        steps.push(serde_json::json!({"step_id": steps.len() + 1, "source": "agent", "model_name": "example-model", "message": format!("example answer {at}")}));
+    }
+    steps.extend(tail.iter().cloned());
+    serde_json::to_string_pretty(&serde_json::json!({"schema_version": "ATIF-v1.7", "session_id": "example-session", "steps": steps}))
+        .expect("a document")
+}
+
+/// A session document is read whole, by step: the newest turns first, what
+/// came after a cursor next, what stands above a place on asking — and a
+/// short session's system step folds nothing away.
+#[test]
+fn a_session_document_is_read_by_step() {
+    use crate::cmd::terminal::{LogRead, document_log};
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("example-session.json");
+    std::fs::write(&path, atif_document(2, &[])).expect("document");
+    let first = document_log(&path, LogRead::Tail, false).expect("the tail");
+    let texts = |log: &crate::shell_runtime::SubagentLog| log.turns.iter().map(|one| one.turn.text.clone()).collect::<Vec<_>>();
+    assert!(first.found && !first.skipped);
+    assert_eq!(texts(&first), ["example question 0", "example answer 0", "example question 1", "example answer 1"]);
+    assert_eq!((first.start, first.next, first.folded, first.more), (0, 5, false, false));
+    assert_eq!(first.turns.iter().map(|one| one.line).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert_eq!(first.model.as_deref(), Some("example-model"));
+    let quiet = document_log(&path, LogRead::After(first.next), false).expect("nothing new");
+    assert!(quiet.turns.is_empty() && quiet.next == 5);
+
+    // The CLI writes the document whole again as it grows: the cursor reads
+    // on from the step it stopped at.
+    std::fs::write(&path, atif_document(3, &[])).expect("grown");
+    let grown = document_log(&path, LogRead::After(5), false).expect("on from the cursor");
+    assert_eq!(texts(&grown), ["example question 2", "example answer 2"]);
+    assert_eq!((grown.start, grown.next), (5, 7));
+    // Above a place, up to the document's first step.
+    let above = document_log(&path, LogRead::Before(5), false).expect("above");
+    assert_eq!(texts(&above).len(), 4);
+    assert_eq!((above.start, above.next, above.more), (0, 5, true));
+
+    // A document with fewer steps than the place was replaced.
+    std::fs::write(&path, atif_document(1, &[])).expect("replaced");
+    assert!(document_log(&path, LogRead::Before(7), false).is_err());
+    let again = document_log(&path, LogRead::After(7), false).expect("from its first step");
+    assert_eq!(texts(&again), ["example question 0", "example answer 0"]);
+    assert_eq!(again.next, 3);
+}
+
+/// A long session opens on its newest turns and folds the rest, which the
+/// page reads up by asking; a call still waiting on its result is held back.
+#[test]
+fn a_long_session_document_folds_and_a_waiting_call_is_held_back() {
+    use crate::cmd::terminal::{LogRead, document_log};
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("example-session.json");
+    std::fs::write(&path, atif_document(50, &[])).expect("document");
+    let tail = document_log(&path, LogRead::Tail, false).expect("the tail");
+    assert_eq!(tail.turns.len(), crate::shell_runtime::TRANSCRIPT_SAID_TURNS);
+    assert_eq!((tail.start, tail.next, tail.folded), (61, 101, true));
+    let above = document_log(&path, LogRead::Before(tail.start), false).expect("above");
+    assert_eq!((above.start, above.folded), (21, true));
+    let top = document_log(&path, LogRead::Before(above.start), false).expect("the top");
+    assert_eq!((top.start, top.folded), (0, false));
+
+    let waiting = serde_json::json!({"step_id": 102, "source": "agent", "message": "",
+        "tool_calls": [{"tool_call_id": "call-1", "function_name": "exec", "arguments": {"command": "ls"}}]});
+    std::fs::write(&path, atif_document(50, &[waiting])).expect("a call out");
+    let held = document_log(&path, LogRead::After(101), false).expect("held back");
+    assert!(held.turns.is_empty());
+    assert_eq!(held.next, 101);
+}
+
+/// A document read while its CLI wrote it is nothing new, the cursor where it
+/// was; one past the cap is said, never read.
+#[test]
+fn a_session_document_mid_write_or_past_its_cap_reads_nothing_new() {
+    use crate::cmd::terminal::{LogRead, document_log, document_log_within};
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("example-session.json");
+    let whole = atif_document(2, &[]);
+    std::fs::write(&path, &whole[..whole.len() / 2]).expect("half written");
+    let half = document_log(&path, LogRead::After(3), false).expect("nothing new");
+    assert!(half.found && !half.skipped && half.turns.is_empty());
+    assert_eq!((half.next, half.start), (3, 3));
+    std::fs::write(&path, &whole).expect("written");
+    let big = document_log_within(&path, LogRead::Tail, false, 16).expect("past the cap");
+    assert!(big.found && big.skipped && big.turns.is_empty());
+}
+
 
 /* ---- 만들기 흐름의 폴더 (2026-11-06, 사람: 「폴더 생성 막고있는 부분」) ---- */
 

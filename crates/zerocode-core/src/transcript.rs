@@ -2262,6 +2262,156 @@ fn tool_result_turn(
     }
 }
 
+/// One session document as the conversation reader reads it
+/// ([`crate::vault::Format::written_whole`]): the turns of each step, in the
+/// document's order — a step that says nothing to a person keeps its place
+/// with none, because a step's place is the reader's cursor — and the model
+/// and context its newest answer names.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DocumentRead {
+    pub steps: Vec<Vec<TranscriptTurn>>,
+    /// How many of the steps, from the first, are settled: every one but a
+    /// last agent step holding a call whose result is not written yet. Its
+    /// CLI writes the result into that same step, so a reader that took the
+    /// step now would never read the result; it is held back and read again,
+    /// and a step after it settles it.
+    pub settled: usize,
+    pub model: Option<String>,
+    pub usage: Option<TranscriptUsage>,
+}
+
+/// An ATIF document ([`crate::vault::Format::AtifDocument`]) read into the
+/// window's turns. A `user` step is the person's words. An `agent` step is
+/// its thought (`reasoning_content`), its words (`message`), each call it
+/// made (`tool_calls`) and what each brought back (`observation.results`),
+/// in that order — the parts renamed into the shape the one tool reader
+/// reads ([`transcript_tool`], [`tool_line`], [`tool_result_turn`]), so a
+/// call's kind, edits and file are read where every transcript's are. A
+/// `system` step — the prompt and the context the CLI hands its model — is
+/// no one's speech and stands with no turns.
+///
+/// The model is the newest agent step's `model_name`, or the document's
+/// `agent.model_name`. The context is the newest agent step's
+/// `metrics.prompt_tokens`, cached tokens inside it: ATIF's session total is
+/// "the sum of all prompt tokens across all steps, including cached tokens"
+/// (NeMo Flow's ATIF types, which follow RFC 0001), and the measured Devin
+/// step that wrote both had more prompt than cached tokens. `None` when the
+/// text is not such a document — one read while its CLI was writing it, or
+/// another shape.
+#[must_use]
+pub fn document_read(text: &str, detail: Detail) -> Option<DocumentRead> {
+    let document: serde_json::Value = serde_json::from_str(text).ok()?;
+    let steps = document.get("steps")?.as_array()?;
+    let agent_steps = || {
+        steps
+            .iter()
+            .rev()
+            .filter(|step| step_source(step) == Some("agent"))
+    };
+    let named = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    };
+    let waiting = steps.last().is_some_and(|step| {
+        step_source(step) == Some("agent")
+            && step_calls(step)
+                .iter()
+                .any(|call| call_result(step, call).is_none())
+    });
+    Some(DocumentRead {
+        steps: steps.iter().map(|step| step_turns(step, detail)).collect(),
+        settled: steps.len() - usize::from(waiting),
+        model: agent_steps()
+            .find_map(|step| named(step.get("model_name")))
+            .or_else(|| named(document.pointer("/agent/model_name"))),
+        usage: agent_steps().find_map(|step| {
+            let tokens = step.pointer("/metrics/prompt_tokens")?.as_u64()?;
+            (tokens > 0).then_some(TranscriptUsage { tokens, window: 0 })
+        }),
+    })
+}
+
+/// Who wrote an ATIF step: `system`, `user` or `agent`.
+fn step_source(step: &serde_json::Value) -> Option<&str> {
+    step.get("source").and_then(serde_json::Value::as_str)
+}
+
+/// The calls an ATIF agent step made.
+fn step_calls(step: &serde_json::Value) -> &[serde_json::Value] {
+    step.get("tool_calls")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+/// What a call brought back, written in its step's `observation`.
+fn call_result<'a>(
+    step: &'a serde_json::Value,
+    call: &serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    let id = call.get("tool_call_id")?;
+    step.pointer("/observation/results")?
+        .as_array()?
+        .iter()
+        .find(|result| result.get("source_call_id") == Some(id))
+}
+
+/// The turns of one ATIF step ([`document_read`]).
+fn step_turns(step: &serde_json::Value, detail: Detail) -> Vec<TranscriptTurn> {
+    let at_ms = moment_of(step);
+    let said = |role: &str, text: String| TranscriptTurn {
+        role: role.into(),
+        text,
+        at_ms,
+        tool: None,
+        images: Vec::new(),
+    };
+    let mut turns = Vec::new();
+    match step_source(step) {
+        Some("user") => {
+            turns.extend(message_text(step.get("message")).map(|text| said("user", text)));
+        }
+        Some("agent") => {
+            turns.extend(
+                message_text(step.get("reasoning_content")).map(|text| said("thinking", text)),
+            );
+            turns.extend(message_text(step.get("message")).map(|text| said("assistant", text)));
+            let calls = step_calls(step);
+            for call in calls {
+                let part = serde_json::json!({
+                    "name": call.get("function_name"),
+                    "arguments": call.get("arguments"),
+                    "call_id": call.get("tool_call_id"),
+                });
+                if let Some(text) = tool_line(&part) {
+                    turns.push(TranscriptTurn {
+                        role: "tool".into(),
+                        text,
+                        at_ms,
+                        tool: Some(transcript_tool(&part, false, detail)),
+                        images: Vec::new(),
+                    });
+                }
+            }
+            for call in calls {
+                if let Some(result) = call_result(step, call) {
+                    let part = serde_json::json!({
+                        "tool_name": call.get("function_name"),
+                        "call_id": call.get("tool_call_id"),
+                        "content": result.get("content"),
+                    });
+                    turns.push(tool_result_turn(&part, at_ms, detail));
+                }
+            }
+        }
+        _ => {}
+    }
+    turns
+}
+
 /// The model a transcript says wrote it — its newest word, or `None`.
 ///
 /// The window learns a pane's model from a hook payload carrying `model`, and
@@ -5161,5 +5311,91 @@ mod tests {
         let never = dir.path().join("never.jsonl");
         std::fs::write(&never, format!("{filler}\n")).expect("write");
         assert_eq!(latest_compact_summary(&never), None);
+    }
+
+    /// A made-up ATIF session, in the shape Devin CLI 3000.14.30821 wrote
+    /// one (2026-11-21, t-124593): system steps first, then the person's
+    /// words, a step that thinks and runs a command and gets its output in
+    /// the same step, and a step that answers. No words of a real session.
+    fn atif_session(steps: &str) -> String {
+        format!(
+            r#"{{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "example-session",
+  "agent": {{ "name": "example-agent", "version": "1.0", "model_name": "example-default-model" }},
+  "steps": [{steps}],
+  "final_metrics": {{ "total_steps": 0 }}
+}}"#
+        )
+    }
+
+    const ATIF_SYSTEM: &str = r#"{ "step_id": 1, "timestamp": "2026-01-02T03:04:05.123456+09:00", "source": "system", "message": "You are an example agent." }"#;
+    const ATIF_USER: &str = r#"{ "step_id": 2, "timestamp": "2026-01-02T03:04:06.000000+09:00", "source": "user", "message": "list the example folder" }"#;
+    const ATIF_CALL: &str = r#"{
+      "step_id": 3, "timestamp": "2026-01-02T03:04:07.123456789+09:00", "source": "agent",
+      "model_name": "example-model", "message": "", "reasoning_content": "The folder is listed with ls.",
+      "tool_calls": [ { "tool_call_id": "call-1", "function_name": "exec", "arguments": { "command": "ls example" } } ],
+      "observation": { "results": [ { "source_call_id": "call-1", "content": "a.txt\nb.txt" } ] },
+      "metrics": { "prompt_tokens": 1200, "completion_tokens": 30 }
+    }"#;
+    const ATIF_ANSWER: &str = r#"{
+      "step_id": 4, "timestamp": "2026-01-02T03:04:08.5+09:00", "source": "agent",
+      "model_name": "example-model", "message": "It holds a.txt and b.txt.",
+      "metrics": { "prompt_tokens": 1500, "completion_tokens": 12, "cached_tokens": 1100 }
+    }"#;
+
+    #[test]
+    fn an_atif_document_reads_as_the_turns_of_its_steps() {
+        let text = atif_session(&[ATIF_SYSTEM, ATIF_USER, ATIF_CALL, ATIF_ANSWER].join(","));
+        let read = document_read(&text, Detail::Clipped).expect("a document");
+        assert_eq!(read.steps.len(), 4, "every step keeps its place");
+        assert_eq!(read.settled, 4);
+        assert!(read.steps[0].is_empty(), "a system step is no one's speech");
+        let roles = |at: usize| read.steps[at].iter().map(|turn| turn.role.as_str()).collect::<Vec<_>>();
+        assert_eq!(roles(1), ["user"]);
+        assert_eq!(read.steps[1][0].text, "list the example folder");
+        assert_eq!(read.steps[1][0].at_ms, crate::civil::epoch_ms_of_iso("2026-01-01T18:04:06Z"));
+        // The empty message says nothing; the thought, the call and its result do.
+        assert_eq!(roles(2), ["thinking", "tool", "tool_result"]);
+        let call = read.steps[2][1].tool.as_ref().expect("the call");
+        assert_eq!((call.call_id.as_str(), call.name.as_str(), call.input.as_str()), ("call-1", "exec", "ls example"));
+        let result = &read.steps[2][2];
+        assert_eq!(result.text, "a.txt\nb.txt");
+        let answered = result.tool.as_ref().expect("the result");
+        assert_eq!((answered.call_id.as_str(), answered.name.as_str()), ("call-1", "exec"));
+        // Nine digits past the second, and a zone: read to the millisecond.
+        assert_eq!(read.steps[2][0].at_ms, Some(crate::civil::epoch_ms_of_iso("2026-01-01T18:04:07.123Z").expect("a stamp")));
+        assert_eq!(roles(3), ["assistant"]);
+        assert_eq!(read.steps[3][0].text, "It holds a.txt and b.txt.");
+        assert_eq!(read.model.as_deref(), Some("example-model"));
+        assert_eq!(read.usage, Some(TranscriptUsage { tokens: 1500, window: 0 }));
+    }
+
+    /// A last step whose call has no result yet is held back — its CLI writes
+    /// the result into that same step — and a step after it settles it.
+    #[test]
+    fn a_last_call_waiting_on_its_result_is_held_back() {
+        let waiting = ATIF_CALL.replace(
+            r#""observation": { "results": [ { "source_call_id": "call-1", "content": "a.txt\nb.txt" } ] },"#,
+            "",
+        );
+        let read = document_read(&atif_session(&[ATIF_USER, &waiting].join(",")), Detail::Clipped)
+            .expect("a document");
+        assert_eq!((read.steps.len(), read.settled), (2, 1));
+        let read = document_read(&atif_session(&[ATIF_USER, &waiting, ATIF_ANSWER].join(",")), Detail::Clipped)
+            .expect("a document");
+        assert_eq!((read.steps.len(), read.settled), (3, 3));
+    }
+
+    /// A document read while its CLI was writing it is no document yet; one
+    /// with no agent step names the model its agent was started on.
+    #[test]
+    fn a_document_cut_mid_write_is_not_read_and_the_agent_names_the_model() {
+        let text = atif_session(&[ATIF_SYSTEM, ATIF_USER].join(","));
+        assert_eq!(document_read(&text[..text.len() / 2], Detail::Clipped), None);
+        assert_eq!(document_read("[]", Detail::Clipped), None);
+        let read = document_read(&text, Detail::Clipped).expect("a document");
+        assert_eq!(read.model.as_deref(), Some("example-default-model"));
+        assert_eq!(read.usage, None);
     }
 }
