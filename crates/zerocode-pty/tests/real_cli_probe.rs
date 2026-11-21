@@ -28,7 +28,10 @@
 //! (Devin's ATIF file) writes it: as the turn goes, or once at its end. A
 //! second one-line prompt (`ZEROCODE_REAL_CLI_PROBE_PROMPT_AGAIN`) goes in
 //! after the first turn's `Stop`, so the file is also seen between two turns
-//! of one session.
+//! of one session. `ZEROCODE_REAL_CLI_PROBE_WATCH_FILE` names one more file to
+//! look at the same way — a file the launch words ask the CLI to write, such
+//! as Devin's `--export <path>` — with the names of its top-level keys when it
+//! is JSON, its line count when it is not.
 
 #![cfg(unix)]
 
@@ -67,6 +70,8 @@ const START_SHOTS: [Duration; 3] = [
 /// beat (see the module doc): every change it was seen to make.
 struct SessionFile {
     folder: Option<PathBuf>,
+    /// One file named outright, looked at whatever the hooks say.
+    fixed: Option<PathBuf>,
     extension: String,
     /// The wall clock at the probe's start, which file moments are read against.
     wall: SystemTime,
@@ -78,6 +83,7 @@ impl SessionFile {
     fn from_env(wall: SystemTime) -> Self {
         Self {
             folder: std::env::var_os("ZEROCODE_REAL_CLI_PROBE_WATCH").map(PathBuf::from),
+            fixed: None,
             extension: std::env::var("ZEROCODE_REAL_CLI_PROBE_WATCH_EXT")
                 .unwrap_or_else(|_| "json".to_string()),
             wall,
@@ -86,17 +92,28 @@ impl SessionFile {
         }
     }
 
+    fn named_by_env(wall: SystemTime) -> Self {
+        Self {
+            folder: None,
+            fixed: std::env::var_os("ZEROCODE_REAL_CLI_PROBE_WATCH_FILE").map(PathBuf::from),
+            ..Self::from_env(wall)
+        }
+    }
+
     fn look(&mut self, began: Instant, events: &[Heard]) {
-        let Some(folder) = self.folder.as_ref() else {
-            return;
+        let path = match (self.fixed.as_ref(), self.folder.as_ref()) {
+            (Some(fixed), _) => fixed.clone(),
+            (None, Some(folder)) => {
+                let Some(id) = events
+                    .iter()
+                    .find_map(|one| one.payload["session_id"].as_str())
+                else {
+                    return;
+                };
+                folder.join(format!("{id}.{}", self.extension))
+            }
+            (None, None) => return,
         };
-        let Some(id) = events
-            .iter()
-            .find_map(|one| one.payload["session_id"].as_str())
-        else {
-            return;
-        };
-        let path = folder.join(format!("{id}.{}", self.extension));
         let Ok(meta) = std::fs::metadata(&path) else {
             return;
         };
@@ -108,15 +125,18 @@ impl SessionFile {
         let wall = self.wall;
         let on_our_clock =
             |at: Option<SystemTime>| at.and_then(|at| at.duration_since(wall).ok()).map(ms);
-        let steps = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .map(|document| {
-                document
-                    .pointer("/steps")
-                    .and_then(serde_json::Value::as_array)
-                    .map(Vec::len)
-            });
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let document = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+        let steps = document.as_ref().map(|document| {
+            document
+                .pointer("/steps")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+        });
+        let keys: Option<Vec<String>> = document
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .map(|object| object.keys().cloned().collect());
         self.seen.push(serde_json::json!({
             "atMs": ms(began.elapsed()),
             "bytes": meta.len(),
@@ -124,6 +144,8 @@ impl SessionFile {
             "bornMs": on_our_clock(meta.created().ok()),
             "parsed": steps.is_some(),
             "steps": steps.flatten(),
+            "keys": keys,
+            "lines": bytes.iter().filter(|byte| **byte == b'\n').count(),
         }));
     }
 }
@@ -286,7 +308,9 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
     assert!(git.success(), "git init failed");
 
     let began = Instant::now();
-    let mut session_file = SessionFile::from_env(SystemTime::now());
+    let wall = SystemTime::now();
+    let mut session_file = SessionFile::from_env(wall);
+    let mut named_file = SessionFile::named_by_env(wall);
     let (port, heard) = listen(began);
     // An empty value takes the name out of the child's environment.
     let mut env: Vec<(String, String)> = std::env::vars_os()
@@ -320,6 +344,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         lane.pump();
         events.extend(heard.try_iter());
         session_file.look(began, &events);
+        named_file.look(began, &events);
         let screen = lane.terminal().grid().visible_text();
         let handshake = lane.terminal().grid().bracketed_paste();
         if handshake {
@@ -392,6 +417,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
                 lane.pump();
                 events.extend(heard.try_iter());
                 session_file.look(began, &events);
+                named_file.look(began, &events);
                 std::thread::sleep(Duration::from_millis(50));
             }
             let words = format!("\x1b[200~{line}\x1b[201~");
@@ -406,6 +432,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
             lane.pump();
             events.extend(heard.try_iter());
             session_file.look(began, &events);
+            named_file.look(began, &events);
             let taken = heard_times(&events, "UserPromptSubmit") >= nth;
             if !taken && !pressed_again && entered.elapsed() >= ENTER_AGAIN_AFTER {
                 lane.write_input(b"\r").expect("the Enter again");
@@ -422,6 +449,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
             lane.pump();
             events.extend(heard.try_iter());
             session_file.look(began, &events);
+            named_file.look(began, &events);
             std::thread::sleep(Duration::from_millis(50));
         }
         lane.pump();
@@ -435,15 +463,18 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         lane.pump();
         events.extend(heard.try_iter());
         session_file.look(began, &events);
+        named_file.look(began, &events);
     }
     events.extend(heard.try_iter());
     std::thread::sleep(Duration::from_millis(500));
     session_file.look(began, &events);
+    named_file.look(began, &events);
     screens.push(("at-exit".into(), lane.terminal().grid().visible_text()));
     let _ = lane.kill();
 
     facts.insert("argv".into(), serde_json::json!(masked(&argv, &cwd)));
     facts.insert("sessionFile".into(), serde_json::json!(session_file.seen));
+    facts.insert("namedFile".into(), serde_json::json!(named_file.seen));
     facts.insert("promptPasted".into(), serde_json::json!(pasted));
     let transcript = events
         .iter()
