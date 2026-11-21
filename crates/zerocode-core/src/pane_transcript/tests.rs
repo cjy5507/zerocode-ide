@@ -401,6 +401,28 @@ fn a_devin_pane_binds_the_session_document_its_id_names() {
     );
 }
 
+/// A "no file" the memory keeps is let go by `drop_pane`: a document its
+/// CLI writes once a turn has ended (Devin) is found by the next ask right
+/// after it appears, not when the absent wait runs out (t-124593).
+#[test]
+fn a_pane_let_go_asks_the_disk_again_at_once() {
+    let devin = PathBuf::from(format!(
+        "{HOME}/.local/share/devin/cli/transcripts/example-session.json"
+    ));
+    let memo = Mutex::new(Memo::<u32>::default());
+    let none = disk_of(vec![]);
+    let ask = |facts: &Disk| bind_remembered(&memo, 7, "devin", None, Some("example-session"), facts);
+    assert_eq!(ask(&none), Err(Absent::NoSessionFile));
+    let written = disk_of(vec![devin.clone()]);
+    assert_eq!(
+        ask(&written),
+        Err(Absent::NoSessionFile),
+        "within the absent wait the memory still says no file"
+    );
+    memo.lock().expect("the memory").drop_pane(&7);
+    assert_eq!(ask(&written), Ok((devin, Via::SessionId)));
+}
+
 #[test]
 fn each_shape_says_where_its_id_shows_and_which_shapes_are_readable() {
     assert_eq!(Format::ClaudeLines.id_placement(), IdPlacement::FileStem);

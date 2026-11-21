@@ -13627,6 +13627,24 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
     let other = chosen("another-model");
     assert!(!other.contains(&"devin".to_string()), "{other:?}");
     assert!(other.contains(&"antigravity".to_string()), "{other:?}");
+    // An id both a CLI's own list and a zo-served agent's lineup hold (a
+    // Gemini id devin and antigravity's `google` row both list) stays with
+    // both.
+    let both = Heard {
+        looked: Looked::at(&["devin", "agy"]),
+        heard: vec![
+            listing("devin", now_ms - 60_000),
+            listing("antigravity", now_ms - 60_000),
+        ],
+    };
+    let shared: Vec<String> = summonable(&both, &Ledger::new(), now_ms, Some("example-model"))
+        .into_iter()
+        .map(|room| room.id)
+        .collect();
+    assert!(
+        shared.contains(&"devin".to_string()) && shared.contains(&"antigravity".to_string()),
+        "{shared:?}"
+    );
 
     // A Claude id another CLI's list also holds stays on Claude's account:
     // the family rule comes first, for every agent.

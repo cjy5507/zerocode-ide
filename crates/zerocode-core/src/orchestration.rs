@@ -17129,8 +17129,10 @@ pub fn runs_model(agent: &str, model: &str) -> bool {
 /// An agent whose models zo's own provider rows serve carries it as before —
 /// unless the id is one the family table pins to no provider and some CLI's
 /// own list holds it (`listed_elsewhere`, [`listed_by_a_cli`]): then only
-/// the CLIs that list it do (the review's I6 — devin's own ids no longer
-/// go to claude). Every other agent carries it only when its lineup — read,
+/// the agents whose lineup holds it do — the CLIs that list it, and a
+/// zo-served agent whose rows list it (the review's I6 — devin's own ids no
+/// longer go to claude, and a Gemini id both list stays antigravity's
+/// too). Every other agent carries it only when its lineup — read,
 /// no older than the lineup's refresh rule — holds it ([`lists_model`]): an
 /// unread or old lineup, or none at all, is "unknown", never "yes".
 fn carries_model(
@@ -17144,7 +17146,10 @@ fn carries_model(
         return false;
     }
     if served_by_zo(agent) {
-        return !listed_elsewhere;
+        // An id a CLI's own list holds stays with the agents whose lineup
+        // holds it — a zo-served one too, when zo's rows list it (a Gemini
+        // id antigravity's `google` row lists).
+        return !listed_elsewhere || lists_model(launcher, agent, model, now_ms);
     }
     lists_model(launcher, agent, model, now_ms)
 }

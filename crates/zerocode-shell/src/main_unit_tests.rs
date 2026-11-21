@@ -34715,7 +34715,7 @@ fn a_turn_written_after_its_stop_is_read_once_the_store_has_settled() {
     let path = dir.path().join("example-session.json");
     let (told, heard) = std::sync::mpsc::channel();
     let at_stop = path.clone();
-    crate::pane_runtime::tell_again_after(settle, move || {
+    crate::pane_runtime::tell_again_after(settle, || true, move || {
         let _ = told.send(document_log(&at_stop, LogRead::Tail, false));
     });
     assert!(document_log(&path, LogRead::Tail, false).is_err(), "nothing is written at the Stop");
@@ -34728,10 +34728,25 @@ fn a_turn_written_after_its_stop_is_read_once_the_store_has_settled() {
     );
     let never = dir.path().join("example-never.json");
     let (told, heard) = std::sync::mpsc::channel();
-    crate::pane_runtime::tell_again_after(settle, move || {
+    crate::pane_runtime::tell_again_after(settle, || true, move || {
         let _ = told.send(document_log(&never, LogRead::Tail, false).is_err());
     });
     assert!(heard.recv_timeout(settle * 4).expect("the second read"), "a store that wrote nothing says nothing");
+    // A newer word in the wait — a prompt that began the next turn — keeps
+    // the late Done from being told at all.
+    let record = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(1));
+    let told_at = record.load(std::sync::atomic::Ordering::SeqCst);
+    let seen = record.clone();
+    let (told, heard) = std::sync::mpsc::channel();
+    crate::pane_runtime::tell_again_after(
+        settle,
+        move || seen.load(std::sync::atomic::Ordering::SeqCst) == told_at,
+        move || {
+            let _ = told.send(());
+        },
+    );
+    record.store(2, std::sync::atomic::Ordering::SeqCst);
+    assert!(heard.recv_timeout(settle * 4).is_err(), "a late Done stood over a newer word");
 }
 
 /// A document read while its CLI wrote it is nothing new, the cursor where it

@@ -1747,11 +1747,40 @@ pub(super) fn note_pane_state(
     if report.state == zerocode_core::hook::HookState::Done
         && let Some(settle) = zerocode_core::vault::turn_write_settle(report.agent.slug())
     {
+        let term = report.term;
+        // This report's place in the window's record of the pane, written
+        // above: a newer word in the wait told the page already, and a late
+        // Done must never stand over a turn that began since.
+        let told_at = app
+            .state::<AppState>()
+            .pane_states()
+            .get(&term)
+            .map(|held| held.at);
+        let watching = app.clone();
         let app = app.clone();
         let again = shown.clone();
-        tell_again_after(settle, move || {
-            let _ = app.emit("hook:agent", again);
-        });
+        tell_again_after(
+            settle,
+            move || {
+                watching
+                    .state::<AppState>()
+                    .pane_states()
+                    .get(&term)
+                    .map(|held| held.at)
+                    == told_at
+            },
+            move || {
+                // The binding remembers the turn's "no file" — a first turn's
+                // document did not exist yet — for up to a minute; let go, the
+                // page's read asks the disk again.
+                app.state::<AppState>()
+                    .pane_memo()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .drop_pane(&term);
+                let _ = app.emit("hook:agent", again);
+            },
+        );
     }
     let _ = app.emit("hook:agent", shown);
     if report.state == zerocode_core::hook::HookState::Done
@@ -1764,13 +1793,20 @@ pub(super) fn note_pane_state(
     }
 }
 
-/// Run `tell` once, `settle` from now, on a thread of its own — the second
-/// telling of a turn's end for a store that settles after it
+/// Run `tell` once, `settle` from now, on a thread of its own, when
+/// `still_newest` says then that nothing newer has come — the second telling
+/// of a turn's end for a store that settles after it
 /// (`zerocode_core::vault::turn_write_settle`, t-124593).
-pub(crate) fn tell_again_after(settle: Duration, tell: impl FnOnce() + Send + 'static) {
+pub(crate) fn tell_again_after(
+    settle: Duration,
+    still_newest: impl FnOnce() -> bool + Send + 'static,
+    tell: impl FnOnce() + Send + 'static,
+) {
     std::thread::spawn(move || {
         std::thread::sleep(settle);
-        tell();
+        if still_newest() {
+            tell();
+        }
     });
 }
 
