@@ -2285,8 +2285,8 @@ pub struct DocumentRead {
 /// its thought (`reasoning_content`), its words (`message`), each call it
 /// made (`tool_calls`) and what each brought back (`observation.results`),
 /// in that order — the parts renamed into the shape the one tool reader
-/// reads ([`transcript_tool`], [`tool_line`], [`tool_result_turn`]), so a
-/// call's kind, edits and file are read where every transcript's are. A
+/// reads (`transcript_tool`, `tool_line`, `tool_result_turn`), so a call's
+/// kind, edits and file are read where every transcript's are. A
 /// `system` step — the prompt and the context the CLI hands its model — is
 /// no one's speech and stands with no turns.
 ///
