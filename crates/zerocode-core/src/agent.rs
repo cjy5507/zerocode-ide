@@ -10,8 +10,7 @@ use crate::capabilities::{
     AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
     CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, EffortRide, Harness, IdShape, LaunchTuning,
     ListRoad, ListShape, ModelSource, MoveRoad, OneShotRoad, PointerRoute, QuotaGauge, SignInLog,
-    SpawnRoad,
-    StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark, ZO_EFFORT_LADDER,
+    SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark, ZO_EFFORT_LADDER,
     ZO_RESUME_SELECTORS,
 };
 

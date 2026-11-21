@@ -268,7 +268,9 @@ fn json_list(
             .iter()
             .map(|group| {
                 let named = family.and_then(|at| text_at(group, at));
-                let members = group.pointer(pointer).and_then(serde_json::Value::as_array)?;
+                let members = group
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_array)?;
                 Some(members.iter().map(move |entry| (entry, named.clone())))
             })
             .collect::<Option<Vec<_>>>()?
@@ -587,7 +589,10 @@ mod tests {
         let unasked = json("kiro", None, 0, Ids::Preview);
         assert_eq!(unasked["state"], "not-asked");
         assert_eq!(unasked["from"], "kiro-cli chat --list-models --format json");
-        assert_eq!(json("claude", None, 0, Ids::Preview)["from"], "zo models --json");
+        assert_eq!(
+            json("claude", None, 0, Ids::Preview)["from"],
+            "zo models --json"
+        );
 
         let heard = Snapshot {
             agent: "kiro".into(),
@@ -604,7 +609,10 @@ mod tests {
         assert_eq!(row["ageMs"], 60_000);
         assert_eq!(row["from"], "kiro-cli chat --list-models --format json");
         assert_eq!(row["count"], 2);
-        assert!(row.get("allIds").is_none(), "a list that fits is shown whole");
+        assert!(
+            row.get("allIds").is_none(),
+            "a list that fits is shown whole"
+        );
     }
 
     /// The whole catalog's row carries a long list's first ids, how many
@@ -696,7 +704,11 @@ mod tests {
 
         let opencode = road_of("opencode").expect("opencode's row names its list");
         assert_eq!(
-            read(opencode.shape, &ended(0, "provider-a/model-a\n\nprovider-b/model-b\n", "")).listed(),
+            read(
+                opencode.shape,
+                &ended(0, "provider-a/model-a\n\nprovider-b/model-b\n", "")
+            )
+            .listed(),
             [
                 Listed {
                     id: "provider-a/model-a".into(),

@@ -286,16 +286,37 @@ fn the_document_road_branches_on_no_agents_name() {
     let terminal = shipped_code(&shell_source("cmd/terminal.rs"));
     let binding = shipped_code(&shell_source("pane_transcript.rs"));
     let roads = [
-        ("document_read", block_after(&core_transcript, "pub fn document_read(")),
-        ("step_turns", block_after(&core_transcript, "fn step_turns(")),
-        ("call_result", block_after(&core_transcript, "fn call_result<")),
+        (
+            "document_read",
+            block_after(&core_transcript, "pub fn document_read("),
+        ),
+        (
+            "step_turns",
+            block_after(&core_transcript, "fn step_turns("),
+        ),
+        (
+            "call_result",
+            block_after(&core_transcript, "fn call_result<"),
+        ),
         ("format_of", block_after(&core_binding, "pub fn format_of(")),
-        ("written_whole", block_after(&core_vault, "pub const fn written_whole(")),
+        (
+            "written_whole",
+            block_after(&core_vault, "pub const fn written_whole("),
+        ),
         ("carded", block_after(&core_vault, "pub const fn carded(")),
-        ("turn_write_settle", block_after(&core_vault, "pub fn turn_write_settle(")),
-        ("document_log_within", block_after(&terminal, "fn document_log_within(")),
+        (
+            "turn_write_settle",
+            block_after(&core_vault, "pub fn turn_write_settle("),
+        ),
+        (
+            "document_log_within",
+            block_after(&terminal, "fn document_log_within("),
+        ),
         ("steps_back", block_after(&terminal, "fn steps_back(")),
-        ("the pane's shape", block_after(&binding, "pub(crate) fn written_whole(")),
+        (
+            "the pane's shape",
+            block_after(&binding, "pub(crate) fn written_whole("),
+        ),
     ];
     for (road, text) in roads {
         for spelled in &branches {

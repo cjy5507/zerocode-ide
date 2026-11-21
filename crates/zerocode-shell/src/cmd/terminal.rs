@@ -863,7 +863,11 @@ pub(crate) fn document_log_within(
         skipped: false,
         turns: steps.into_iter().take(to).skip(from).flatten().collect(),
         model: document.model,
-        next: if matches!(read, LogRead::Before(_)) { to as u64 } else { settled as u64 },
+        next: if matches!(read, LogRead::Before(_)) {
+            to as u64
+        } else {
+            settled as u64
+        },
         found: true,
         more: matches!(read, LogRead::Before(_)) && to < settled,
         folded: !matches!(read, LogRead::After(_)) && from > 0,

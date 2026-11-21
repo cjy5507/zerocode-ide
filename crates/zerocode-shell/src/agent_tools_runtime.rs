@@ -10613,7 +10613,10 @@ mod tests {
         fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).expect("a source folder").flatten() {
                 let path = entry.path();
-                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
                 // A test-only file (`tests.rs`, `*_tests.rs`) ships nothing.
                 let test_only = name == "tests.rs" || name.ends_with("_tests.rs");
                 if path.is_dir() {
@@ -10638,8 +10641,16 @@ mod tests {
                 .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let name = path.strip_prefix(&src).unwrap_or(&path).display().to_string();
-            for spelled in [".trust_flag()", "trust_flag_words(", "--respect-workspace-trust"] {
+            let name = path
+                .strip_prefix(&src)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for spelled in [
+                ".trust_flag()",
+                "trust_flag_words(",
+                "--respect-workspace-trust",
+            ] {
                 let count = code.matches(spelled).count();
                 if count > 0 {
                     roads.push(format!("{name}: {spelled} × {count}"));

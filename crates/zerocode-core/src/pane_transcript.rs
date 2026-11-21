@@ -196,11 +196,7 @@ pub fn format_of(slug: &str, path: &Path, facts: &dyn Facts) -> Option<Format> {
         .iter()
         .filter(|row| row.slug == slug && row.format.readable())
         .find(|row| {
-            vault::wanted(row, path)
-                && facts
-                    .roots(row)
-                    .iter()
-                    .any(|root| path.starts_with(root))
+            vault::wanted(row, path) && facts.roots(row).iter().any(|root| path.starts_with(root))
         })
         .map(|row| row.format)
 }

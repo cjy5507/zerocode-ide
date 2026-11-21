@@ -453,7 +453,10 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
             std::thread::sleep(Duration::from_millis(50));
         }
         lane.pump();
-        screens.push((format!("after-turn-{nth}"), lane.terminal().grid().visible_text()));
+        screens.push((
+            format!("after-turn-{nth}"),
+            lane.terminal().grid().visible_text(),
+        ));
     }
 
     // Out the way a person leaves it, then the lane's own end.

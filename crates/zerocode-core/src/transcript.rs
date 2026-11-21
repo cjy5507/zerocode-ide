@@ -5351,24 +5351,51 @@ mod tests {
         assert_eq!(read.steps.len(), 4, "every step keeps its place");
         assert_eq!(read.settled, 4);
         assert!(read.steps[0].is_empty(), "a system step is no one's speech");
-        let roles = |at: usize| read.steps[at].iter().map(|turn| turn.role.as_str()).collect::<Vec<_>>();
+        let roles = |at: usize| {
+            read.steps[at]
+                .iter()
+                .map(|turn| turn.role.as_str())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(roles(1), ["user"]);
         assert_eq!(read.steps[1][0].text, "list the example folder");
-        assert_eq!(read.steps[1][0].at_ms, crate::civil::epoch_ms_of_iso("2026-01-01T18:04:06Z"));
+        assert_eq!(
+            read.steps[1][0].at_ms,
+            crate::civil::epoch_ms_of_iso("2026-01-01T18:04:06Z")
+        );
         // The empty message says nothing; the thought, the call and its result do.
         assert_eq!(roles(2), ["thinking", "tool", "tool_result"]);
         let call = read.steps[2][1].tool.as_ref().expect("the call");
-        assert_eq!((call.call_id.as_str(), call.name.as_str(), call.input.as_str()), ("call-1", "exec", "ls example"));
+        assert_eq!(
+            (
+                call.call_id.as_str(),
+                call.name.as_str(),
+                call.input.as_str()
+            ),
+            ("call-1", "exec", "ls example")
+        );
         let result = &read.steps[2][2];
         assert_eq!(result.text, "a.txt\nb.txt");
         let answered = result.tool.as_ref().expect("the result");
-        assert_eq!((answered.call_id.as_str(), answered.name.as_str()), ("call-1", "exec"));
+        assert_eq!(
+            (answered.call_id.as_str(), answered.name.as_str()),
+            ("call-1", "exec")
+        );
         // Nine digits past the second, and a zone: read to the millisecond.
-        assert_eq!(read.steps[2][0].at_ms, Some(crate::civil::epoch_ms_of_iso("2026-01-01T18:04:07.123Z").expect("a stamp")));
+        assert_eq!(
+            read.steps[2][0].at_ms,
+            Some(crate::civil::epoch_ms_of_iso("2026-01-01T18:04:07.123Z").expect("a stamp"))
+        );
         assert_eq!(roles(3), ["assistant"]);
         assert_eq!(read.steps[3][0].text, "It holds a.txt and b.txt.");
         assert_eq!(read.model.as_deref(), Some("example-model"));
-        assert_eq!(read.usage, Some(TranscriptUsage { tokens: 1500, window: 0 }));
+        assert_eq!(
+            read.usage,
+            Some(TranscriptUsage {
+                tokens: 1500,
+                window: 0
+            })
+        );
     }
 
     /// A last step whose call has no result yet is held back — its CLI writes
@@ -5379,11 +5406,17 @@ mod tests {
             r#""observation": { "results": [ { "source_call_id": "call-1", "content": "a.txt\nb.txt" } ] },"#,
             "",
         );
-        let read = document_read(&atif_session(&[ATIF_USER, &waiting].join(",")), Detail::Clipped)
-            .expect("a document");
+        let read = document_read(
+            &atif_session(&[ATIF_USER, &waiting].join(",")),
+            Detail::Clipped,
+        )
+        .expect("a document");
         assert_eq!((read.steps.len(), read.settled), (2, 1));
-        let read = document_read(&atif_session(&[ATIF_USER, &waiting, ATIF_ANSWER].join(",")), Detail::Clipped)
-            .expect("a document");
+        let read = document_read(
+            &atif_session(&[ATIF_USER, &waiting, ATIF_ANSWER].join(",")),
+            Detail::Clipped,
+        )
+        .expect("a document");
         assert_eq!((read.steps.len(), read.settled), (3, 3));
     }
 
@@ -5392,7 +5425,10 @@ mod tests {
     #[test]
     fn a_document_cut_mid_write_is_not_read_and_the_agent_names_the_model() {
         let text = atif_session(&[ATIF_SYSTEM, ATIF_USER].join(","));
-        assert_eq!(document_read(&text[..text.len() / 2], Detail::Clipped), None);
+        assert_eq!(
+            document_read(&text[..text.len() / 2], Detail::Clipped),
+            None
+        );
         assert_eq!(document_read("[]", Detail::Clipped), None);
         let read = document_read(&text, Detail::Clipped).expect("a document");
         assert_eq!(read.model.as_deref(), Some("example-default-model"));

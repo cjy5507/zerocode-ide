@@ -298,9 +298,9 @@ fn lists_due(heard: &BTreeMap<String, cli_models::Snapshot>, now_ms: i64) -> Vec
     lineup_agents()
         .filter(|agent| cli_models::road_of(agent).is_some())
         .filter(|agent| {
-            heard.get(*agent).is_none_or(|held| {
-                now_ms.saturating_sub(held.read_at_ms) >= REFRESH_AFTER_MS
-            })
+            heard
+                .get(*agent)
+                .is_none_or(|held| now_ms.saturating_sub(held.read_at_ms) >= REFRESH_AFTER_MS)
         })
         .collect()
 }
@@ -710,10 +710,19 @@ mod tests {
             ("claude".to_string(), lineup(&[("model-a", true)])),
             ("devin".to_string(), lineup(&[("model-a", true)])),
         ]);
-        assert!(observe(&mut seen, &first, 1_000).is_empty(), "a first look is no news");
+        assert!(
+            observe(&mut seen, &first, 1_000).is_empty(),
+            "a first look is no news"
+        );
         let grown = BTreeMap::from([
-            ("claude".to_string(), lineup(&[("model-a", true), ("model-b", false)])),
-            ("devin".to_string(), lineup(&[("model-a", true), ("model-b", false)])),
+            (
+                "claude".to_string(),
+                lineup(&[("model-a", true), ("model-b", false)]),
+            ),
+            (
+                "devin".to_string(),
+                lineup(&[("model-a", true), ("model-b", false)]),
+            ),
         ]);
         let told: Vec<String> = observe(&mut seen, &grown, 2_000)
             .into_iter()
@@ -741,7 +750,10 @@ mod tests {
         };
         let now = 10 * REFRESH_AFTER_MS;
         assert_eq!(lists_due(&BTreeMap::new(), now), ["devin", "kiro"]);
-        let held = BTreeMap::from([heard("devin", now - 1), heard("kiro", now - REFRESH_AFTER_MS)]);
+        let held = BTreeMap::from([
+            heard("devin", now - 1),
+            heard("kiro", now - REFRESH_AFTER_MS),
+        ]);
         assert_eq!(lists_due(&held, now), ["kiro"]);
     }
 

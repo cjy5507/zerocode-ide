@@ -13647,12 +13647,19 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
             took_ms: 1,
         }],
     };
-    let claude_model: Vec<String> =
-        summonable(&claude_listed, &Ledger::new(), now_ms, Some("claude-example-model"))
-            .into_iter()
-            .map(|room| room.id)
-            .collect();
-    assert!(claude_model.contains(&"claude".to_string()), "{claude_model:?}");
+    let claude_model: Vec<String> = summonable(
+        &claude_listed,
+        &Ledger::new(),
+        now_ms,
+        Some("claude-example-model"),
+    )
+    .into_iter()
+    .map(|room| room.id)
+    .collect();
+    assert!(
+        claude_model.contains(&"claude".to_string()),
+        "{claude_model:?}"
+    );
     assert!(
         !claude_model.contains(&"kiro".to_string()),
         "a Claude model was offered to another service's CLI: {claude_model:?}"
@@ -15397,7 +15404,9 @@ fn a_replacement_inherits_the_ledgers_own_cut_from_an_attempt_in_one() {
         .as_str()
         .expect("a task")
         .to_string();
-    let (first, pane) = bench.seat(&format!("worker-start --agent codex --task {task} --worktree"));
+    let (first, pane) = bench.seat(&format!(
+        "worker-start --agent codex --task {task} --worktree"
+    ));
     assert!(
         bench.ledger.runs()[0]
             .worker(&first)
@@ -15418,7 +15427,10 @@ fn a_replacement_inherits_the_ledgers_own_cut_from_an_attempt_in_one() {
         .as_ref()
         .expect("a reservation");
     assert_eq!(prepared.inherit_checkout.as_deref(), Some("/wt/cut"));
-    assert!(prepared.in_worktree, "the inherited tree is the ledger's own cut");
+    assert!(
+        prepared.in_worktree,
+        "the inherited tree is the ledger's own cut"
+    );
 }
 
 /// `--inherit-checkout` seats the replacement in the ENDED attempt's
