@@ -1081,6 +1081,19 @@ fn write_shim_dir(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))?;
     }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let open = dir.join(zerocode_core::worker_open::SHIM_NAME);
+        std::fs::write(
+            &open,
+            zerocode_core::worker_open::open_shim_script(
+                mirror_bin,
+                Path::new(zerocode_core::worker_open::SYSTEM_OPEN_PATH),
+            ),
+        )?;
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755))?;
+    }
     // Windows hosts: cmd resolves a `.cmd` through PATHEXT and PowerShell
     // resolves a bare name to a `.cmd` too — as long as no `<door>.ps1`
     // stands beside it, which PowerShell would prefer and its default

@@ -1271,6 +1271,7 @@ pub const TEAM_PANE_VAR: &str = "ZEROCODE_AGENT_TEAM_PANE";
 /// the harness CLI.
 pub const TEAM_ID_VAR: &str = "ZEROCODE_AGENT_TEAM_ID";
 pub const TEAM_TOKEN_VAR: &str = "ZEROCODE_AGENT_TEAM_TOKEN";
+pub const TEAM_TOKEN_FILE_VAR: &str = "ZEROCODE_AGENT_TEAM_TOKEN_FILE";
 pub const TEAM_LEADER_VAR: &str = "ZEROCODE_AGENT_TEAM_LEADER";
 
 /// How long a shim waits for the window before giving up, in seconds.

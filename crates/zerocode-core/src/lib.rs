@@ -168,6 +168,7 @@ pub mod usual;
 pub mod vault;
 pub mod vault_index;
 pub mod vault_opencode;
+pub mod worker_open;
 pub mod worker_placement;
 pub mod worker_transcript;
 pub mod workitem;

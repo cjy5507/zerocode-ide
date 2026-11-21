@@ -41284,3 +41284,35 @@ fn the_working_edge_turns_on_the_compositor() {
         "a team row builds a working edge again"
     );
 }
+
+#[test]
+fn worker_open_shim_rides_the_existing_pane_path_and_mirror_on_macos() {
+    let hooks = include_str!("../../src/hooks.rs");
+    let (hooks_shipped, _) = hooks.split_once("#[cfg(test)]").unwrap_or((hooks, ""));
+    let writing = support::block_after(hooks_shipped, "fn write_shim_dir(");
+    for needle in [
+        "#[cfg(target_os = \"macos\")]",
+        "zerocode_core::worker_open::SHIM_NAME",
+        "zerocode_core::worker_open::open_shim_script(",
+        "zerocode_core::worker_open::SYSTEM_OPEN_PATH",
+    ] {
+        assert!(
+            writing.contains(needle),
+            "write_shim_dir lost `{needle}`:\n{writing}"
+        );
+    }
+
+    let mirror = include_str!("../../src/bin/zerocode-mirror.rs");
+    let main_fn = support::block_after(mirror, "fn main() {");
+    assert!(
+        main_fn.contains("zerocode_core::worker_open::MARKER")
+            && main_fn.contains("serve_worker_open()"),
+        "zerocode-mirror no longer dispatches worker open guard:\n{main_fn}"
+    );
+    let handler = support::block_after(mirror, "fn serve_worker_open() -> ! {");
+    assert!(
+        handler.contains("zerocode_core::worker_open::decide(")
+            && handler.contains(".env_remove(zerocode_core::worker_open::MARKER)"),
+        "serve_worker_open lost decision or guard env stripping:\n{handler}"
+    );
+}

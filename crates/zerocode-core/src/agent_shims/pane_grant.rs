@@ -6,9 +6,8 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::agent_teams::{TEAM_ID_VAR, TEAM_PANE_VAR};
+use crate::agent_teams::{TEAM_ID_VAR, TEAM_PANE_VAR, TEAM_TOKEN_FILE_VAR};
 
-const TEAM_TOKEN_FILE_VAR: &str = "ZEROCODE_AGENT_TEAM_TOKEN_FILE";
 // The grant holds a handful of capability paths, not session or tool content.
 const MAX_GRANT_BYTES: u64 = 64 * 1024;
 

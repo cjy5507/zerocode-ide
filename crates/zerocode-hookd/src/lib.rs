@@ -148,7 +148,7 @@ pub mod env_var {
     /// inherited environment.
     pub const BROWSER_TOKEN_FILE: &str = "ZEROCODE_BROWSER_TOKEN_FILE";
     pub const COMPUTER_TOKEN_FILE: &str = "ZEROCODE_COMPUTER_TOKEN_FILE";
-    pub const TEAM_TOKEN_FILE: &str = "ZEROCODE_AGENT_TEAM_TOKEN_FILE";
+    pub const TEAM_TOKEN_FILE: &str = zerocode_core::agent_teams::TEAM_TOKEN_FILE_VAR;
     /// Claude's own nested-agent credential. The PTY boundary removes an
     /// inherited value because its matching socket is removed too; a newly
     /// launched Claude creates its own session credential.
