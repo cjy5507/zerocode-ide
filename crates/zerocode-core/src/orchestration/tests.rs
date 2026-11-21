@@ -13604,6 +13604,35 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
     let other = chosen("another-model");
     assert!(!other.contains(&"devin".to_string()), "{other:?}");
     assert!(other.contains(&"antigravity".to_string()), "{other:?}");
+
+    // A Claude id another CLI's list also holds stays on Claude's account:
+    // the family rule comes first, for every agent.
+    let claude_listed = Heard {
+        looked: Looked::at(&["kiro-cli", "claude"]),
+        heard: vec![Snapshot {
+            agent: "kiro".to_string(),
+            asked: "kiro models".to_string(),
+            answer: Answer::Listed {
+                models: vec![Listed {
+                    id: "claude-example-model".into(),
+                    name: None,
+                }],
+                default: None,
+            },
+            read_at_ms: now_ms - 60_000,
+            took_ms: 1,
+        }],
+    };
+    let claude_model: Vec<String> =
+        summonable(&claude_listed, &Ledger::new(), now_ms, Some("claude-example-model"))
+            .into_iter()
+            .map(|room| room.id)
+            .collect();
+    assert!(claude_model.contains(&"claude".to_string()), "{claude_model:?}");
+    assert!(
+        !claude_model.contains(&"kiro".to_string()),
+        "a Claude model was offered to another service's CLI: {claude_model:?}"
+    );
 }
 
 /// Ask one launcher one read verb, with no ledger state in the way.

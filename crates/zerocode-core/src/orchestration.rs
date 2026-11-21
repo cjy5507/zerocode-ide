@@ -17132,27 +17132,31 @@ pub fn runs_model(agent: &str, model: &str) -> bool {
 }
 
 /// Whether `agent` can carry a summons pinned to `model`, for the choice an
-/// `--agent auto` summons makes (t-6342, t-124593). An agent whose models
-/// zo's own provider rows serve keeps [`runs_model`]'s family rule, as
+/// `--agent auto` summons makes (t-6342, t-124593). [`runs_model`]'s family
+/// rule first, for every agent: a Claude or GPT id runs on the agent whose
+/// gauge is that provider's, so a CLI that also lists the same id (kiro
+/// lists `claude-sonnet-4.5`) never takes it onto another service's account.
+/// An agent whose models zo's own provider rows serve needs nothing more, as
 /// before. Every other agent carries it only when its lineup — read, no
 /// older than the lineup's refresh rule
 /// ([`crate::summon_difficulty::lineup::REFRESH_AFTER_MS`]) — holds it: an
 /// unread or old lineup, or none at all, is "unknown", never "yes".
 fn carries_model(launcher: &dyn Launcher, agent: &str, model: &str, now_ms: i64) -> bool {
     use crate::capabilities::ModelSource;
+    if !runs_model(agent, model) {
+        return false;
+    }
     let source = crate::agent::agent_spec(agent).map(|spec| spec.harness.models);
     if matches!(
         source,
         Some(ModelSource::ZoCatalog(_) | ModelSource::ZoCatalogAll)
     ) {
-        return runs_model(agent, model);
+        return true;
     }
-    tuning_of(agent).is_some()
-        && launcher.model_list(agent).is_some_and(|held| {
-            now_ms.saturating_sub(held.read_at_ms)
-                < crate::summon_difficulty::lineup::REFRESH_AFTER_MS
-                && held.answer.listed().iter().any(|one| one.id == model)
-        })
+    launcher.model_list(agent).is_some_and(|held| {
+        now_ms.saturating_sub(held.read_at_ms) < crate::summon_difficulty::lineup::REFRESH_AFTER_MS
+            && held.answer.listed().iter().any(|one| one.id == model)
+    })
 }
 
 /// The pinned model's own vendor CLI — the agent whose gauge is the one the
