@@ -380,6 +380,28 @@ fn a_store_this_window_cannot_read_yet_says_so() {
     );
 }
 
+/// A Devin pane — the person's, or a worker's: both report `session_id` on
+/// every hook and no `transcript_path` (measured 2026-11-21 on Devin CLI
+/// 3000.14.30821, t-124593) — binds the session document its id names,
+/// `<id>.json` in Devin's transcript folder, and never the one beside it.
+#[test]
+fn a_devin_pane_binds_the_session_document_its_id_names() {
+    let devin = |id: &str| {
+        PathBuf::from(format!(
+            "{HOME}/.local/share/devin/cli/transcripts/{id}.json"
+        ))
+    };
+    let disk = disk_of(vec![devin("example-other"), devin("example-session")]);
+    assert_eq!(
+        bind("devin", None, Some("example-session"), &disk),
+        Ok((devin("example-session"), Via::SessionId))
+    );
+    assert_eq!(
+        bind("devin", None, Some("example-missing"), &disk),
+        Err(Absent::NoSessionFile)
+    );
+}
+
 #[test]
 fn each_shape_says_where_its_id_shows_and_which_shapes_are_readable() {
     assert_eq!(Format::ClaudeLines.id_placement(), IdPlacement::FileStem);
