@@ -918,6 +918,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                     id: "/model_uid",
                     name: Some("/label"),
                     default: None,
+                    family: Some("/slug"),
                 },
             }),
             ..Harness::PLAIN
@@ -1329,6 +1330,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                     id: "/model_id",
                     name: Some("/model_name"),
                     default: Some("/default_model"),
+                    family: None,
                 },
             }),
             ..Harness::PLAIN

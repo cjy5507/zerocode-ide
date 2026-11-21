@@ -20633,7 +20633,6 @@ fn agent_row(
     headroom: Option<&Headroom>,
     readiness: Option<&crate::readiness::AgentReadinessSnapshot>,
     summon: Option<&[crate::summon_difficulty::lineup::Row]>,
-    models: Option<&crate::cli_models::Snapshot>,
     now_ms: i64,
 ) -> serde_json::Value {
     let tuning = spec.harness.tuning;
@@ -20679,9 +20678,6 @@ fn agent_row(
     // `fresh` — so a coordinator can name one with `--model` (t-14437).
     // `null` is "nobody read a lineup", never "no choices".
     row["summon"] = summon.map_or(serde_json::Value::Null, |rows| serde_json::json!(rows));
-    // What the agent's own CLI listed when the window asked it, with when;
-    // `unknown` for a CLI whose help names no list (t-124593).
-    row["models"] = crate::cli_models::json(spec.id, models, now_ms);
     // And when there are none, why — said, never left to a CLI's default.
     row["summonUnavailable"] = match (tuning, summon) {
         (None, _) => serde_json::json!(SUMMON_NO_MODEL_FLAG),
@@ -24790,16 +24786,27 @@ fn plan_inner(
                         .is_some_and(|row| row.installed)
                         .then(|| launcher.model_list(spec.id))
                         .flatten();
-                    agent_row(
+                    let mut row = agent_row(
                         spec,
                         seen,
                         history,
                         headroom.as_ref(),
                         readiness.as_ref(),
                         summon.as_deref(),
-                        models.as_ref(),
                         now_ms,
-                    )
+                    );
+                    // What the agent's own CLI listed when the window asked
+                    // it, with when; `unknown` for a CLI whose help names no
+                    // list (t-124593). Every id only on the row of the one
+                    // agent asked about: the whole catalog's row shows the
+                    // first few, the count and the families (F1).
+                    let ids = if only.is_some() {
+                        crate::cli_models::Ids::Whole
+                    } else {
+                        crate::cli_models::Ids::Preview
+                    };
+                    row["models"] = crate::cli_models::json(spec.id, models.as_ref(), now_ms, ids);
+                    row
                 })
                 .collect();
             // Whether summonses are being judged now, and why not (t-45961):

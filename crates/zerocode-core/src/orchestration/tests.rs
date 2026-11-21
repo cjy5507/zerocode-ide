@@ -13510,10 +13510,12 @@ fn the_catalog_says_the_models_each_installed_cli_listed_and_when() {
                         Listed {
                             id: "auto".into(),
                             name: None,
+                            family: None,
                         },
                         Listed {
                             id: "example-model".into(),
                             name: Some("Example Model".into()),
+                            family: None,
                         },
                     ],
                     default: Some("auto".into()),
@@ -13571,6 +13573,7 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
             models: vec![Listed {
                 id: "example-model".into(),
                 name: None,
+                family: None,
             }],
             default: None,
         },
@@ -13616,6 +13619,7 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
                 models: vec![Listed {
                     id: "claude-example-model".into(),
                     name: None,
+                    family: None,
                 }],
                 default: None,
             },

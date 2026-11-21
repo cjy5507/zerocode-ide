@@ -61,6 +61,10 @@ pub struct Listed {
     /// The name it shows, when it is not the id itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The family the CLI keeps it in, when its list groups its models
+    /// (`ListShape::Json`'s `family`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
 }
 
 /// What came of one ask.
@@ -174,7 +178,8 @@ pub fn read(shape: ListShape, ran: &Ran) -> Answer {
                     id,
                     name,
                     default,
-                } => json_list(stdout, list, each, id, name, default),
+                    family,
+                } => json_list(stdout, list, each, id, name, default, family),
                 ListShape::Lines => line_list(stdout),
             };
             listed.map_or_else(
@@ -245,6 +250,7 @@ fn json_list(
     id: &str,
     name: Option<&str>,
     default: Option<&str>,
+    family: Option<&str>,
 ) -> Option<(Vec<Listed>, Option<String>)> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let text_at = |value: &serde_json::Value, pointer: &str| {
@@ -256,24 +262,29 @@ fn json_list(
             .map(str::to_string)
     };
     let entries = value.pointer(list)?.as_array()?;
-    let models: Vec<&serde_json::Value> = match each {
+    // Each model beside the family its group names, when it names one.
+    let models: Vec<(&serde_json::Value, Option<String>)> = match each {
         Some(pointer) => entries
             .iter()
-            .map(|group| group.pointer(pointer).and_then(serde_json::Value::as_array))
+            .map(|group| {
+                let named = family.and_then(|at| text_at(group, at));
+                let members = group.pointer(pointer).and_then(serde_json::Value::as_array)?;
+                Some(members.iter().map(move |entry| (entry, named.clone())))
+            })
             .collect::<Option<Vec<_>>>()?
             .into_iter()
             .flatten()
             .collect(),
-        None => entries.iter().collect(),
+        None => entries.iter().map(|entry| (entry, None)).collect(),
     };
     let models = models
         .into_iter()
-        .map(|entry| {
+        .map(|(entry, family)| {
             let id = text_at(entry, id)?;
             let name = name
                 .and_then(|pointer| text_at(entry, pointer))
                 .filter(|name| *name != id);
-            Some(Listed { id, name })
+            Some(Listed { id, name, family })
         })
         .collect::<Option<Vec<_>>>()?;
     Some((models, default.and_then(|pointer| text_at(&value, pointer))))
@@ -288,6 +299,7 @@ fn line_list(text: &str) -> Option<(Vec<Listed>, Option<String>)> {
         .map(|id| Listed {
             id: id.to_string(),
             name: None,
+            family: None,
         })
         .collect();
     (!models.is_empty()).then_some((models, None))
@@ -308,6 +320,23 @@ fn first_line(text: &str) -> String {
         .collect()
 }
 
+/// How many of a listed CLI's ids the whole catalog's `agent-list` row
+/// carries: kiro's whole list (eight, measured 2026-11-21) stands whole, and
+/// devin's 1,302 show their first eight. Every id is on the row of that one
+/// agent (`agent-list --agent <id>`): 64,624 bytes of devin's ids on every
+/// row a coordinator reads to plan a run was the review's F1 (t-124593).
+pub const PREVIEW_IDS: usize = 8;
+
+/// Which of a listed CLI's ids a row carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ids {
+    /// The first [`PREVIEW_IDS`], with how many there are and the families
+    /// they are kept in — the whole catalog's row.
+    Preview,
+    /// Every one — the row of the one agent asked about.
+    Whole,
+}
+
 /// `models` in an `agent-list` row: what the agent's models were last read
 /// from — its own CLI's list, or zo's catalog — with when, or why there is
 /// nothing to say:
@@ -320,7 +349,7 @@ fn first_line(text: &str) -> String {
 /// - a read: its state (`listed`, `unread`, `failed`, `no-answer`,
 ///   `not-started`), the command, and its age.
 #[must_use]
-pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64) -> serde_json::Value {
+pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64, ids: Ids) -> serde_json::Value {
     let spec = crate::agent::agent_spec(agent);
     let source = spec.map_or(ModelSource::Unknown, |spec| spec.harness.models);
     let program = spec.map_or(agent, |spec| spec.detect);
@@ -349,11 +378,29 @@ pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64) -> serde_json
         Answer::Listed { models, default } => {
             // The ids a `--model` takes, and how many: a CLI that lists a
             // thousand models (devin, 1,302) would double this answer with
-            // names no summons takes.
+            // names no summons takes. The whole catalog's row shows the
+            // first few and the families; the one agent's row, all of them.
             row["state"] = serde_json::json!("listed");
             row["count"] = serde_json::json!(models.len());
-            row["ids"] = serde_json::json!(models.iter().map(|one| &one.id).collect::<Vec<_>>());
             row["default"] = serde_json::json!(default);
+            let families = families_of(models);
+            if !families.is_empty() {
+                row["families"] = serde_json::json!(families);
+            }
+            let shown = match ids {
+                Ids::Whole => models.len(),
+                Ids::Preview => models.len().min(PREVIEW_IDS),
+            };
+            row["ids"] = serde_json::json!(
+                models
+                    .iter()
+                    .take(shown)
+                    .map(|one| &one.id)
+                    .collect::<Vec<_>>()
+            );
+            if shown < models.len() {
+                row["allIds"] = serde_json::json!(format!("agent-list --agent {agent}"));
+            }
         }
         Answer::Unread { bytes, why } => {
             row["state"] = serde_json::json!("unread");
@@ -378,6 +425,22 @@ pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64) -> serde_json
         }
     }
     row
+}
+
+/// The families a list keeps its models in, in the list's own order, each
+/// with how many it holds; none for a list that names no family.
+fn families_of(models: &[Listed]) -> Vec<serde_json::Value> {
+    let mut families: Vec<(&str, usize)> = Vec::new();
+    for family in models.iter().filter_map(|one| one.family.as_deref()) {
+        match families.iter_mut().find(|(name, _)| *name == family) {
+            Some((_, count)) => *count += 1,
+            None => families.push((family, 1)),
+        }
+    }
+    families
+        .into_iter()
+        .map(|(name, count)| serde_json::json!({"name": name, "count": count}))
+        .collect()
 }
 
 #[cfg(test)]
@@ -412,10 +475,12 @@ mod tests {
                     Listed {
                         id: "auto".into(),
                         name: None,
+                        family: None,
                     },
                     Listed {
                         id: "example-model".into(),
                         name: Some("Example Model".into()),
+                        family: None,
                     },
                 ],
                 default: Some("auto".into()),
@@ -428,6 +493,7 @@ mod tests {
             id: "",
             name: None,
             default: None,
+            family: None,
         };
         assert_eq!(
             read(bare, &ended(0, r#"["model-a", "model-b"]"#, "")).listed(),
@@ -435,10 +501,12 @@ mod tests {
                 Listed {
                     id: "model-a".into(),
                     name: None,
+                    family: None,
                 },
                 Listed {
                     id: "model-b".into(),
                     name: None,
+                    family: None,
                 },
             ]
         );
@@ -514,12 +582,12 @@ mod tests {
 
     #[test]
     fn a_row_says_unknown_not_read_not_asked_or_what_was_heard_with_its_age() {
-        assert_eq!(json("qwen-code", None, 0)["state"], "unknown");
-        assert_eq!(json("opencode", None, 0)["state"], "not-read");
-        let unasked = json("kiro", None, 0);
+        assert_eq!(json("qwen-code", None, 0, Ids::Preview)["state"], "unknown");
+        assert_eq!(json("opencode", None, 0, Ids::Preview)["state"], "not-read");
+        let unasked = json("kiro", None, 0, Ids::Preview);
         assert_eq!(unasked["state"], "not-asked");
         assert_eq!(unasked["from"], "kiro-cli chat --list-models --format json");
-        assert_eq!(json("claude", None, 0)["from"], "zo models --json");
+        assert_eq!(json("claude", None, 0, Ids::Preview)["from"], "zo models --json");
 
         let heard = Snapshot {
             agent: "kiro".into(),
@@ -528,7 +596,7 @@ mod tests {
             read_at_ms: 1_000,
             took_ms: 420,
         };
-        let row = json("kiro", Some(&heard), 61_000);
+        let row = json("kiro", Some(&heard), 61_000, Ids::Preview);
         assert_eq!(row["state"], "listed");
         assert_eq!(row["ids"], serde_json::json!(["auto", "example-model"]));
         assert_eq!(row["default"], "auto");
@@ -536,6 +604,48 @@ mod tests {
         assert_eq!(row["ageMs"], 60_000);
         assert_eq!(row["from"], "kiro-cli chat --list-models --format json");
         assert_eq!(row["count"], 2);
+        assert!(row.get("allIds").is_none(), "a list that fits is shown whole");
+    }
+
+    /// The whole catalog's row carries a long list's first ids, how many
+    /// there are and its families; the row of that one agent carries them
+    /// all (t-124593 F1: devin's 1,302 ids were 64,624 bytes on every row).
+    #[test]
+    fn a_long_list_shows_its_first_ids_on_the_catalog_and_all_of_them_alone() {
+        let models: Vec<Listed> = (0..20)
+            .map(|at| {
+                let family = if at < 12 { "family-a" } else { "family-b" };
+                Listed {
+                    id: format!("{family}-{at}"),
+                    name: None,
+                    family: Some(family.into()),
+                }
+            })
+            .collect();
+        let heard = Snapshot {
+            agent: "devin".into(),
+            asked: "devin models list --format json".into(),
+            answer: Answer::Listed {
+                models,
+                default: None,
+            },
+            read_at_ms: 0,
+            took_ms: 0,
+        };
+        let preview = json("devin", Some(&heard), 0, Ids::Preview);
+        assert_eq!(preview["count"], 20);
+        assert_eq!(preview["ids"].as_array().map(Vec::len), Some(PREVIEW_IDS));
+        assert_eq!(
+            preview["families"],
+            serde_json::json!([
+                {"name": "family-a", "count": 12},
+                {"name": "family-b", "count": 8}
+            ])
+        );
+        assert_eq!(preview["allIds"], "agent-list --agent devin");
+        let whole = json("devin", Some(&heard), 0, Ids::Whole);
+        assert_eq!(whole["ids"].as_array().map(Vec::len), Some(20));
+        assert!(whole.get("allIds").is_none());
     }
 
     /// devin groups its models by family, and opencode prints one a line
@@ -558,14 +668,17 @@ mod tests {
                     Listed {
                         id: "family-a-high".into(),
                         name: Some("Family A High".into()),
+                        family: Some("family-a".into()),
                     },
                     Listed {
                         id: "family-a-max".into(),
                         name: Some("Family A Max".into()),
+                        family: Some("family-a".into()),
                     },
                     Listed {
                         id: "family-b".into(),
                         name: None,
+                        family: Some("family-b".into()),
                     },
                 ],
                 default: None,
@@ -588,10 +701,12 @@ mod tests {
                 Listed {
                     id: "provider-a/model-a".into(),
                     name: None,
+                    family: None,
                 },
                 Listed {
                     id: "provider-b/model-b".into(),
                     name: None,
+                    family: None,
                 },
             ]
         );

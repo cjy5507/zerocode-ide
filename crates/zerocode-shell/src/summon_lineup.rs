@@ -607,6 +607,7 @@ pub(crate) fn models_of(agent: &str) -> Option<cli_models::Snapshot> {
                 .map(|model| cli_models::Listed {
                     id: model.id.clone(),
                     name: None,
+                    family: None,
                 })
                 .collect(),
             default: None,

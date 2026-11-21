@@ -609,13 +609,15 @@ pub enum ListShape {
     /// the list within each of those entries at `each`; and within each model
     /// the id the CLI's model flag takes at `id` ("" is the entry itself, a
     /// string) and the name it shows at `name`; the CLI's own default at
-    /// `default`, within the document.
+    /// `default`, within the document; and where a group names itself — a
+    /// family the CLI keeps its models in — at `family`, within each group.
     Json {
         list: &'static str,
         each: Option<&'static str>,
         id: &'static str,
         name: Option<&'static str>,
         default: Option<&'static str>,
+        family: Option<&'static str>,
     },
     /// Plain text, one id the CLI's model flag takes a line, blank lines
     /// aside.
