@@ -10226,6 +10226,7 @@ impl Ledger {
             worktree,
             worktree_title,
             inherit_checkout,
+            in_worktree,
             prompt,
             prompt_timeout_ms,
             // Filled by the verb, which is the road that DECIDED an agent;
@@ -15001,6 +15002,7 @@ impl Ledger {
             team: team.id.clone(),
             pane: pane.clone(),
             checkout,
+            in_worktree: worker.in_worktree,
             prompt,
             prompt_timeout_ms: READY_TIMEOUT_DEFAULT_MS,
             resumed,
@@ -21403,6 +21405,13 @@ pub struct PreparedWorkerStart {
     /// this reservation's rollback, if the tree is gone by then. `None` is
     /// every other summons, placed by `worktree`.
     pub inherit_checkout: Option<String>,
+    /// Whether the checkout the pane opens in is the ledger's own cut for
+    /// this worker (`Worker::in_worktree`): a fresh one, or the tree of the
+    /// attempt it inherits when that attempt's worker had one — an inherited
+    /// attempt's or a quota wall's handover. The window tells a CLI whose
+    /// trust menu one launch flag answers (devin) to skip it there and
+    /// nowhere else (t-124593 D1).
+    pub in_worktree: bool,
     /// The briefing to deliver after the agent's TUI is ready. It never rides
     /// argv: task text may be large or hostile, command lines are observable,
     /// and an early paste can answer a login or trust prompt instead of the
@@ -21447,6 +21456,7 @@ impl std::fmt::Debug for PreparedWorkerStart {
             .field("agent", &self.agent)
             .field("team", &self.team)
             .field("pane", &self.pane)
+            .field("in_worktree", &self.in_worktree)
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("prompt_timeout_ms", &self.prompt_timeout_ms)
             .field("had_prior_binding", &self.prior_binding.is_some())
@@ -21485,6 +21495,10 @@ pub struct PreparedWorkerReseat {
     pub team: String,
     pub pane: String,
     pub checkout: String,
+    /// Whether `checkout` is the ledger's own cut for this worker
+    /// (`Worker::in_worktree`) — what a restart's reseat and a restored pane
+    /// open in again. The window's trust flag rides only there (t-124593 D1).
+    pub in_worktree: bool,
     pub prompt: String,
     pub prompt_timeout_ms: u32,
     pub resumed: WorkerResume,
@@ -21503,6 +21517,7 @@ impl std::fmt::Debug for PreparedWorkerReseat {
             .field("team", &self.team)
             .field("pane", &self.pane)
             .field("checkout_bytes", &self.checkout.len())
+            .field("in_worktree", &self.in_worktree)
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("prompt_timeout_ms", &self.prompt_timeout_ms)
             .field("resumed", &self.resumed)

@@ -1554,6 +1554,9 @@ impl agent_teams::Host for TeamWindow {
             .as_ref()
             .map(|ask| ask.placement.clone())
             .unwrap_or(agent_teams::WorkerHostPlacement::Inherited);
+        // Kept for the trust flag below: the match takes the placement.
+        let placed = placement.clone();
+        let recorded_own = worker_host.as_ref().is_some_and(|ask| ask.in_worktree);
         let (isolated, root) = match placement {
             agent_teams::WorkerHostPlacement::Inherited => (None, seated),
             agent_teams::WorkerHostPlacement::New(name) => {
@@ -1830,10 +1833,15 @@ impl agent_teams::Host for TeamWindow {
         }
         // A CLI whose trust menu is answered by a one-launch flag rather than
         // an artifact (devin, t-124593) is told that flag here, and only for
-        // the checkout this very split cut from the person's repository
-        // (`--worktree`, `--bare` too): never a person's pane, never another
-        // folder, never an inherited or reopened tree.
-        args.extend(trust_flag_words(caps, isolated.is_some()));
+        // a checkout the ledger cut for this worker — the one this split just
+        // cut (`--worktree`, `--bare` too), or one the ledger records as the
+        // worker's own (an inherited attempt's, a handover's, a reseat's, a
+        // restored pane's): never a person's pane, the leader's checkout or a
+        // folder the ledger did not cut (t-124593 D1).
+        args.extend(trust_flag_words(
+            caps,
+            cut_by_the_ledger(&placed, isolated.is_some(), recorded_own),
+        ));
         // Codex workers get an optional, per-process app server only after the
         // final environment, account, worktree and trust decisions exist. A
         // capability or sidecar refusal leaves argv untouched and the proven
@@ -10346,18 +10354,34 @@ pub(super) fn write_agent_screenshot(
         .into_owned())
 }
 
+/// Whether the checkout a worker's pane opens in is one the ledger cut for
+/// that worker (t-124593 D1): a `New` placement's, when this split's cut
+/// stood; an `Existing` one the ledger records as the worker's own
+/// (`recorded_own`, `Worker::in_worktree`); never the leader's checkout.
+fn cut_by_the_ledger(
+    placement: &agent_teams::WorkerHostPlacement,
+    cut_now: bool,
+    recorded_own: bool,
+) -> bool {
+    match placement {
+        agent_teams::WorkerHostPlacement::New(_) => cut_now,
+        agent_teams::WorkerHostPlacement::Existing(_) => recorded_own,
+        agent_teams::WorkerHostPlacement::Inherited => false,
+    }
+}
+
 /// The words a summons adds so its CLI's first-run trust menu does not stand
 /// in front of the briefing (t-124593): the row's one-launch flag
-/// (`BlockedSignal::TrustFlag`), for the checkout the split itself just cut
-/// from the person's repository, and nowhere else. A CLI whose trust is an
-/// artifact gets the artifact instead (`agent_trust_presets`); a person's
-/// pane, another folder, an inherited or a reopened tree keep the CLI's own
+/// (`BlockedSignal::TrustFlag`), for a checkout the ledger cut for the worker
+/// (`cut_by_the_ledger`), and nowhere else. A CLI whose trust is an artifact
+/// gets the artifact instead (`agent_trust_presets`); a person's pane, the
+/// leader's checkout and a folder the ledger did not cut keep the CLI's own
 /// question.
 fn trust_flag_words(
     caps: Option<zerocode_core::capabilities::AgentCapabilities>,
-    cut_by_this_split: bool,
+    in_a_ledger_cut: bool,
 ) -> Vec<String> {
-    caps.filter(|_| cut_by_this_split)
+    caps.filter(|_| in_a_ledger_cut)
         .and_then(|caps| caps.trust_flag())
         .map_or_else(Vec::new, |words| {
             words.iter().map(|word| (*word).to_string()).collect()
@@ -10369,7 +10393,8 @@ fn trust_flag_words(
 #[cfg(test)]
 mod tests {
     use super::{
-        briefing_recorded, briefing_turn_reported, briefing_work_reported, trust_flag_words,
+        briefing_recorded, briefing_turn_reported, briefing_work_reported, cut_by_the_ledger,
+        trust_flag_words,
     };
     use zerocode_core::hook::HookState;
 
@@ -10544,12 +10569,90 @@ mod tests {
             .expect("the file has a test half")
             .0;
         let split = shipped
-            .split_once("args.extend(trust_flag_words(caps, isolated.is_some()));")
+            .split_once("cut_by_the_ledger(&placed, isolated.is_some(), recorded_own)")
             .expect("the split tells the CLI its trust flag")
             .1;
         assert!(
             split.contains("PtyLane::spawn("),
             "the trust flag is added after the pane is spawned"
+        );
+    }
+
+    /// The trust flag's checkout (t-124593 D1): the one this split cut, or
+    /// one the ledger records as the worker's own — an inherited attempt's, a
+    /// quota wall's handover, a reseat's, a restored pane's — and never the
+    /// leader's checkout or a folder the ledger did not cut.
+    #[test]
+    fn a_checkout_is_the_ledgers_cut_when_this_split_cut_it_or_the_ledger_records_it() {
+        use crate::agent_teams::WorkerHostPlacement::{Existing, Inherited, New};
+        let new = New("t-1-example".into());
+        let existing = Existing("/w/example".into());
+        assert!(cut_by_the_ledger(&new, true, false));
+        assert!(
+            !cut_by_the_ledger(&new, false, true),
+            "a cut that did not stand"
+        );
+        assert!(cut_by_the_ledger(&existing, false, true));
+        assert!(
+            !cut_by_the_ledger(&existing, false, false),
+            "a tree the ledger did not cut"
+        );
+        assert!(
+            !cut_by_the_ledger(&Inherited, true, true),
+            "the leader's own checkout"
+        );
+    }
+
+    /// The trust flag reaches a CLI's argv down one road — the worker's
+    /// split, for a checkout the ledger cut — and no other launch (t-124593
+    /// D1, the review's I3): a person's pane, a board's reopen, a restart's
+    /// nudge or a resume that added it fails here. Every shipped source of
+    /// the window is read, its line comments set aside.
+    #[test]
+    fn the_trust_flag_rides_no_launch_road_but_the_workers_split() {
+        fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("a source folder").flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                // A test-only file (`tests.rs`, `*_tests.rs`) ships nothing.
+                let test_only = name == "tests.rs" || name.ends_with("_tests.rs");
+                if path.is_dir() {
+                    rust_files(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") && !test_only {
+                    found.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        files.sort();
+        let mut roads = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).expect("a source");
+            let shipped = text
+                .split_once("#[cfg(test)]")
+                .map_or(text.as_str(), |(head, _)| head);
+            let code: String = shipped
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let name = path.strip_prefix(&src).unwrap_or(&path).display().to_string();
+            for spelled in [".trust_flag()", "trust_flag_words(", "--respect-workspace-trust"] {
+                let count = code.matches(spelled).count();
+                if count > 0 {
+                    roads.push(format!("{name}: {spelled} × {count}"));
+                }
+            }
+        }
+        assert_eq!(
+            roads,
+            [
+                "agent_tools_runtime.rs: .trust_flag() × 1",
+                "agent_tools_runtime.rs: trust_flag_words( × 2",
+            ],
+            "the trust flag found a launch road of its own"
         );
     }
 }

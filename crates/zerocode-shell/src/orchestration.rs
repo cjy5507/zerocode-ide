@@ -12559,6 +12559,7 @@ fn carried(
                         ),
                         (None, false) => crate::agent_teams::WorkerHostPlacement::Inherited,
                     },
+                    in_worktree: prepared.in_worktree,
                     prompt: prepared.prompt.clone(),
                     timeout_ms: prepared.prompt_timeout_ms,
                     resumed: None,
@@ -12572,6 +12573,7 @@ fn carried(
                             placement: crate::agent_teams::WorkerHostPlacement::Existing(
                                 prepared.checkout.clone(),
                             ),
+                            in_worktree: prepared.in_worktree,
                             prompt: prepared.prompt.clone(),
                             timeout_ms: prepared.prompt_timeout_ms,
                             resumed: Some(prepared.resumed),

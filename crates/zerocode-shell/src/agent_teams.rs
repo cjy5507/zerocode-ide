@@ -257,6 +257,12 @@ impl WorkerSeatWords {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkerHostSpec {
     pub(crate) placement: WorkerHostPlacement,
+    /// Whether the ledger records an `Existing` checkout as this worker's own
+    /// cut (`Worker::in_worktree`): an inherited attempt's tree, a quota
+    /// wall's handover, a reseat, a restored pane. Only there, and in the
+    /// checkout a `New` placement cuts, does the split tell a CLI the launch
+    /// flag that answers its trust menu (t-124593 D1).
+    pub(crate) in_worktree: bool,
     pub(crate) prompt: String,
     pub(crate) timeout_ms: u32,
     /// The placement seat's question, for a fresh summons; a restart's

@@ -4571,6 +4571,20 @@ fn an_existing_checkout_is_not_cut_again_and_the_requested_tuning_survives() {
     assert_eq!(prepared.resumed, WorkerResume::Fresh);
     assert!(prepared.prompt.contains("git log"), "{}", prepared.prompt);
     assert!(prepared.prompt.contains(&task), "{}", prepared.prompt);
+    // Whether the checkout is the ledger's own cut rides the reseat, as the
+    // ledger records it (t-124593 D1): this worker's was not, and one whose
+    // was is told so.
+    assert!(!prepared.in_worktree);
+    let at = ledger.locate(&worker).expect("the worker");
+    ledger.runs[at.0].workers[at.1].in_worktree = true;
+    let own = ledger
+        .prepare_worker_reseat(&run, &worker, &mut team, "%1", &Resuming, "unused-nudge")
+        .expect("a reseat in the ledger's cut");
+    assert!(
+        own.prepared_worker_reseat
+            .as_ref()
+            .is_some_and(|prepared| prepared.in_worktree)
+    );
 }
 
 /// A sleeping attempt has to cross the durable projection that the restart
@@ -15366,6 +15380,41 @@ impl Launcher for Checkouts {
     }
 }
 
+/// The trust flag's fact (t-124593 D1): a fresh `--worktree` summons is in
+/// the ledger's own cut, and so is the replacement that inherits that
+/// attempt's tree — a quota wall's handover is one.
+#[test]
+fn a_replacement_inherits_the_ledgers_own_cut_from_an_attempt_in_one() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name own-cut");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (first, pane) = bench.seat(&format!("worker-start --agent codex --task {task} --worktree"));
+    assert!(
+        bench.ledger.runs()[0]
+            .worker(&first)
+            .is_some_and(|held| held.in_worktree)
+    );
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/cut"));
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&first)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the attempt");
+    bench.json(&format!("worker-stop --worker {first} --reason quota-wall"));
+    let seated = bench.run(&format!(
+        "worker-start --agent claude --task {task} --retry-of {dispatch} --inherit-checkout"
+    ));
+    assert_eq!(seated.reply.exit_code, 0, "{}", seated.reply.stderr);
+    let prepared = seated
+        .prepared_worker_start
+        .as_ref()
+        .expect("a reservation");
+    assert_eq!(prepared.inherit_checkout.as_deref(), Some("/wt/cut"));
+    assert!(prepared.in_worktree, "the inherited tree is the ledger's own cut");
+}
+
 /// `--inherit-checkout` seats the replacement in the ENDED attempt's
 /// own checkout: it needs the `--retry-of` link, refuses a second
 /// placement word, refuses a checkout nobody reported or one the window
@@ -15475,6 +15524,9 @@ fn inherit_checkout_seats_the_replacement_in_the_ended_attempts_checkout() {
     assert_eq!(prepared.inherit_checkout.as_deref(), Some("/wt/first"));
     assert!(!prepared.worktree);
     assert_eq!(prepared.agent, "claude");
+    // The attempt sat in the leader's checkout, not a cut the ledger made:
+    // the trust flag does not ride its replacement (t-124593 D1).
+    assert!(!prepared.in_worktree);
     // An attempt whose worker reported no checkout has nothing to inherit.
     let other = bench.json("task-create --spec test-it")["taskId"]
         .as_str()
