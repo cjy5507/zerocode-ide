@@ -1,5 +1,4 @@
 use super::*;
-use crate::vault::Format;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
