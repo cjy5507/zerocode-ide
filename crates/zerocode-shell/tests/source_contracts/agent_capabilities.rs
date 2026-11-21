@@ -171,18 +171,42 @@ fn the_model_roads_branch_on_no_agents_name() {
         ),
     ];
     let roads = [
-        ("tuning_of", block_after(&core_orchestration, "fn tuning_of(")),
-        ("launch_tuning", block_after(&core_orchestration, "fn launch_tuning(")),
-        ("takes_effort", block_after(&core_orchestration, "pub fn takes_effort(")),
-        ("ladder_efforts", block_after(&core_orchestration, "pub fn ladder_efforts(")),
-        ("carries_model", block_after(&core_orchestration, "fn carries_model(")),
-        ("agent_row", block_after(&core_orchestration, "fn agent_row(")),
-        ("agent_lineup", block_after(&slash_catalog, "pub fn agent_lineup(")),
+        (
+            "tuning_of",
+            block_after(&core_orchestration, "fn tuning_of("),
+        ),
+        (
+            "launch_tuning",
+            block_after(&core_orchestration, "fn launch_tuning("),
+        ),
+        (
+            "takes_effort",
+            block_after(&core_orchestration, "pub fn takes_effort("),
+        ),
+        (
+            "ladder_efforts",
+            block_after(&core_orchestration, "pub fn ladder_efforts("),
+        ),
+        (
+            "carries_model",
+            block_after(&core_orchestration, "fn carries_model("),
+        ),
+        (
+            "agent_row",
+            block_after(&core_orchestration, "fn agent_row("),
+        ),
+        (
+            "agent_lineup",
+            block_after(&slash_catalog, "pub fn agent_lineup("),
+        ),
         (
             "agent_models_from",
             block_after(&slash_catalog, "fn agent_models_from("),
         ),
-        ("trust_flag_words", block_after(&backend, "fn trust_flag_words(")),
+        (
+            "trust_flag_words",
+            block_after(&backend, "fn trust_flag_words("),
+        ),
     ];
     for (road, text) in whole
         .iter()

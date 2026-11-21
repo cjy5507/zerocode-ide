@@ -524,7 +524,10 @@ pub(crate) fn models_of(agent: &str) -> Option<cli_models::Snapshot> {
     let lineup = lineups.get(agent)?;
     Some(cli_models::Snapshot {
         agent: agent.to_string(),
-        asked: cli_models::said_as(cli_models::ZO_CATALOG_PROGRAM, &cli_models::ZO_CATALOG_WORDS),
+        asked: cli_models::said_as(
+            cli_models::ZO_CATALOG_PROGRAM,
+            &cli_models::ZO_CATALOG_WORDS,
+        ),
         answer: cli_models::Answer::Listed {
             models: lineup
                 .models
@@ -612,7 +615,10 @@ mod tests {
             assert!(agents.contains(&listed), "{listed} reads no lineup");
         }
         for unknown in ["qwen-code", "cursor", "opencode"] {
-            assert!(!agents.contains(&unknown), "{unknown} reads a lineup from nowhere");
+            assert!(
+                !agents.contains(&unknown),
+                "{unknown} reads a lineup from nowhere"
+            );
         }
         assert!(lineups_of(|_| None).is_empty(), "no catalog, no lineup");
     }

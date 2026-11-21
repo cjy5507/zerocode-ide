@@ -7655,7 +7655,10 @@ fn a_cli_launched_through_a_subcommand_is_spawned_as_its_words() {
         );
         let launched: Vec<&str> = spec.launch.split_whitespace().collect();
         assert_eq!(
-            argv.iter().take(launched.len()).map(String::as_str).collect::<Vec<_>>(),
+            argv.iter()
+                .take(launched.len())
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             launched,
             "{}: the launch reached the pane as {argv:?}",
             spec.id

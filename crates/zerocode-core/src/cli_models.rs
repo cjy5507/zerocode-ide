@@ -525,7 +525,11 @@ mod tests {
         };
         let folder = std::path::Path::new(&folder);
         assert!(folder.is_dir(), "{} is not a folder", folder.display());
-        for pair in bins.split(',').map(str::trim).filter(|pair| !pair.is_empty()) {
+        for pair in bins
+            .split(',')
+            .map(str::trim)
+            .filter(|pair| !pair.is_empty())
+        {
             let (agent, path) = pair
                 .split_once('=')
                 .unwrap_or_else(|| panic!("{pair}: expected agent=/path"));

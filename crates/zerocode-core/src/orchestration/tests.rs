@@ -13361,7 +13361,11 @@ fn a_cli_whose_help_names_a_model_flag_is_summoned_on_the_model_it_is_given() {
         let planned = bench.run(&format!(
             "worker-start --agent {agent} --model example-model"
         ));
-        assert_eq!(planned.reply.exit_code, 0, "{agent}: {}", planned.reply.stderr);
+        assert_eq!(
+            planned.reply.exit_code, 0,
+            "{agent}: {}",
+            planned.reply.stderr
+        );
         let Effect::Split { ref command, .. } = planned.effect else {
             panic!("{agent}: no split: {:?}", planned.effect);
         };
@@ -13538,7 +13542,10 @@ fn the_catalog_says_the_models_each_installed_cli_listed_and_when() {
 
     let devin = &row_for(&said, "devin")["models"];
     assert_eq!(devin["state"], "unread");
-    assert!(devin.get("ids").is_none(), "an unread answer listed ids: {devin}");
+    assert!(
+        devin.get("ids").is_none(),
+        "an unread answer listed ids: {devin}"
+    );
 
     assert_eq!(row_for(&said, "grok")["models"]["state"], "not-asked");
     assert_eq!(row_for(&said, "qwen-code")["models"]["state"], "unknown");
@@ -13585,8 +13592,14 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
     };
     let example = chosen("example-model");
     assert!(example.contains(&"devin".to_string()), "{example:?}");
-    assert!(!example.contains(&"kiro".to_string()), "an old list said yes: {example:?}");
-    assert!(!example.contains(&"grok".to_string()), "an unread list said yes: {example:?}");
+    assert!(
+        !example.contains(&"kiro".to_string()),
+        "an old list said yes: {example:?}"
+    );
+    assert!(
+        !example.contains(&"grok".to_string()),
+        "an unread list said yes: {example:?}"
+    );
     assert!(example.contains(&"antigravity".to_string()), "{example:?}");
     let other = chosen("another-model");
     assert!(!other.contains(&"devin".to_string()), "{other:?}");

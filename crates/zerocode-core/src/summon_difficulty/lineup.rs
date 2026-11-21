@@ -306,11 +306,7 @@ impl Lineup {
         Self::from_rows_in(catalog, "models", wanted)
     }
 
-    fn from_rows_in(
-        catalog: &Value,
-        key: &str,
-        wanted: impl Fn(&Value) -> bool,
-    ) -> Option<Self> {
+    fn from_rows_in(catalog: &Value, key: &str, wanted: impl Fn(&Value) -> bool) -> Option<Self> {
         let models: Vec<LiveModel> = catalog
             .get(key)?
             .as_array()?
@@ -1718,7 +1714,9 @@ mod tests {
                 crate::capabilities::ModelSource::ZoCatalog(provider) => {
                     Lineup::from_catalog(&catalog, provider)
                 }
-                crate::capabilities::ModelSource::ZoCatalogAll => Lineup::from_catalog_all(&catalog),
+                crate::capabilities::ModelSource::ZoCatalogAll => {
+                    Lineup::from_catalog_all(&catalog)
+                }
                 _ => None,
             };
             let rows = rows(&Value::Null, spec.id, lineup.as_ref(), None, NOW).unwrap();

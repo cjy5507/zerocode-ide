@@ -245,7 +245,9 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         }
         if handshake
             && ready_at.is_none()
-            && lane.last_output_at().is_some_and(|at| at.elapsed() >= QUIET)
+            && lane
+                .last_output_at()
+                .is_some_and(|at| at.elapsed() >= QUIET)
         {
             first(&mut facts, "quietReadyMs");
             facts.insert(
@@ -264,7 +266,9 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         if fallback {
             facts.insert("pastedWithoutQuietReady".into(), serde_json::json!(true));
         }
-        if let (Some(line), true, false) = (prompt.as_deref(), ready_at.is_some() || fallback, pasted) {
+        if let (Some(line), true, false) =
+            (prompt.as_deref(), ready_at.is_some() || fallback, pasted)
+        {
             let words = format!("\x1b[200~{line}\x1b[201~");
             lane.write_input(words.as_bytes()).expect("the paste");
             std::thread::sleep(Duration::from_millis(150));
