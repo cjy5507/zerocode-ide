@@ -41315,7 +41315,9 @@ fn worker_open_shim_rides_only_worker_pane_path_and_mirror_on_macos() {
     );
 
     let teams = include_str!("../../src/agent_teams.rs");
-    let (teams_shipped, _) = teams.split_once("#[cfg(test)]").unwrap_or((teams, ""));
+    let (teams_shipped, _) = teams
+        .split_once("#[cfg(test)]\nmod tests")
+        .unwrap_or((teams, ""));
     let leader = support::block_after(teams_shipped, "pub fn open_team(");
     assert!(
         !leader.contains("worker_open") && !leader.contains("worker_shim_dir"),
