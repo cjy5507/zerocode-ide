@@ -410,9 +410,9 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         if nth > 1 {
             let waited = Instant::now();
             while waited.elapsed() < QUIET_FALLBACK
-                && !lane
+                && lane
                     .last_output_at()
-                    .is_some_and(|last| last.elapsed() >= QUIET)
+                    .is_none_or(|last| last.elapsed() < QUIET)
             {
                 lane.pump();
                 events.extend(heard.try_iter());
