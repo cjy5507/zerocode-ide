@@ -566,10 +566,9 @@ fn ask_own_list(agent: &str, now_ms: i64) -> Option<cli_models::Snapshot> {
     let program = zerocode_core::agent::agent_spec(agent)?
         .detect_names()
         .find_map(|name| zerocode_core::agent::resolve_on_path(path.as_deref(), name))?;
-    let mut command = crate::proc::quiet_command(&program);
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
+    // The launch PATH rides through the window's one door for a child given a
+    // PATH of its own, which spawns without forking the window (t-47141).
+    let command = crate::proc::quiet_command_on_path(&program, path.as_deref());
     Some(cli_models::ask(
         command,
         agent,
