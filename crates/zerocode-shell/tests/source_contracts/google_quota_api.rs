@@ -233,10 +233,22 @@ fn the_orchestration_beat_and_its_ask_table_name_no_antigravity_gauge() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core = std::fs::read_to_string(root.join("../zerocode-core/src/orchestration.rs"))
         .expect("the core orchestration source");
-    let quota = between(&core, "const QUOTA_GAUGE: &[(&str, &str)] = &[", "];");
+    // The coordinator's quota is the agent row's own value (t-124593 moved
+    // the table onto the rows): Antigravity's names no gauge, whatever model
+    // it runs.
+    let agy = zerocode_core::agent::agent_spec("antigravity").expect("the Antigravity row");
+    assert_eq!(
+        agy.harness.quota,
+        zerocode_core::capabilities::QuotaGauge::None,
+        "the coordinator's quota reads the Antigravity gauge"
+    );
+    assert_eq!(
+        zerocode_core::orchestration::quota_gauge_for("antigravity", Some("gemini-example-model")),
+        None
+    );
     assert!(
-        !quota.contains("antigravity"),
-        "the coordinator's quota table reads the Antigravity gauge:\n{quota}"
+        !core.contains("const QUOTA_GAUGE"),
+        "a second table of gauges by agent stands beside the rows"
     );
 
     let usage = std::fs::read_to_string(root.join("src/cmd/usage.rs")).expect("the usage commands");

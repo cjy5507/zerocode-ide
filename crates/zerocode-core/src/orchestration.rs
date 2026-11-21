@@ -17062,28 +17062,16 @@ pub const QUOTA_POLICY: QuotaPolicy = QuotaPolicy {
     handover_max: 2,
 };
 
-/// Which usage gauge each agent draws on, for the agents whose gauge is a
-/// fact about the agent alone.
-///
-/// The gauge names are the window's own (`usage_runtime::*_usage_cache`), and
-/// an agent absent here has no gauge this window reads — which answers as
-/// "unknown", never as 0%. `zo` is absent on purpose: its quota is its
-/// MODEL's, see [`ZO_MODEL_GAUGE`]. `antigravity` is absent on purpose too:
-/// its gauge is read for the status bar alone (the person's consent of
-/// 2026-10-19, t-62187), so an agy worker's quota stays unknown to the beat.
-const QUOTA_GAUGE: &[(&str, &str)] = &[
-    ("claude", "claude"),
-    ("codex", "codex"),
-    ("opencode", "opencode"),
-    ("kimi", "kimi"),
-    ("grok", "grok"),
-];
-
-/// `zo` runs on whichever provider its model belongs to — Anthropic through
-/// the Claude Code login, OpenAI through the ChatGPT one — so its gauge is
-/// named by the model id's family prefix, and a family with no gauge here
-/// (Gemini) says so with `None` rather than borrowing a neighbour's number.
-const ZO_MODEL_GAUGE: &[(&str, Option<&str>)] = &[
+/// The gauge each model family's provider draws on, keyed by the model id's
+/// family prefix — no agent in it: an agent's own gauge is its row's
+/// ([`crate::capabilities::QuotaGauge`], the review's I1, t-124593). A row
+/// whose gauge is its model's (zo runs Anthropic's models through the Claude
+/// login and OpenAI's through ChatGPT's) reads it here, and a family with no
+/// gauge here (Gemini) says so with `None` rather than borrowing a
+/// neighbour's number. antigravity's gauge is read for the status bar alone
+/// (the person's consent of 2026-10-19, t-62187), so its row names none and
+/// an agy worker's quota stays unknown to the beat.
+const MODEL_FAMILY_GAUGE: &[(&str, Option<&str>)] = &[
     ("claude", Some("claude")),
     ("fable", Some("claude")),
     ("opus", Some("claude")),
@@ -17097,12 +17085,12 @@ const ZO_MODEL_GAUGE: &[(&str, Option<&str>)] = &[
 ];
 
 /// The gauge the provider of `model`'s family draws on, as
-/// [`ZO_MODEL_GAUGE`] names it: `Some(Some(gauge))` for a family the table
+/// [`MODEL_FAMILY_GAUGE`] names it: `Some(Some(gauge))` for a family the table
 /// gives a provider, `Some(None)` for one it knows has no gauge here
 /// (Gemini), and `None` for a family nobody wrote down.
 fn family_gauge(model: &str) -> Option<Option<&'static str>> {
     let family = model.to_ascii_lowercase();
-    ZO_MODEL_GAUGE
+    MODEL_FAMILY_GAUGE
         .iter()
         .find(|(prefix, _)| family.starts_with(prefix))
         .map(|(_, gauge)| *gauge)
@@ -17114,8 +17102,8 @@ fn family_gauge(model: &str) -> Option<Option<&'static str>> {
 /// The agent has to take a model at launch at all (its row's tuning: a summons
 /// that pins one on any other agent is refused before a row is written), and
 /// the model's family has to name the provider whose gauge the agent draws
-/// on (`ZO_MODEL_GAUGE` beside `QUOTA_GAUGE`; `zo` draws on its model's,
-/// so it carries every family the table names). A family the table gives no
+/// on (`MODEL_FAMILY_GAUGE` beside the row's own gauge; a row whose gauge is
+/// its model's carries every family the table names). A family the table gives no
 /// provider filters nothing: the model id stays opaque, and a filter that
 /// guessed would take a real answer out of the choice.
 ///
@@ -17170,23 +17158,22 @@ fn carries_model(launcher: &dyn Launcher, agent: &str, model: &str, now_ms: i64)
 #[must_use]
 pub fn native_agent(model: &str) -> Option<&'static str> {
     let gauge = family_gauge(model).flatten()?;
-    QUOTA_GAUGE
+    crate::agent::AGENT_SPECS
         .iter()
-        .find(|(_, held)| *held == gauge)
-        .map(|(agent, _)| *agent)
+        .find(|spec| spec.harness.quota == crate::capabilities::QuotaGauge::Own(gauge))
+        .map(|spec| spec.id)
 }
 
 /// The gauge `agent` — launched with `model` — draws on, or `None` when this
 /// window reads no gauge for it.
 #[must_use]
 pub fn quota_gauge_for(agent: &str, model: Option<&str>) -> Option<&'static str> {
-    if agent == "zo" {
-        return family_gauge(model?).flatten();
+    use crate::capabilities::QuotaGauge;
+    match crate::agent::agent_spec(agent)?.harness.quota {
+        QuotaGauge::Own(gauge) => Some(gauge),
+        QuotaGauge::ModelFamily => family_gauge(model?).flatten(),
+        QuotaGauge::None => None,
     }
-    QUOTA_GAUGE
-        .iter()
-        .find(|(id, _)| *id == agent)
-        .map(|(_, gauge)| *gauge)
 }
 
 /// The agent's OWN words about its quota wall, as the window found them — one

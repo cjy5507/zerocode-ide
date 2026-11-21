@@ -163,6 +163,20 @@ fn the_model_roads_branch_on_no_agents_name() {
     let core_orchestration = strip_rust_comments(&core_source("orchestration.rs"));
     let slash_catalog = shipped_code(&shell_source("slash_catalog.rs"));
     let backend = shipped_code(shipped_backend());
+    // The neighbours on the same road (the review's I2, t-124593): the
+    // family rule, the gauge, the auto summons' choice, the catalog's launch
+    // line, the settings' summon row and a CLI's own lineup. The window's
+    // orchestration file is read whole (a test-only item stands near its
+    // top), comments set aside.
+    let core_lineup = shipped_code(&core_source("summon_difficulty/lineup.rs"));
+    let shell_orchestration = strip_rust_comments(&shell_source("orchestration.rs"));
+    let catalog = &shell_orchestration[shell_orchestration
+        .find("impl Launcher for Catalog")
+        .expect("the catalog's launcher")..];
+    let settings = shipped_code(&shell_source("typesafe_settings.rs"));
+    let summon_agent = &settings[settings
+        .find("impl SummonAgent {")
+        .expect("the settings' summon row")..];
     let whole = [
         ("cli_models.rs", shipped_code(&core_source("cli_models.rs"))),
         (
@@ -207,6 +221,31 @@ fn the_model_roads_branch_on_no_agents_name() {
             "trust_flag_words",
             block_after(&backend, "fn trust_flag_words("),
         ),
+        (
+            "runs_model",
+            block_after(&core_orchestration, "pub fn runs_model("),
+        ),
+        (
+            "quota_gauge_for",
+            block_after(&core_orchestration, "pub fn quota_gauge_for("),
+        ),
+        (
+            "native_agent",
+            block_after(&core_orchestration, "pub fn native_agent("),
+        ),
+        (
+            "summonable",
+            block_after(&core_orchestration, "pub fn summonable("),
+        ),
+        (
+            "Lineup::from_listed",
+            block_after(&core_lineup, "pub fn from_listed("),
+        ),
+        (
+            "Catalog::command_for",
+            block_after(catalog, "fn command_for("),
+        ),
+        ("SummonAgent::of", block_after(summon_agent, "fn of(")),
     ];
     for (road, text) in whole
         .iter()

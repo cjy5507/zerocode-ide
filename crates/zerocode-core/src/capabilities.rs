@@ -512,6 +512,8 @@ pub struct Harness {
     pub tuning: Option<LaunchTuning>,
     /// Where the models it can run are learned ([`ModelSource`]).
     pub models: ModelSource,
+    /// Which usage gauge it draws on ([`QuotaGauge`]).
+    pub quota: QuotaGauge,
 }
 
 /// How a launch-time reasoning-effort word rides an agent's command line.
@@ -544,6 +546,24 @@ pub struct LaunchTuning {
     /// its own is offered at in the model seat's pair question; never one a
     /// summons runs at by default (t-74181). Empty without a ride.
     pub efforts: &'static [&'static str],
+}
+
+/// Which usage gauge an agent draws on — the window's own gauge names
+/// (`usage_runtime::*_usage_cache`) — one value per row, so the quota beat,
+/// the family rule of a pinned model (t-6342) and the model's own vendor CLI
+/// are all read off the row, never a table opened by the agent's id
+/// (the review's I1, t-124593).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuotaGauge {
+    /// No gauge this window reads for it — "unknown", never 0%.
+    None,
+    /// A gauge that is a fact about the agent alone.
+    Own(&'static str),
+    /// The gauge of the provider its model belongs to (zo runs Anthropic's
+    /// models through the Claude login and OpenAI's through ChatGPT's), as
+    /// the model id's family names it.
+    ModelFamily,
 }
 
 /// Where the models an agent can run are learned (t-124593) — one value per
@@ -646,6 +666,7 @@ impl Harness {
         one_shot: None,
         tuning: None,
         models: ModelSource::Unknown,
+        quota: QuotaGauge::None,
     };
 }
 

@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::capabilities::{
     AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
     CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, EffortRide, Harness, IdShape, LaunchTuning,
-    ListRoad, ListShape, ModelSource, MoveRoad, OneShotRoad, PointerRoute, SignInLog, SpawnRoad,
+    ListRoad, ListShape, ModelSource, MoveRoad, OneShotRoad, PointerRoute, QuotaGauge, SignInLog,
+    SpawnRoad,
     StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark, ZO_EFFORT_LADDER,
     ZO_RESUME_SELECTORS,
 };
@@ -641,6 +642,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 efforts: crate::capabilities::ZO_EFFORT_LEVELS,
             }),
             models: ModelSource::ZoCatalogAll,
+            quota: QuotaGauge::ModelFamily,
             ..Harness::PLAIN
         },
     },
@@ -772,6 +774,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 efforts: CLAUDE_EFFORT_LADDER,
             }),
             models: ModelSource::ZoCatalog("claude"),
+            quota: QuotaGauge::Own("claude"),
             ..Harness::PLAIN
         },
     },
@@ -856,6 +859,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 efforts: CODEX_EFFORT_LADDER,
             }),
             models: ModelSource::ZoCatalog("openai"),
+            quota: QuotaGauge::Own("codex"),
             ..Harness::PLAIN
         },
     },
@@ -1024,6 +1028,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 words: &["models"],
                 shape: ListShape::Lines,
             }),
+            quota: QuotaGauge::Own("opencode"),
             ..Harness::PLAIN
         },
     },
@@ -1569,6 +1574,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // zo's catalog lists its models through zo's kimi login, the rows
             // the composer's model menu shows a kimi pane.
             models: ModelSource::ZoOtherLogin("kimi"),
+            quota: QuotaGauge::Own("kimi"),
             ..Harness::PLAIN
         },
     },
@@ -1777,6 +1783,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 efforts: &[],
             }),
             models: ModelSource::ZoOtherLogin("xai"),
+            quota: QuotaGauge::Own("grok"),
             ..Harness::PLAIN
         },
     },
