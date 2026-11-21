@@ -27766,6 +27766,18 @@ impl TwoPicks {
             at,
         )
         .expect("the first pick");
+        // The pane the first pick moved reports its conversation, as the
+        // resumed CLI's hook does in the window — what a later move of it
+        // reads (t-124254).
+        let moved = term_now(&stood.worker);
+        stood
+            .host
+            .in_conversation(moved, SWITCH_SESSION, &stood.transcript);
+        super::pane_session_reported(
+            moved,
+            &stood.host.provider_session(moved).expect("a session"),
+            at + 1_000,
+        );
         let second = crate::account_switch::switch_by_person(
             &stood.host,
             &stood.world,
