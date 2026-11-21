@@ -205,6 +205,27 @@ pub enum Format {
     Unread,
 }
 
+/// How long a CLI that writes its session once a turn has ended takes to
+/// write it — the wait before the page reads that turn again (t-124593):
+/// Devin wrote its ATIF document 29 and 34 ms after its two `Stop`s
+/// (measured 2026-11-21), and this is ten times the longer, still short of
+/// what a person reads as a delay.
+pub const TURN_WRITE_SETTLE: std::time::Duration = std::time::Duration::from_millis(340);
+
+/// How long after a turn of `slug` ends its store settles
+/// ([`Format::settles_after_turn`]) — the longest of its readable store
+/// rows, asked of the rows and never of the agent's name; `None` when every
+/// one is written as the turn goes. A turn's first write has no file to bind
+/// yet, so this asks the agent's store rows rather than a bound file.
+#[must_use]
+pub fn turn_write_settle(slug: &str) -> Option<std::time::Duration> {
+    AGENT_SOURCES
+        .iter()
+        .filter(|row| row.slug == slug && row.format.readable())
+        .filter_map(|row| row.format.settles_after_turn())
+        .max()
+}
+
 /// Where a session's id shows in its file, so a file can be matched to its
 /// session without reading a conversation (herdr 4, t-26597).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +271,17 @@ impl Format {
     /// ([`crate::transcript::document_read`]).
     pub const fn written_whole(self) -> bool {
         matches!(self, Self::AtifDocument)
+    }
+
+    /// How long after a turn's end its CLI finishes writing a session in this
+    /// shape, when it writes it once the turn has ended rather than as the
+    /// turn goes ([`TURN_WRITE_SETTLE`]); `None` for a shape written as the
+    /// turn goes.
+    pub const fn settles_after_turn(self) -> Option<std::time::Duration> {
+        match self {
+            Self::AtifDocument => Some(TURN_WRITE_SETTLE),
+            _ => None,
+        }
     }
 
     /// Whether the session list reads a card out of this shape's head
@@ -4017,6 +4049,11 @@ mod tests {
         assert_eq!(devin_issue.count, 1);
         assert!(Format::AtifDocument.readable() && Format::AtifDocument.written_whole());
         assert!(!Format::AtifDocument.carded() && !Format::Unread.carded());
+        assert_eq!(
+            Format::AtifDocument.settles_after_turn(),
+            Some(TURN_WRITE_SETTLE)
+        );
+        assert_eq!(turn_write_settle("devin"), Some(TURN_WRITE_SETTLE));
         for format in [
             Format::ClaudeLines,
             Format::CodexRollout,
@@ -4024,6 +4061,7 @@ mod tests {
             Format::ZoLines,
         ] {
             assert!(format.carded() && !format.written_whole(), "{format:?}");
+            assert_eq!(format.settles_after_turn(), None, "{format:?}");
         }
     }
 

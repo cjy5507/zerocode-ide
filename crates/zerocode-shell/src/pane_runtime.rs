@@ -1738,6 +1738,21 @@ pub(super) fn note_pane_state(
     // A worker's own question goes to its coordinator, and the page is shown
     // the pane at work rather than a question for the person (t-82296).
     let shown = crate::worker_question::heard(report, worktree, epoch_ms_now());
+    // A CLI that writes its session once a turn has ended (Devin's ATIF
+    // document, 29–34 ms after its Stop — t-124593) has not written this turn
+    // when the page reads at this event: the page hears the same news once
+    // more after its store has settled, and reads the turn then. A repeated
+    // state is news without a move to the page (`hook:agent`), so it asks
+    // nothing else again. Asked of the agent's store rows, never its name.
+    if report.state == zerocode_core::hook::HookState::Done
+        && let Some(settle) = zerocode_core::vault::turn_write_settle(report.agent.slug())
+    {
+        let app = app.clone();
+        let again = shown.clone();
+        tell_again_after(settle, move || {
+            let _ = app.emit("hook:agent", again);
+        });
+    }
     let _ = app.emit("hook:agent", shown);
     if report.state == zerocode_core::hook::HookState::Done
         && let Some(cleanup) = app
@@ -1747,6 +1762,16 @@ pub(super) fn note_pane_state(
     {
         schedule_completed_worker_cleanup(app, report.term, cleanup);
     }
+}
+
+/// Run `tell` once, `settle` from now, on a thread of its own — the second
+/// telling of a turn's end for a store that settles after it
+/// (`zerocode_core::vault::turn_write_settle`, t-124593).
+pub(crate) fn tell_again_after(settle: Duration, tell: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        std::thread::sleep(settle);
+        tell();
+    });
 }
 
 /// 소식의 무게만큼 뒤에 적는다 — 새 대화 id는 `last_status::PERSIST_DEBOUNCE`,

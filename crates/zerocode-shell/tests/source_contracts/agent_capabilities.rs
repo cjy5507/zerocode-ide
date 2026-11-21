@@ -292,6 +292,7 @@ fn the_document_road_branches_on_no_agents_name() {
         ("format_of", block_after(&core_binding, "pub fn format_of(")),
         ("written_whole", block_after(&core_vault, "pub const fn written_whole(")),
         ("carded", block_after(&core_vault, "pub const fn carded(")),
+        ("turn_write_settle", block_after(&core_vault, "pub fn turn_write_settle(")),
         ("document_log_within", block_after(&terminal, "fn document_log_within(")),
         ("steps_back", block_after(&terminal, "fn steps_back(")),
         ("the pane's shape", block_after(&binding, "pub(crate) fn written_whole(")),

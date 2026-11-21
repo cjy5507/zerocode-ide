@@ -34702,6 +34702,38 @@ fn a_long_session_document_folds_and_a_waiting_call_is_held_back() {
     assert_eq!(held.next, 101);
 }
 
+/// A CLI that writes its session once a turn has ended (Devin, 29–34 ms after
+/// its Stop) is read again once its store has settled: a turn written 50 ms
+/// after the Stop is in the conversation then, with no hook after it; a store
+/// that has written nothing by then passes without a word (t-124593).
+#[test]
+fn a_turn_written_after_its_stop_is_read_once_the_store_has_settled() {
+    use crate::cmd::terminal::{LogRead, document_log};
+    let settle = zerocode_core::vault::turn_write_settle("devin").expect("devin's store settles after a turn");
+    assert_eq!(zerocode_core::vault::turn_write_settle("claude"), None, "a store written as the turn goes");
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("example-session.json");
+    let (told, heard) = std::sync::mpsc::channel();
+    let at_stop = path.clone();
+    crate::pane_runtime::tell_again_after(settle, move || {
+        let _ = told.send(document_log(&at_stop, LogRead::Tail, false));
+    });
+    assert!(document_log(&path, LogRead::Tail, false).is_err(), "nothing is written at the Stop");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(&path, atif_document(1, &[])).expect("the CLI writes the turn");
+    let again = heard.recv_timeout(settle * 4).expect("the second read").expect("the document");
+    assert_eq!(
+        again.turns.iter().map(|one| one.turn.text.as_str()).collect::<Vec<_>>(),
+        ["example question 0", "example answer 0"]
+    );
+    let never = dir.path().join("example-never.json");
+    let (told, heard) = std::sync::mpsc::channel();
+    crate::pane_runtime::tell_again_after(settle, move || {
+        let _ = told.send(document_log(&never, LogRead::Tail, false).is_err());
+    });
+    assert!(heard.recv_timeout(settle * 4).expect("the second read"), "a store that wrote nothing says nothing");
+}
+
 /// A document read while its CLI wrote it is nothing new, the cursor where it
 /// was; one past the cap is said, never read.
 #[test]
