@@ -5,14 +5,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const OPEN_GUARD_ENV: &str = "ZEROCODE_OPEN_GUARD";
-const MIRROR_DIR_ENV: &str = "ZEROCODE_MIRROR_DIR";
+use zerocode_core::worker_open;
 
 struct FakeOpen {
     _dir: tempfile::TempDir,
+    bin_dir: PathBuf,
     bin: PathBuf,
     log: PathBuf,
-    mirror_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,17 +23,17 @@ struct RecordedCall {
 impl FakeOpen {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let bin = dir.path().join("fake-open");
+        let bin_dir = dir.path().join("fake-bin");
+        fs::create_dir_all(&bin_dir).expect("fake bin dir");
+        let bin = bin_dir.join(worker_open::SHIM_NAME);
         let log = dir.path().join("calls.log");
-        let mirror_dir = dir.path().join("mirror-dir");
-        fs::create_dir_all(&mirror_dir).expect("mirror dir");
 
         let script = format!(
             r#"#!/bin/sh
 log='{log}'
 {{
   printf 'CALL_BEGIN\n'
-  printf 'GUARD=%s\n' "${{{OPEN_GUARD_ENV}:-unset}}"
+  printf 'GUARD=%s\n' "${{{marker}:-unset}}"
   for arg in "$@"; do
     printf 'ARG=%s\n' "$arg"
   done
@@ -48,16 +47,17 @@ if [ -n "${{FAKE_OPEN_STDERR:-}}" ]; then
 fi
 exit "${{FAKE_OPEN_EXIT:-0}}"
 "#,
-            log = log.display()
+            log = log.display(),
+            marker = worker_open::MARKER,
         );
         fs::write(&bin, script).expect("write fake open");
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).expect("chmod fake open");
 
         Self {
             _dir: dir,
+            bin_dir,
             bin,
             log,
-            mirror_dir,
         }
     }
 
@@ -94,14 +94,9 @@ exit "${{FAKE_OPEN_EXIT:-0}}"
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_zerocode-mirror"));
         cmd.arg(&self.bin)
             .args(args)
-            .env_remove(zerocode_core::agent_teams::TEAM_ID_VAR)
-            .env_remove(zerocode_core::agent_teams::TEAM_PANE_VAR)
-            .env_remove(zerocode_core::agent_teams::TEAM_TOKEN_VAR)
-            .env_remove("ZEROCODE_AGENT_TEAM_TOKEN_FILE")
-            .env_remove("ZEROCODE_HOOK_PORT")
-            .env_remove("ZEROCODE_HOOK_TOKEN")
-            .env(OPEN_GUARD_ENV, "1")
-            .env(MIRROR_DIR_ENV, &self.mirror_dir);
+            .env_clear()
+            .env("PATH", "/bin")
+            .env(worker_open::MARKER, "1");
         cmd
     }
 
@@ -116,6 +111,35 @@ fn mirror_path() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_zerocode-mirror"))
 }
 
+fn install_worker_open_shim(dir: &Path, mirror: &Path, real_open: &Path) -> PathBuf {
+    let worker_dir = dir.join("worker-open");
+    fs::create_dir_all(&worker_dir).expect("worker-open dir");
+    let shim = worker_dir.join(worker_open::SHIM_NAME);
+    let body = worker_open::open_shim_script(mirror, real_open);
+    fs::write(&shim, body).expect("write open shim");
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod open shim");
+    worker_dir
+}
+
+/// Build a command with ONLY the 11 environment variables Codex forwards to
+/// stdio MCP servers after `env_clear()` (`codex-rs/rmcp-client/src/utils.rs`).
+fn codex_stripped_command(program: &str, path_value: &str, tmpdir: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_clear()
+        .env("HOME", "/Users/dev")
+        .env("LOGNAME", "dev")
+        .env("PATH", path_value)
+        .env("SHELL", "/bin/zsh")
+        .env("USER", "dev")
+        .env("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("TERM", "xterm-256color")
+        .env("TMPDIR", tmpdir)
+        .env("TZ", "UTC");
+    cmd
+}
+
 #[test]
 fn worker_open_adds_background_flag_and_hides_guard_env() {
     assert!(mirror_path().is_file());
@@ -128,6 +152,11 @@ fn worker_open_adds_background_flag_and_hides_guard_env() {
         out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(
+        out.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(
         fake.calls(),
         vec![RecordedCall {
@@ -138,67 +167,51 @@ fn worker_open_adds_background_flag_and_hides_guard_env() {
 }
 
 #[test]
-fn worker_open_skips_duplicate_url_ignoring_query_and_fragment() {
+fn worker_open_repeats_same_url_in_background_without_dedupe() {
     let fake = FakeOpen::new();
+    let mirror_dir = tempfile::tempdir().expect("mirror tempdir");
     let first = "https://auth.example.com/authorize?state=first&code=aaa#one";
     let second = "https://auth.example.com/authorize?state=second&code=bbb#two";
 
-    let out1 = fake.run_mirror(&[first]);
+    let out1 = fake
+        .mirror_command(&[first])
+        .env("ZEROCODE_MIRROR_DIR", mirror_dir.path())
+        .output()
+        .expect("run first open");
     assert!(out1.status.success());
+    assert!(out1.stderr.is_empty());
 
-    let out2 = fake.run_mirror(&[second]);
+    let out2 = fake
+        .mirror_command(&[second])
+        .env("ZEROCODE_MIRROR_DIR", mirror_dir.path())
+        .output()
+        .expect("run second open");
+    assert!(out2.status.success());
     assert!(
-        out2.status.success(),
-        "duplicate skip must exit 0, got {:?}: {}",
-        out2.status.code(),
+        out2.stderr.is_empty(),
+        "repeated web open must not be skipped or emit a skip notice: {}",
         String::from_utf8_lossy(&out2.stderr)
     );
     assert_eq!(
         fake.calls(),
-        vec![RecordedCall {
-            guard_env: "unset".to_string(),
-            args: vec!["-g".to_string(), first.to_string()],
-        }],
-        "second call with same scheme/host/path must not invoke real open"
-    );
-
-    let stderr = String::from_utf8_lossy(&out2.stderr);
-    let lines: Vec<&str> = stderr.lines().collect();
-    assert_eq!(
-        lines.len(),
-        1,
-        "skipped duplicate must write one stderr line: {stderr:?}"
-    );
-    assert!(
-        lines[0].contains("https://auth.example.com/authorize"),
-        "stderr line must name normalized url: {stderr:?}"
-    );
-    assert!(
-        !lines[0].contains("state=second") && !lines[0].contains("code=bbb"),
-        "stderr line must not leak query parameters: {stderr:?}"
-    );
-}
-
-#[test]
-fn worker_open_allows_distinct_path_and_host() {
-    let fake = FakeOpen::new();
-    let urls = [
-        "https://auth.example.com/one?x=1",
-        "https://auth.example.com/two?x=1",
-        "https://other.example.com/one?x=1",
-    ];
-    for url in urls {
-        let out = fake.run_mirror(&[url]);
-        assert!(out.status.success());
-    }
-    let recorded: Vec<Vec<String>> = fake.calls().into_iter().map(|call| call.args).collect();
-    assert_eq!(
-        recorded,
         vec![
-            vec!["-g".to_string(), urls[0].to_string()],
-            vec!["-g".to_string(), urls[1].to_string()],
-            vec!["-g".to_string(), urls[2].to_string()],
-        ]
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec!["-g".to_string(), first.to_string()],
+            },
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec!["-g".to_string(), second.to_string()],
+            },
+        ],
+        "every retry must still open in background so the latest PKCE tab works"
+    );
+    assert!(
+        fs::read_dir(mirror_dir.path())
+            .expect("read mirror dir")
+            .next()
+            .is_none(),
+        "worker_open must not create lock or state files in ZEROCODE_MIRROR_DIR"
     );
 }
 
@@ -236,215 +249,84 @@ fn worker_open_leaves_non_url_and_app_targeted_calls_unchanged() {
 }
 
 #[test]
-fn worker_open_keeps_existing_background_flag_and_dedupes_repeat() {
+fn worker_open_keeps_existing_background_flag_on_repeated_calls() {
     let fake = FakeOpen::new();
+    let mirror_dir = tempfile::tempdir().expect("mirror tempdir");
     let url1 = "https://auth.example.com/bg?try=1";
     let url2 = "https://auth.example.com/bg?try=2";
 
-    let out1 = fake.run_mirror(&["--background", url1]);
+    let out1 = fake
+        .mirror_command(&["--background", url1])
+        .env("ZEROCODE_MIRROR_DIR", mirror_dir.path())
+        .output()
+        .expect("run first bg open");
     assert!(out1.status.success());
-    let out2 = fake.run_mirror(&["--background", url2]);
+    assert!(out1.stderr.is_empty());
+
+    let out2 = fake
+        .mirror_command(&["--background", url2])
+        .env("ZEROCODE_MIRROR_DIR", mirror_dir.path())
+        .output()
+        .expect("run second bg open");
     assert!(out2.status.success());
+    assert!(
+        out2.stderr.is_empty(),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
 
     assert_eq!(
         fake.calls(),
-        vec![RecordedCall {
-            guard_env: "unset".to_string(),
-            args: vec!["--background".to_string(), url1.to_string()],
-        }]
+        vec![
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec!["--background".to_string(), url1.to_string()],
+            },
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec!["--background".to_string(), url2.to_string()],
+            },
+        ]
     );
-    assert_eq!(String::from_utf8_lossy(&out2.stderr).lines().count(), 1);
 }
 
 #[test]
-fn worker_open_burst_across_six_concurrent_processes_opens_once() {
-    let fake = FakeOpen::new();
-    let children: Vec<_> = (0..6)
-        .map(|nth| {
-            let url = format!("https://auth.example.com/burst?attempt={nth}");
-            fake.mirror_command(&[&url])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("spawn concurrent open")
-        })
-        .collect();
-
-    let mut skipped = 0usize;
-    for child in children {
-        let out = child.wait_with_output().expect("wait child");
-        assert!(
-            out.status.success(),
-            "child failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if !out.stderr.is_empty() {
-            assert_eq!(String::from_utf8_lossy(&out.stderr).lines().count(), 1);
-            skipped += 1;
-        }
-    }
-
-    assert_eq!(
-        fake.calls().len(),
-        1,
-        "exactly one process in the burst should call real open"
-    );
-    assert_eq!(skipped, 5, "the other five processes should report skip");
-}
-
-fn install_open_shim(dir: &Path, mirror: &Path, real_open: &Path) -> PathBuf {
-    let shims = dir.join("shims");
-    fs::create_dir_all(&shims).expect("shims dir");
-    let shim = shims.join(zerocode_core::worker_open::SHIM_NAME);
-    let body = zerocode_core::worker_open::open_shim_script(mirror, real_open);
-    fs::write(&shim, body).expect("write open shim");
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("chmod open shim");
-    shims
-}
-
-fn clean_open_command(program: impl AsRef<std::ffi::OsStr>, shims: &Path) -> Command {
-    let mut cmd = Command::new(program);
-    cmd.env("PATH", format!("{}:/bin", shims.display()))
-        .env_remove(zerocode_core::agent_teams::TEAM_ID_VAR)
-        .env_remove(zerocode_core::agent_teams::TEAM_PANE_VAR)
-        .env_remove(zerocode_core::agent_teams::TEAM_TOKEN_VAR)
-        .env_remove(zerocode_core::agent_teams::TEAM_TOKEN_FILE_VAR)
-        .env_remove(OPEN_GUARD_ENV)
-        .env_remove(MIRROR_DIR_ENV)
-        .env_remove("ZEROCODE_HOOK_PORT")
-        .env_remove("ZEROCODE_HOOK_TOKEN");
-    cmd
-}
-
-#[test]
-fn human_panes_bypass_mirror_and_pass_open_through_unchanged() {
+fn codex_stripped_env_opens_web_url_in_background_via_worker_shim() {
     let fake = FakeOpen::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let mirror_called = dir.path().join("mirror-was-called");
-    let poison_mirror = dir.path().join("poison-mirror");
-    let poison_body = format!(
-        "#!/bin/sh\nprintf 'called\\n' >> '{}'\nexit 99\n",
-        mirror_called.display()
+    let worker_dir = install_worker_open_shim(dir.path(), mirror_path(), &fake.bin);
+    let path_value = format!(
+        "{}:{}:/bin",
+        worker_dir.display(),
+        fake.bin_dir.display()
     );
-    fs::write(&poison_mirror, poison_body).expect("write poison mirror");
-    fs::set_permissions(&poison_mirror, fs::Permissions::from_mode(0o755))
-        .expect("chmod poison mirror");
-
-    let shims = install_open_shim(dir.path(), &poison_mirror, &fake.bin);
-    let token_file = dir.path().join("team-token");
-    fs::write(&token_file, "secret").expect("token file");
-    let url = "https://auth.example.com/authorize?state=human";
-
-    let scenarios: Vec<(&str, Vec<(&str, String)>)> = vec![
-        ("plain-shell", vec![]),
-        (
-            "human-leader-pane",
-            vec![
-                (zerocode_core::agent_teams::TEAM_ID_VAR, "team-1".into()),
-                (
-                    zerocode_core::agent_teams::TEAM_PANE_VAR,
-                    zerocode_core::agent_teams::LEADER_PANE.into(),
-                ),
-                (
-                    zerocode_core::agent_teams::TEAM_TOKEN_FILE_VAR,
-                    token_file.to_string_lossy().into_owned(),
-                ),
-            ],
-        ),
-        (
-            "inherited-pane-without-team-token",
-            vec![
-                (zerocode_core::agent_teams::TEAM_ID_VAR, "team-1".into()),
-                (zerocode_core::agent_teams::TEAM_PANE_VAR, "%5".into()),
-            ],
-        ),
-    ];
-
-    for (label, extra_env) in &scenarios {
-        for attempt in 0..2 {
-            let mut cmd = clean_open_command(shims.join("open"), &shims);
-            cmd.arg(url)
-                .env(MIRROR_DIR_ENV, &fake.mirror_dir)
-                .env("FAKE_OPEN_STDOUT", format!("stdout-{label}-{attempt}"))
-                .env("FAKE_OPEN_STDERR", format!("stderr-{label}-{attempt}"))
-                .env("FAKE_OPEN_EXIT", "5");
-            for (name, value) in extra_env {
-                cmd.env(name, value);
-            }
-            let out = cmd.output().expect("run human open");
-            assert_eq!(out.status.code(), Some(5), "scenario={label}");
-            assert_eq!(
-                String::from_utf8_lossy(&out.stdout),
-                format!("stdout-{label}-{attempt}")
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&out.stderr),
-                format!("stderr-{label}-{attempt}")
-            );
-        }
-    }
-
-    assert!(
-        !mirror_called.exists(),
-        "human panes must never invoke zerocode-mirror"
-    );
-    let expected = vec![
-        RecordedCall {
-            guard_env: "unset".to_string(),
-            args: vec![url.to_string()],
-        };
-        scenarios.len() * 2
-    ];
-    assert_eq!(fake.calls(), expected);
-}
-
-#[test]
-fn worker_panes_route_through_shim_and_dedupe_across_panes() {
-    let fake = FakeOpen::new();
-    let dir = tempfile::tempdir().expect("tempdir");
-    let shims = install_open_shim(dir.path(), mirror_path(), &fake.bin);
-    let token_file = dir.path().join("team-token");
-    fs::write(&token_file, "secret").expect("token file");
 
     let first_url = "https://auth.example.com/oauth?state=one#a";
     let second_url = "https://auth.example.com/oauth?state=two#b";
 
-    // Worker pane %2 (token file): resolves bare `open` via PATH.
-    let out1 = clean_open_command("open", &shims)
-        .arg(first_url)
-        .env(MIRROR_DIR_ENV, &fake.mirror_dir)
-        .env(zerocode_core::agent_teams::TEAM_ID_VAR, "team-1")
-        .env(zerocode_core::agent_teams::TEAM_PANE_VAR, "%2")
-        .env(zerocode_core::agent_teams::TEAM_TOKEN_FILE_VAR, &token_file)
-        .output()
-        .expect("run worker %2 open");
-    assert!(out1.status.success());
-
-    // Worker pane %3 (legacy token var) sharing the window's ZEROCODE_MIRROR_DIR.
-    let out2 = clean_open_command("open", &shims)
-        .arg(second_url)
-        .env(MIRROR_DIR_ENV, &fake.mirror_dir)
-        .env(zerocode_core::agent_teams::TEAM_ID_VAR, "team-1")
-        .env(zerocode_core::agent_teams::TEAM_PANE_VAR, "%3")
-        .env(zerocode_core::agent_teams::TEAM_TOKEN_VAR, "legacy-secret")
-        .output()
-        .expect("run worker %3 open");
-    assert!(out2.status.success());
-    let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    assert_eq!(stderr2.lines().count(), 1, "{stderr2:?}");
-    assert!(stderr2.contains("https://auth.example.com/oauth"));
-
-    // Non-URL and -a calls inside worker pane pass through unchanged.
-    for args in [&["-a", "Calculator"][..], &["/Users/dev/doc.md"]] {
-        let out = clean_open_command("open", &shims)
+    for args in [
+        &[first_url][..],
+        &[second_url][..],
+        &["-g", first_url][..],
+        &["-a", "Calculator"][..],
+        &["-a", "Safari", first_url][..],
+        &["/Users/dev/doc.md"][..],
+    ] {
+        let out = codex_stripped_command("open", &path_value, dir.path())
             .args(args)
-            .env(MIRROR_DIR_ENV, &fake.mirror_dir)
-            .env(zerocode_core::agent_teams::TEAM_ID_VAR, "team-1")
-            .env(zerocode_core::agent_teams::TEAM_PANE_VAR, "%2")
-            .env(zerocode_core::agent_teams::TEAM_TOKEN_FILE_VAR, &token_file)
             .output()
-            .expect("run worker non-url open");
-        assert!(out.status.success());
+            .expect("run open in codex-stripped env");
+        assert!(
+            out.status.success(),
+            "args={args:?} status={:?} stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "args={args:?} unexpected stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     assert_eq!(
@@ -456,7 +338,19 @@ fn worker_panes_route_through_shim_and_dedupe_across_panes() {
             },
             RecordedCall {
                 guard_env: "unset".to_string(),
+                args: vec!["-g".to_string(), second_url.to_string()],
+            },
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec!["-g".to_string(), first_url.to_string()],
+            },
+            RecordedCall {
+                guard_env: "unset".to_string(),
                 args: vec!["-a".to_string(), "Calculator".to_string()],
+            },
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec!["-a".to_string(), "Safari".to_string(), first_url.to_string()],
             },
             RecordedCall {
                 guard_env: "unset".to_string(),
@@ -467,21 +361,79 @@ fn worker_panes_route_through_shim_and_dedupe_across_panes() {
 }
 
 #[test]
+fn human_pane_path_without_worker_dir_runs_real_open_without_mirror() {
+    let fake = FakeOpen::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared_shims = dir.path().join("shims");
+    fs::create_dir_all(&shared_shims).expect("shared shims dir");
+    let mirror_called = dir.path().join("mirror-was-called");
+    let poison_mirror = dir.path().join("poison-mirror");
+    let poison_body = format!(
+        "#!/bin/sh\nprintf 'called\\n' >> '{}'\nexit 99\n",
+        mirror_called.display()
+    );
+    fs::write(&poison_mirror, poison_body).expect("write poison mirror");
+    fs::set_permissions(&poison_mirror, fs::Permissions::from_mode(0o755))
+        .expect("chmod poison mirror");
+    let _worker_dir = install_worker_open_shim(&shared_shims, &poison_mirror, &fake.bin);
+
+    // Human pane PATH includes shared shims and fake open dir, never worker-open.
+    let human_path = format!(
+        "{}:{}:/bin",
+        shared_shims.display(),
+        fake.bin_dir.display()
+    );
+    let url = "https://auth.example.com/authorize?state=human";
+
+    for attempt in 0..2 {
+        let out = Command::new("open")
+            .arg(url)
+            .env_clear()
+            .env("PATH", &human_path)
+            .env("FAKE_OPEN_STDOUT", format!("stdout-{attempt}"))
+            .env("FAKE_OPEN_STDERR", format!("stderr-{attempt}"))
+            .env("FAKE_OPEN_EXIT", "5")
+            .output()
+            .expect("run human open");
+        assert_eq!(out.status.code(), Some(5));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("stdout-{attempt}"));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), format!("stderr-{attempt}"));
+    }
+
+    assert!(
+        !mirror_called.exists(),
+        "human panes must never invoke zerocode-mirror"
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec![url.to_string()],
+            },
+            RecordedCall {
+                guard_env: "unset".to_string(),
+                args: vec![url.to_string()],
+            },
+        ]
+    );
+}
+
+#[test]
 fn worker_open_shim_falls_back_to_real_open_when_mirror_is_missing() {
     let fake = FakeOpen::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let missing_mirror = dir.path().join("gone-mirror");
-    let shims = install_open_shim(dir.path(), &missing_mirror, &fake.bin);
-    let token_file = dir.path().join("team-token");
-    fs::write(&token_file, "secret").expect("token file");
+    let worker_dir = install_worker_open_shim(dir.path(), &missing_mirror, &fake.bin);
+    let path_value = format!(
+        "{}:{}:/bin",
+        worker_dir.display(),
+        fake.bin_dir.display()
+    );
 
     let url = "https://auth.example.com/fallback?x=1";
-    let out = clean_open_command("open", &shims)
+    let out = codex_stripped_command("open", &path_value, dir.path())
         .arg(url)
-        .env(MIRROR_DIR_ENV, &fake.mirror_dir)
-        .env(zerocode_core::agent_teams::TEAM_ID_VAR, "team-1")
-        .env(zerocode_core::agent_teams::TEAM_PANE_VAR, "%2")
-        .env(zerocode_core::agent_teams::TEAM_TOKEN_FILE_VAR, &token_file)
         .output()
         .expect("run fallback open");
     assert!(out.status.success());

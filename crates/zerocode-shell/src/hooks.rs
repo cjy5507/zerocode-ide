@@ -5246,28 +5246,44 @@ mod tests {
         let shims = dir.path().join("shims");
         write_shim_dir(&shims, &mirror, &[]).expect("write shim dir");
 
-        let open_shim = shims.join("open");
-        let body =
-            std::fs::read_to_string(&open_shim).expect("open shim is installed in the pane PATH");
+        assert!(
+            !shims.join(zerocode_core::worker_open::SHIM_NAME).exists(),
+            "shared shim dir must not contain `open` (human panes must not hit a shim)"
+        );
+
+        let worker_dir = shims.join("worker-open");
+        let dir_mode = std::fs::metadata(&worker_dir)
+            .expect("worker-only shim dir exists")
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700, "worker-only shim dir mode");
+
+        let open_shim = worker_dir.join(zerocode_core::worker_open::SHIM_NAME);
+        let body = std::fs::read_to_string(&open_shim)
+            .expect("open shim is installed in the worker-only subdir");
         assert!(body.starts_with("#!/bin/sh\n"), "{body}");
         for needle in [
+            format!("{}=1", zerocode_core::worker_open::MARKER),
+            zerocode_core::worker_open::SYSTEM_OPEN_PATH.to_string(),
+            mirror.to_string_lossy().into_owned(),
+        ] {
+            assert!(
+                body.contains(&needle),
+                "open shim is missing `{needle}`:\n{body}"
+            );
+        }
+        for forbidden in [
             zerocode_core::agent_teams::TEAM_PANE_VAR,
             zerocode_core::agent_teams::LEADER_PANE,
             zerocode_core::agent_teams::TEAM_ID_VAR,
             zerocode_hookd::env_var::TEAM_TOKEN_FILE,
             zerocode_core::agent_teams::TEAM_TOKEN_VAR,
-            "ZEROCODE_OPEN_GUARD=1",
-            "/usr/bin/open",
         ] {
             assert!(
-                body.contains(needle),
-                "open shim is missing `{needle}`:\n{body}"
+                !body.contains(forbidden),
+                "worker-only open shim must not read team env `{forbidden}`:\n{body}"
             );
         }
-        assert!(
-            body.contains(&mirror.to_string_lossy().into_owned()),
-            "open shim does not name the window's mirror binary:\n{body}"
-        );
         let mode = std::fs::metadata(&open_shim)
             .expect("open shim metadata")
             .permissions()
@@ -5284,8 +5300,12 @@ mod tests {
         let shims = dir.path().join("shims");
         write_shim_dir(&shims, &mirror, &[]).expect("write shim dir");
         assert!(
-            !shims.join("open").exists(),
+            !shims.join(zerocode_core::worker_open::SHIM_NAME).exists(),
             "open shim must only be installed on macOS"
+        );
+        assert!(
+            !shims.join("worker-open").exists(),
+            "worker-only open shim dir must only be installed on macOS"
         );
     }
 

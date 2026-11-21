@@ -10666,6 +10666,61 @@ mod tests {
             "the trust flag found a launch road of its own"
         );
     }
+
+    #[test]
+    fn worker_open_shim_dir_rides_no_launch_road_but_the_workers_split() {
+        fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("a source folder").flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                let test_only = name == "tests.rs" || name.ends_with("_tests.rs");
+                if path.is_dir() {
+                    rust_files(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "rs") && !test_only {
+                    found.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        files.sort();
+        let mut roads = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).expect("a source");
+            let shipped = text
+                .split_once("#[cfg(test)]")
+                .map_or(text.as_str(), |(head, _)| head);
+            let code: String = shipped
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let name = path
+                .strip_prefix(&src)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for spelled in ["worker_open_shim_dir(", "worker_shim_dir("] {
+                let count = code.matches(spelled).count();
+                if count > 0 {
+                    roads.push(format!("{name}: {spelled} × {count}"));
+                }
+            }
+        }
+        assert_eq!(
+            roads,
+            [
+                "agent_tools_runtime.rs: worker_open_shim_dir( × 1",
+                "hooks.rs: worker_open_shim_dir( × 1",
+                "hooks.rs: worker_shim_dir( × 2",
+            ],
+            "the worker-only open shim dir reached a launch road outside the worker split"
+        );
+    }
 }
 
 #[cfg(test)]

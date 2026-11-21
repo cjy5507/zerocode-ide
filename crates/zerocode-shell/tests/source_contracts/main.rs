@@ -41286,12 +41286,13 @@ fn the_working_edge_turns_on_the_compositor() {
 }
 
 #[test]
-fn worker_open_shim_rides_the_existing_pane_path_and_mirror_on_macos() {
+fn worker_open_shim_rides_only_worker_pane_path_and_mirror_on_macos() {
     let hooks = include_str!("../../src/hooks.rs");
     let (hooks_shipped, _) = hooks.split_once("#[cfg(test)]").unwrap_or((hooks, ""));
     let writing = support::block_after(hooks_shipped, "fn write_shim_dir(");
     for needle in [
         "#[cfg(target_os = \"macos\")]",
+        "zerocode_core::worker_open::worker_shim_dir(",
         "zerocode_core::worker_open::SHIM_NAME",
         "zerocode_core::worker_open::open_shim_script(",
         "zerocode_core::worker_open::SYSTEM_OPEN_PATH",
@@ -41301,6 +41302,44 @@ fn worker_open_shim_rides_the_existing_pane_path_and_mirror_on_macos() {
             "write_shim_dir lost `{needle}`:\n{writing}"
         );
     }
+    assert!(
+        !writing.contains("dir.join(zerocode_core::worker_open::SHIM_NAME)"),
+        "open shim must live in worker-only subdir, not shared shim dir:\n{writing}"
+    );
+
+    let pty_env = support::block_after(hooks_shipped, "pub fn pty_env(");
+    assert!(
+        !pty_env.contains("worker_open") && !pty_env.contains("worker_shim_dir"),
+        "human pane pty_env must never include worker-only open shim dir:\n{pty_env}"
+    );
+
+    let teams = include_str!("../../src/agent_teams.rs");
+    let (teams_shipped, _) = teams.split_once("#[cfg(test)]").unwrap_or((teams, ""));
+    let leader = support::block_after(teams_shipped, "pub fn open_team(");
+    assert!(
+        !leader.contains("worker_open") && !leader.contains("worker_shim_dir"),
+        "leader pane open_team must never include worker-only open shim dir:\n{leader}"
+    );
+
+    let runtime = include_str!("../../src/agent_tools_runtime.rs");
+    let (runtime_shipped, _) = runtime.split_once("#[cfg(test)]").unwrap_or((runtime, ""));
+    let split = support::block_after(runtime_shipped, "fn split(");
+    let pty_at = split
+        .find("env.extend(hooks::pty_env(")
+        .expect("split lost pty_env");
+    let teammate_at = split
+        .find("agent_teams::teammate_path(")
+        .expect("split lost teammate_path");
+    let open_dir_at = split
+        .find("hooks::worker_open_shim_dir()")
+        .expect("split lost worker_open_shim_dir wiring");
+    let spawn_at = split
+        .find("PtyLane::spawn(")
+        .expect("split lost PtyLane::spawn");
+    assert!(
+        pty_at < teammate_at && teammate_at < open_dir_at && open_dir_at < spawn_at,
+        "worker_open_shim_dir must wire through teammate_path after pty_env and before spawn:\n{split}"
+    );
 
     let mirror = include_str!("../../src/bin/zerocode-mirror.rs");
     let main_fn = support::block_after(mirror, "fn main() {");
@@ -41311,8 +41350,9 @@ fn worker_open_shim_rides_the_existing_pane_path_and_mirror_on_macos() {
     );
     let handler = support::block_after(mirror, "fn serve_worker_open() -> ! {");
     assert!(
-        handler.contains("zerocode_core::worker_open::decide(")
+        handler.contains("zerocode_core::worker_open::decide(&rest)")
+            && !handler.contains("mirror_dir()")
             && handler.contains(".env_remove(zerocode_core::worker_open::MARKER)"),
-        "serve_worker_open lost decision or guard env stripping:\n{handler}"
+        "serve_worker_open must decide purely on argv without mirror_dir and strip guard env:\n{handler}"
     );
 }
