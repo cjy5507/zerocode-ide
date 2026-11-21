@@ -2274,8 +2274,9 @@ fn still_follows(
 /// does nothing but look; one whose every owed move waits for room that no
 /// reading since its last look could give, or for the rest of a pane it is
 /// watching, answers from memory ([`waits_judged`]); a switch in flight is
-/// left to finish its own (the line is tried, never waited on). A move whose yes this window never heard — its
-/// memory is a newer process's — is let go. Answers the panes moved.
+/// left to finish its own (the line is tried, never waited on). A move whose
+/// yes this window never heard — its memory is a newer process's — is let
+/// go. Answers the panes moved.
 pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -> usize {
     let dir = doors.journal_dir();
     // Read before anything else, so a reading that lands while this look
