@@ -4461,7 +4461,7 @@
              login is who arrived. -->
         <div class="settings-subhead settings-subhead--acts">
           <div>
-            <h3 class="settings-subhead-title">
+            <h3 class="settings-subhead-title provider-heading" data-provider="claude">
               <span data-i18n="settings.accounts.title">Claude 계정</span>
               <span class="settings-badge" id="account-count"></span>
             </h3>
@@ -4504,7 +4504,7 @@
              purpose. -->
         <div class="settings-subhead settings-subhead--acts">
           <div>
-            <h3 class="settings-subhead-title">
+            <h3 class="settings-subhead-title provider-heading" data-provider="codex">
               <span data-i18n="settings.codexAccounts.title">Codex 계정</span>
               <span class="settings-badge" id="codex-account-count"></span>
             </h3>
@@ -4525,7 +4525,9 @@
              picker here would be a choice with one option in it — so the list
              is a single row: this machine's login, or the absence of one. -->
         <div class="settings-subhead">
-          <h3 class="settings-subhead-title" data-i18n="settings.googleAccount.title">Google 계정</h3>
+          <h3 class="settings-subhead-title provider-heading" data-provider="google" data-favicon-domain="google.com">
+            <span data-i18n="settings.googleAccount.title">Google 계정</span>
+          </h3>
           <p class="settings-subhead-desc" data-i18n="settings.googleAccount.about">
             zo와 창이 함께 쓰는 Google 로그인(credentials.json)입니다.
           </p>

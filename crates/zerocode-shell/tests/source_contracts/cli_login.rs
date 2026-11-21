@@ -290,6 +290,11 @@ fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
         arriving.contains("void refreshCliLogins();"),
         "arriving at the accounts pane no longer re-reads the CLI login rows:\n{arriving}"
     );
+    let row = block_after(&window, "function cliLoginRow(");
+    assert!(
+        row.contains("agentIcon(") && row.contains("favicon_domain: row.favicon_domain"),
+        "the CLI row no longer uses its provider's mark from the login table"
+    );
     for road in [
         "invoke(\"cli_login_list\")",
         "invoke(\"cli_login_start\", { agent: row.agent }, { hand: handNow() })",

@@ -615,25 +615,25 @@ pub(crate) async fn add_codex_account(
 pub(crate) async fn verify_codex_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<(String, bool)>, String> {
+    let rows = codex_accounts::read_store(state.config_root()).accounts;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
     let Some(program) = agent_program("codex") else {
         return Ok(Vec::new());
     };
-    let rows: Vec<(String, String)> = codex_accounts::read_store(state.config_root())
-        .accounts
-        .iter()
-        .map(|account| (account.id.clone(), account.home_dir.clone()))
-        .collect();
     tauri::async_runtime::spawn_blocking(move || {
+        let alive = |home: &str| codex_accounts::login_alive(&program, Path::new(home));
+        if rows.len() == 1 {
+            return rows
+                .into_iter()
+                .map(|row| (row.id, alive(&row.home_dir)))
+                .collect();
+        }
         std::thread::scope(|scope| {
             let asked: Vec<_> = rows
-                .iter()
-                .map(|(id, home)| {
-                    let program = program.clone();
-                    (
-                        id.clone(),
-                        scope.spawn(move || codex_accounts::login_alive(&program, Path::new(home))),
-                    )
-                })
+                .into_iter()
+                .map(|row| (row.id, scope.spawn(move || alive(&row.home_dir))))
                 .collect();
             asked
                 .into_iter()
@@ -725,13 +725,14 @@ pub(crate) fn logout_codex_login(
 /// Once, because the catalog scan walks PATH for every agent it knows: the
 /// card asking it per row made thirty scans of the same PATH.
 fn cli_login_programs() -> impl Fn(&cli_login::CliLogin) -> Option<String> {
-    let detected = detected_agents(false);
+    let detected: HashMap<&'static str, String> = detected_agents(false)
+        .into_iter()
+        .filter(|found| found.installed)
+        .filter_map(|found| Some((found.id, found.found_as?)))
+        .collect();
     let path = shell_path::launch_path();
     move |row| match row.cli {
-        cli_login::Cli::Agent => detected
-            .iter()
-            .find(|found| found.id == row.agent && found.installed)
-            .and_then(|found| found.found_as.clone()),
+        cli_login::Cli::Agent => detected.get(row.agent).cloned(),
         cli_login::Cli::Own { program, .. } => {
             zerocode_core::agent::resolve_on_path(path.as_deref(), program)
                 .map(|_| program.to_string())
@@ -907,27 +908,38 @@ pub(crate) async fn verify_claude_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<LoginVerdict>, String> {
     let rows = accounts::read_store(state.config_root()).accounts;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
     let Some(program) = claude_program() else {
         return Ok(rows.into_iter().map(|row| (row.id, None, None)).collect());
     };
     let config = state.config_root().to_path_buf();
     let now = epoch_ms_now();
     tauri::async_runtime::spawn_blocking(move || {
-        let results = std::thread::scope(|scope| {
-            let asked: Vec<_> = rows
-                .iter()
-                .map(|row| {
-                    let program = &program;
-                    scope.spawn(move || {
-                        accounts::probe_login(program, Path::new(&row.config_dir), now)
+        let results = if rows.len() == 1 {
+            vec![accounts::probe_login(
+                &program,
+                Path::new(&rows[0].config_dir),
+                now,
+            )]
+        } else {
+            std::thread::scope(|scope| {
+                let asked: Vec<_> = rows
+                    .iter()
+                    .map(|row| {
+                        let program = &program;
+                        scope.spawn(move || {
+                            accounts::probe_login(program, Path::new(&row.config_dir), now)
+                        })
                     })
-                })
-                .collect();
-            asked
-                .into_iter()
-                .map(|waiting| waiting.join().unwrap_or_default())
-                .collect::<Vec<_>>()
-        });
+                    .collect();
+                asked
+                    .into_iter()
+                    .map(|waiting| waiting.join().unwrap_or_default())
+                    .collect::<Vec<_>>()
+            })
+        };
         let observations = rows
             .iter()
             .zip(&results)

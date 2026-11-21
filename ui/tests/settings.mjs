@@ -2218,7 +2218,7 @@ class StatefulBackend {
       case "list_agents": return clone(AGENTS);
       case "agent_terms": return [];
       case "list_claude_sessions": return [];
-      case "agent_icon": return null;
+      case "agent_icon": return this.iconFixtures?.get(args.domain) ?? null;
       case "agent_launch_plans": return clone(this.agentLaunchPlans);
       case "zo_integration_details": return args.export ? { redacted: "redacted-fixture" }
         : clone(this.zoIntegration ?? { records: [], installed: false, window: {} });
@@ -4059,6 +4059,7 @@ const files = createServer(async (request, response) => {
       ".js": "text/javascript; charset=utf-8",
       ".css": "text/css; charset=utf-8",
       ".png": "image/png",
+      ".svg": "image/svg+xml",
       ".ico": "image/x-icon",
     };
     response.writeHead(200, { "content-type": types[extname(path)] ?? "application/octet-stream" });
@@ -7015,6 +7016,103 @@ await test("the first Orca parity panes are real destinations with one active ow
     );
   }
   return "provider accounts, models, onboarding, automations, git, quick commands";
+});
+
+await test("provider marks share requests, keep offline initials, and leave unchanged account rows in place", async () => {
+  const id = "provider-marks";
+  const page = await context.newPage();
+  const previous = backend.cliLogins;
+  const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=";
+  const rows = Array.from({ length: 120 }, (_, i) => ({
+    agent: `cli-${i}`, name: `Fixture ${i}`, program: `cli-${i}`, installed: true,
+    signed_in: false, known: true, home: "~/.fixture", road: "verb",
+    favicon_domain: i === 0 ? "SHARED.TEST" : i === 1 ? "shared.test" : `cli-${i}.test`,
+  }));
+  backend.cliLogins = { rows };
+  backend.iconFixtures = new Map([["shared.test", png], ["google.com", png], ["cli-119.test", png], ["cli-3.test", "data:image/png;base64,iVBORw0KGgo="]]);
+  const iconCalls = (domain) => backend.calls.filter(c =>
+    c.window_id === id && c.command === "agent_icon" && c.args.domain === domain).length;
+  try {
+    await installTauri(page, id);
+    await bootPage(page, id);
+    await page.evaluate(() => setSettingsOpen(true, "account-list"));
+    const list = page.locator("#cli-login-list .account-row");
+    await list.last().waitFor({ state: "attached" });
+    assertEqual(await list.count(), rows.length, "not all providers painted");
+    const heading = page.locator('[data-pane="provider-accounts"] h3').filter({ has: page.locator(".agent-ico") });
+    assertEqual(await heading.count(), 3, "missing provider heading marks");
+    for (const [i, provider] of ["Claude", "Codex", "Google"].entries()) {
+      const title = heading.nth(i);
+      assert(await title.getByText(new RegExp(provider)).count(), `${provider} lost its visible name`);
+      await title.scrollIntoViewIfNeeded();
+      await title.locator("img").evaluate(image => image.decode());
+      const src = await title.locator("img").getAttribute("src");
+      assertEqual(src, i === 2 ? png : `marks/${provider.toLowerCase()}.svg`, `${provider} got the wrong mark`);
+      assertEqual(await title.locator(".agent-ico").getAttribute("aria-hidden"), "true", "decorative mark repeats the heading");
+    }
+    await list.first().scrollIntoViewIfNeeded();
+    for (const i of [0, 1]) await list.nth(i).locator("img").evaluate(image => image.decode());
+    assertEqual(iconCalls("shared.test"), 1, "two rows asked for the same icon twice");
+    assertEqual(iconCalls("cli-119.test"), 0, "an offscreen mark fetched eagerly");
+    for (const i of [2, 3]) {
+      await list.nth(i).scrollIntoViewIfNeeded();
+      await list.nth(i).locator(".agent-ico-letter").waitFor({ state: "visible" });
+      assertEqual(await list.nth(i).locator(".agent-ico-letter").innerText(), "F", "missing or invalid mark lost the initial");
+    }
+    const retained = await page.evaluate(() => {
+      const hosts = ["cli-login-list", "codex-account-list", "google-account-list", "agent-installed", "agent-available"].map(el);
+      const watch = new MutationObserver(() => {});
+      for (const host of hosts) watch.observe(host, { childList: true, subtree: true, attributes: true });
+      paintCliLogins(); paintCodexAccounts(); paintGoogleAccount(); paintAgents();
+      const mutations = watch.takeRecords().length;
+      watch.disconnect();
+      return mutations;
+    });
+    assertEqual(retained, 0, "a quiet repaint mutated a provider or agent list");
+    const changed = await page.evaluate(() => {
+      const host = el("cli-login-list");
+      const neighbor = host.children[1].querySelector("button");
+      neighbor.focus({ preventScroll: true });
+      cliLogins.rows[0] = { ...cliLogins.rows[0], name: "Renamed" };
+      paintCliLogins();
+      return [host.firstElementChild.querySelector(".agent-row-name").textContent,
+        host.firstElementChild.querySelector("img")?.src, document.activeElement === neighbor];
+    });
+    assertEqual(changed, ["Renamed", png, true], "a changed row lost its cached mark or moved its neighbor's focus");
+    assertEqual(iconCalls("shared.test"), 1, "a changed label refetched a cached mark");
+    await list.last().scrollIntoViewIfNeeded();
+    await list.last().locator("img").evaluate(image => image.decode());
+    assertEqual(iconCalls("cli-119.test"), 1, "revealing a row did not ask for its mark once");
+    for (let i = 4; i < rows.length; i += 6) {
+      await list.nth(i).scrollIntoViewIfNeeded();
+      await renderSettled(page);
+    }
+    await page.waitForFunction(() => pendingAgentMarks.size === 0);
+    const visited = new Set(backend.calls.filter(c => c.window_id === id && c.command === "agent_icon").map(c => c.args.domain));
+    assert(visited.size > 64, "the scroll never exercised eviction");
+    assert(await page.evaluate(() => agentMarks.size <= 64), "the window retained more than 64 settled marks");
+    assertEqual(await axeViolations(page, AxeBuilder, "#cli-login-list"), [], "CLI row accessibility");
+    await page.setViewportSize({ width: 320, height: 720 });
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+      const fits = await heading.evaluateAll(titles => titles.every(title => {
+        const mark = title.querySelector(".agent-ico").getBoundingClientRect();
+        return mark.width > 0 && mark.width === mark.height && title.scrollWidth <= title.clientWidth + 1;
+      }));
+      assert(fits, `${theme}: provider marks collapsed or clipped the headings at 320px`);
+    }
+    const before = backend.calls.length;
+    await page.evaluate(() => { setSettingsOpen(false); setSettingsOpen(true); });
+    await renderSettled(page);
+    for (const cmd of ["claude_accounts", "codex_account_list", "google_account", "cli_login_list"]) {
+      assertEqual(backend.calls.slice(before).filter(c => c.window_id === id && c.command === cmd).length, 1, `${cmd} reads per reopen`);
+    }
+    return `${rows.length} CLI providers, one IPC per visible domain, stable rows on repeat paint`;
+  } finally {
+    await page.close();
+    backend.cliLogins = previous;
+    delete backend.iconFixtures;
+  }
 });
 
 await test("the provider accounts pane carries a Google card whose login the window makes", async () => {

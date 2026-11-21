@@ -267,6 +267,7 @@ pub(crate) enum Cli {
         program: &'static str,
         name: &'static str,
         homepage_url: &'static str,
+        favicon_domain: &'static str,
     },
 }
 
@@ -521,6 +522,7 @@ pub(crate) const CLI_LOGINS: &[CliLogin] = &[
             program: "mmx",
             name: "MiniMax CLI",
             homepage_url: "https://github.com/MiniMax-AI/cli",
+            favicon_domain: "minimax.io",
         },
         home_var: "MMX_CONFIG_DIR",
         home: Home::Under(&[".mmx"]),
@@ -950,6 +952,7 @@ pub(crate) const CLI_LOGINS: &[CliLogin] = &[
             program: "gemini",
             name: "Gemini CLI",
             homepage_url: "https://github.com/google-gemini/gemini-cli",
+            favicon_domain: "gemini.google.com",
         },
         home_var: "GEMINI_CLI_HOME",
         home: Home::Under(&[]),
@@ -2018,6 +2021,7 @@ pub(crate) struct Standing {
     pub(crate) agent: &'static str,
     pub(crate) name: &'static str,
     pub(crate) homepage_url: &'static str,
+    pub(crate) favicon_domain: &'static str,
     /// The command this row looks for on PATH, which is not always the id:
     /// `aug` is `auggie` and `mimo-code` is `mimo`, and the row that says
     /// 「PATH에서 찾지 못했습니다」 has to name what it looked for.
@@ -2079,30 +2083,55 @@ pub(crate) struct Report {
 /// ([`STATUS_DEADLINE`]), so the slowest row bounds the list rather than
 /// ending it.
 pub(crate) fn report(program_of: &dyn Fn(&CliLogin) -> Option<String>, now_ms: i64) -> Report {
+    let user_home = dirs::home_dir();
     let machine: Vec<(&CliLogin, Option<String>, PathBuf)> = CLI_LOGINS
         .iter()
         .filter_map(|row| {
-            let home = row.home().ok()?;
+            let home = row.home_in(&|name| std::env::var_os(name).map(PathBuf::from), || {
+                user_home.clone()
+            })?;
             Some((row, program_of(row), home))
         })
         .collect();
-    let asked: Vec<Verdict> = std::thread::scope(|scope| {
-        let threads: Vec<_> = machine
-            .iter()
-            .map(|(row, program, home)| {
-                scope.spawn(move || row.verdict(program.as_deref(), home, now_ms))
-            })
-            .collect();
-        threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap_or(Verdict::Unknown))
-            .collect()
-    });
+    let status_count = machine
+        .iter()
+        .filter(|(row, program, _)| matches!(row.proof, Proof::Status { .. }) && program.is_some())
+        .count();
+    let mut asked = vec![Verdict::Unknown; machine.len()];
+    if status_count > 1 {
+        std::thread::scope(|scope| {
+            let mut spawned = Vec::with_capacity(status_count);
+            for (index, (row, program, home)) in machine.iter().enumerate() {
+                if matches!(row.proof, Proof::Status { .. }) && program.is_some() {
+                    spawned.push((
+                        index,
+                        scope.spawn(move || row.verdict(program.as_deref(), home, now_ms)),
+                    ));
+                } else {
+                    asked[index] = row.verdict(program.as_deref(), home, now_ms);
+                }
+            }
+            for (index, thread) in spawned {
+                asked[index] = thread.join().unwrap_or(Verdict::Unknown);
+            }
+        });
+    } else {
+        for (index, (row, program, home)) in machine.iter().enumerate() {
+            asked[index] = row.verdict(program.as_deref(), home, now_ms);
+        }
+    }
     let rows = machine
         .iter()
         .zip(asked)
         .filter_map(|((row, program, home), verdict)| {
-            standing(row, program.as_deref(), home, now_ms, verdict)
+            standing(
+                row,
+                program.as_deref(),
+                home,
+                user_home.as_deref(),
+                now_ms,
+                verdict,
+            )
         })
         .collect();
     Report { rows }
@@ -2112,23 +2141,28 @@ fn standing(
     row: &CliLogin,
     program: Option<&str>,
     home: &Path,
+    user_home: Option<&Path>,
     now_ms: i64,
     verdict: Verdict,
 ) -> Option<Standing> {
-    let (name, homepage_url) = match row.cli {
+    let (name, homepage_url, favicon_domain) = match row.cli {
         Cli::Agent => {
             let spec = zerocode_core::agent_spec(row.agent)?;
-            (spec.name, spec.homepage_url)
+            (spec.name, spec.homepage_url, spec.favicon_domain)
         }
         Cli::Own {
-            name, homepage_url, ..
-        } => (name, homepage_url),
+            name,
+            homepage_url,
+            favicon_domain,
+            ..
+        } => (name, homepage_url, favicon_domain),
     };
     let signed_in = verdict.signed_in();
     Some(Standing {
         agent: row.agent,
         name,
         homepage_url,
+        favicon_domain,
         program: row.program_name()?,
         installed: program.is_some(),
         signed_in,
@@ -2140,7 +2174,7 @@ fn standing(
         },
         opens: row.cli.word(),
         account: signed_in.then(|| row.account_in(home, now_ms)).flatten(),
-        home: with_tilde(home),
+        home: with_tilde_in(home, user_home),
         road: row.login.word(),
         tui_login: row.login.tui_command(),
         pane_command: program.and_then(|program| row.pane_command(program, home)),
@@ -2153,10 +2187,10 @@ fn standing(
 
 /// `$HOME/x` as `~/x`, for a caption. Anything not under the home is shown
 /// as it is.
-fn with_tilde(path: &Path) -> String {
+fn with_tilde_in(path: &Path, home: Option<&Path>) -> String {
     let shown = path.display().to_string();
-    match dirs::home_dir() {
-        Some(home) => match path.strip_prefix(&home) {
+    match home {
+        Some(home) => match path.strip_prefix(home) {
             Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
             Ok(rest) => format!("~/{}", rest.display()),
             Err(_) => shown,
@@ -3340,13 +3374,14 @@ mod tests {
                     program,
                     name,
                     homepage_url,
+                    favicon_domain,
                 } => {
                     assert!(
                         zerocode_core::agent_spec(row.agent).is_none(),
                         "{}: a catalog agent carrying its own name as well",
                         row.agent
                     );
-                    assert!(!program.is_empty() && !name.is_empty());
+                    assert!(!program.is_empty() && !name.is_empty() && !favicon_domain.is_empty());
                     assert!(
                         homepage_url.starts_with("https://"),
                         "{}: a vendor page that is not one",
@@ -3371,17 +3406,34 @@ mod tests {
                 std::fs::write(&file, text).expect("a login");
             }
             rows.push(
-                standing(row, None, &home, NOW_MS, row.verdict(None, &home, NOW_MS))
-                    .expect("a standing"),
+                standing(
+                    row,
+                    None,
+                    &home,
+                    Some(root.path()),
+                    NOW_MS,
+                    row.verdict(None, &home, NOW_MS),
+                )
+                .expect("a standing"),
             );
         }
-        for row in &rows {
+        for (row, spec) in rows.iter().zip(CLI_LOGINS) {
             let json = serde_json::to_string(row).expect("json");
             assert!(
                 !json.contains("fixture-token") && !json.contains("access_token"),
                 "a credential reached the settings row: {json}"
             );
             assert!(row.home.starts_with('~') || Path::new(&row.home).is_absolute());
+            let domain = match spec.cli {
+                Cli::Own { favicon_domain, .. } => favicon_domain,
+                Cli::Agent => {
+                    zerocode_core::agent_spec(row.agent)
+                        .expect("catalog CLI")
+                        .favicon_domain
+                }
+            };
+            assert!(!domain.is_empty());
+            assert_eq!(row.favicon_domain, domain, "{}", row.agent);
         }
         // The one row whose witness names a person names them and nothing
         // else — an address, never a token.
@@ -4788,6 +4840,7 @@ mod tests {
             grok,
             Some("/usr/local/bin/grok"),
             &home,
+            Some(root.path()),
             NOW_MS,
             Verdict::In,
         )
@@ -4805,7 +4858,15 @@ mod tests {
         // which is not always the id.
         let aug = row("aug").expect("aug row");
         let aug_home = sandboxed_home(aug, root.path());
-        let absent = standing(aug, None, &aug_home, NOW_MS, Verdict::Out).expect("a standing");
+        let absent = standing(
+            aug,
+            None,
+            &aug_home,
+            Some(root.path()),
+            NOW_MS,
+            Verdict::Out,
+        )
+        .expect("a standing");
         assert_eq!(absent.program, "auggie");
         assert!(!absent.installed && !absent.signed_in && absent.known);
         assert_eq!(
@@ -4817,8 +4878,15 @@ mod tests {
         // cannot walk.
         let vibe = row("mistral-vibe").expect("mistral-vibe row");
         let vibe_home = sandboxed_home(vibe, root.path());
-        let unread =
-            standing(vibe, Some("vibe"), &vibe_home, NOW_MS, Verdict::Unknown).expect("a standing");
+        let unread = standing(
+            vibe,
+            Some("vibe"),
+            &vibe_home,
+            Some(root.path()),
+            NOW_MS,
+            Verdict::Unknown,
+        )
+        .expect("a standing");
         assert!(!unread.known && !unread.signed_in);
         assert_eq!(unread.proof, "none");
         assert_eq!(unread.logout_road, "none");
@@ -4836,10 +4904,18 @@ mod tests {
         // row carries the line that opens it.
         let gemini = row("gemini").expect("gemini row");
         let gemini_home = sandboxed_home(gemini, root.path());
-        let outside = standing(gemini, Some("gemini"), &gemini_home, NOW_MS, Verdict::Out)
-            .expect("a standing");
+        let outside = standing(
+            gemini,
+            Some("gemini"),
+            &gemini_home,
+            Some(root.path()),
+            NOW_MS,
+            Verdict::Out,
+        )
+        .expect("a standing");
         assert_eq!(outside.opens, "shell");
         assert_eq!(outside.name, "Gemini CLI");
+        assert_eq!(outside.favicon_domain, "gemini.google.com");
         assert_eq!((outside.road, outside.tui_login), ("tui", Some("/auth")));
         assert!(
             outside
@@ -4854,8 +4930,15 @@ mod tests {
         // A logout that needs a screen carries its own line.
         let opencode = row("opencode").expect("opencode row");
         let oc_home = sandboxed_home(opencode, root.path());
-        let paned = standing(opencode, Some("opencode"), &oc_home, NOW_MS, Verdict::In)
-            .expect("a standing");
+        let paned = standing(
+            opencode,
+            Some("opencode"),
+            &oc_home,
+            Some(root.path()),
+            NOW_MS,
+            Verdict::In,
+        )
+        .expect("a standing");
         assert_eq!(paned.logout_road, "pane-verb");
         assert!(
             paned
@@ -5107,7 +5190,8 @@ mod tests {
             Cli::Own {
                 program: "gemini",
                 name: "Gemini CLI",
-                homepage_url: "https://example.com"
+                homepage_url: "https://example.com",
+                favicon_domain: "gemini.google.com",
             }
             .word(),
             "shell"
@@ -5121,9 +5205,12 @@ mod tests {
 
     #[test]
     fn the_home_caption_folds_the_home_directory_to_a_tilde() {
-        let Some(home) = dirs::home_dir() else { return };
-        assert_eq!(with_tilde(&home.join(".grok")), "~/.grok");
-        assert_eq!(with_tilde(&home), "~");
-        assert_eq!(with_tilde(Path::new("/opt/kimi")), "/opt/kimi");
+        let home = Path::new("/Users/dev");
+        assert_eq!(with_tilde_in(&home.join(".grok"), Some(home)), "~/.grok");
+        assert_eq!(with_tilde_in(home, Some(home)), "~");
+        assert_eq!(
+            with_tilde_in(Path::new("/opt/kimi"), Some(home)),
+            "/opt/kimi"
+        );
     }
 }

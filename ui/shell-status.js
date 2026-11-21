@@ -3537,6 +3537,7 @@ async function refreshProviderUsage(provider, force) {
     return;
   }
   const fetching = Boolean(report?.fetching);
+  const neededRun = usageNeedsRun(provider.read().usage);
   provider.write(report?.usage ?? null, fetching);
   paintProviderSegment(provider);
   paintUsageRefresh();
@@ -3544,8 +3545,8 @@ async function refreshProviderUsage(provider, force) {
   paintStatsUsage();
   // The accounts pane's row for this CLI reads the gauge too — its caption
   // and its 「한 번 실행」 — so a read that lands while the pane is open
-  // repaints the card; a closed pane re-reads on arrival.
-  if (!fetching && cliLoginPrograms.has(provider.id) && !settingsView.hidden &&
+  // repaints the card only if that verdict changed; new numbers alone do not.
+  if (neededRun !== usageNeedsRun(report?.usage) && cliLoginPrograms.has(provider.id) && !settingsView.hidden &&
       settingsPane === "provider-accounts") {
     paintCliLogins();
   }

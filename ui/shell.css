@@ -23419,6 +23419,23 @@ button.helper-sib:hover {
   letter-spacing: var(--tracking-heading-16);
 }
 
+.provider-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider-heading .settings-badge {
+  margin-left: 0;
+}
+
+.provider-heading .agent-ico,
+#cli-login-list .agent-ico {
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
 .settings-subhead-desc {
   max-width: 52ch;
   margin: var(--space-1) 0 0;

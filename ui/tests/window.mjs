@@ -17548,16 +17548,28 @@ ok(
  *
  * The 자동 pill alone has no mark — Orca leads it with the check instead — and
  * 에이전트 없음 carries the terminal glyph. */
-const wornIcons = await page.evaluate(async () => {
-  window.__ICON_ASKED__ = [];
-  window.__ANSWER__.agent_icon = (args) => {
-    window.__ICON_ASKED__.push(args.domain);
-    return `data:image/png;base64,${args.domain === "claude.ai" ? "AAAA" : "BBBB"}`;
-  };
-  agentMarks.clear();
-  paintAgentPills();
-  paintAgents();
-  await new Promise((done) => setTimeout(done, 120));
+// Each scene uses fresh fixture domains. Repainting unchanged rows must not
+// reload their marks; newly visible rows, not an arbitrary timer, drive IPC.
+const standAvailableMarks = async (scene) => {
+  await page.evaluate((scene) => {
+    const png = document.createElement("canvas").toDataURL("image/png");
+    window.__ICON_ASKED__ = [];
+    window.__ANSWER__.agent_icon = ({ domain }) => {
+      window.__ICON_ASKED__.push(domain);
+      return scene === "offline" ? null : png;
+    };
+    agentRows = agentRows.map(row => row.installed ? row : { ...row, favicon_domain: `${row.id}.${scene}.test` });
+    paintAgents();
+  }, scene);
+  for (const chip of await page.locator("#agent-available .agent-chip").all()) {
+    await chip.scrollIntoViewIfNeeded();
+    if (scene !== "offline") await chip.locator("img").evaluate(image => image.decode());
+  }
+  await page.waitForFunction(scene => agentRows.filter(row => !row.installed)
+    .every(row => window.__ICON_ASKED__.includes(`${row.id}.${scene}.test`)), scene);
+};
+await standAvailableMarks("online");
+const wornIcons = await page.evaluate(() => {
   const src = (node) => node?.getAttribute("src") ?? null;
   return {
     pills: [...document.querySelectorAll(".agent-pill")].map((one) => ({
@@ -17594,12 +17606,8 @@ ok(
 /* The letter tile is the offline face: it stands in from the first paint and
  * only a mark actually ARRIVING may replace it — a machine with no network
  * shows initials, not blanks. */
-const lettered = await page.evaluate(async () => {
-  // No mark for anybody, which is what an offline machine answers.
-  window.__ANSWER__.agent_icon = () => null;
-  agentMarks.clear();
-  paintAgentPills();
-  paintAgents();
+await standAvailableMarks("offline");
+const lettered = await page.evaluate(() => {
   // The agents whose marks the backend fetches: the rows of the two the catalog offers to install.
   const icons = [...document.querySelectorAll("#agent-available .agent-row .agent-chip .agent-ico")];
   const names = [...document.querySelectorAll("#agent-available .agent-row")].map((row) =>
@@ -17613,30 +17621,19 @@ const lettered = await page.evaluate(async () => {
   // The carried two stand offline as well — no letter, their own mark.
   const carried = [...document.querySelectorAll('.agent-pill[data-agent="claude"] .agent-ico, .agent-pill[data-agent="codex"] .agent-ico')]
     .map((one) => ({ lettered: one.classList.contains("is-lettered"), src: one.querySelector("img")?.getAttribute("src") ?? null }));
-  await new Promise((done) => setTimeout(done, 100));
-  const after = icons.map((one) => ({
-    lettered: one.classList.contains("is-lettered"),
-    img: Boolean(one.querySelector("img")),
-  }));
-  // And with a mark, the tile gives way.
-  window.__ANSWER__.agent_icon = () => "data:image/png;base64,AAAA";
-  agentMarks.clear();
-  paintAgents();
-  await new Promise((done) => setTimeout(done, 100));
+  return { before, carried };
+});
+await standAvailableMarks("restored");
+const swapped = await page.evaluate(() => {
   const marked = document.querySelector("#agent-available .agent-row .agent-chip .agent-ico");
   delete window.__ANSWER__.agent_icon;
-  return {
-    before, after, carried,
-    swapped: !marked.classList.contains("is-lettered") && Boolean(marked.querySelector("img")),
-  };
+  return !marked.classList.contains("is-lettered") && Boolean(marked.querySelector("img"));
 });
 ok(
   "the initial stands in when there is no mark, and gives way when there is",
   lettered.before.length === 2 && lettered.before.every((one) => one.lettered && !one.img && one.letter === one.want) &&
     lettered.carried.length === 2 && lettered.carried.every((one) => !one.lettered && one.src?.startsWith("marks/")) &&
-    // Still lettered, still no img — a refusal must not leave a broken image.
-    lettered.after.every((one) => one.lettered && !one.img) &&
-    lettered.swapped,
+    swapped,
   JSON.stringify(lettered),
 );
 

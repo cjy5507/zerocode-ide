@@ -1395,6 +1395,7 @@ struct ShellRuntime {
     /// Remote server metadata shares the settings repository, while bearer
     /// tokens stay behind this native-credential boundary.
     remote_servers: remote_servers::RemoteServerService,
+    icon_cache: Arc<icon::IconCache>,
 }
 
 /// The checkout the file surfaces are showing, and the repository that owns it.
@@ -1501,6 +1502,10 @@ impl ShellRuntime {
 
     fn remote_servers(&self) -> &remote_servers::RemoteServerService {
         &self.remote_servers
+    }
+
+    fn icon_cache(&self) -> &Arc<icon::IconCache> {
+        &self.icon_cache
     }
 
     fn watched_terms(&self) -> &zerocode_pty::WatchedTerms {
@@ -1933,6 +1938,7 @@ trait ShellStateExt {
     fn float_seat(&self) -> MutexGuard<'_, Option<String>>;
     fn ssh_hosts(&self) -> &ssh_hosts::SshHostService;
     fn remote_servers(&self) -> &remote_servers::RemoteServerService;
+    fn icon_cache(&self) -> &Arc<icon::IconCache>;
     fn watched_terms(&self) -> &zerocode_pty::WatchedTerms;
     fn catalog_owners(&self) -> MutexGuard<'_, HashMap<String, (Orchestrator, Worktree)>>;
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
@@ -2058,6 +2064,10 @@ impl ShellStateExt for AppState {
 
     fn remote_servers(&self) -> &remote_servers::RemoteServerService {
         self.shell_runtime().remote_servers()
+    }
+
+    fn icon_cache(&self) -> &Arc<icon::IconCache> {
+        self.shell_runtime().icon_cache()
     }
 
     fn watched_terms(&self) -> &zerocode_pty::WatchedTerms {
@@ -2582,6 +2592,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         wires: wire_runtime::WireRuntime::default(),
         ssh_link_epochs: Mutex::new(HashMap::new()),
         remote_servers,
+        icon_cache: Arc::new(icon::IconCache::default()),
     };
     let state = AppState::new(local_data_root, settings, jira, linear);
     state.install_shell_extension(runtime);

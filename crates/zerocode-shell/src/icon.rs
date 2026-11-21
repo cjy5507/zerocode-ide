@@ -30,7 +30,10 @@
 //! offline, the CSP gets *tighter* rather than wider, and one cache serves
 //! every surface that draws an agent.
 
+use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use base64::Engine as _;
 
@@ -41,6 +44,8 @@ const FETCH_TIMEOUT_SECS: &str = "5";
 /// The size asked for. 64 covers the 28px chip at 2x, which is the largest
 /// this window draws an agent at.
 const ICON_PIXELS: u32 = 64;
+const MAX_ICON_BYTES: usize = 256 * 1024;
+const MAX_MEMORY_ENTRIES: usize = 64;
 pub(crate) const CACHE_DIR_NAME: &str = "agent-icons";
 const ICON_FILE_EXTENSION: &str = "png";
 
@@ -102,20 +107,32 @@ fn looks_like_png(bytes: &[u8]) -> bool {
 fn fetch(domain: &str) -> Option<Vec<u8>> {
     let url = format!("https://www.google.com/s2/favicons?domain={domain}&sz={ICON_PIXELS}");
     let output = crate::proc::quiet_command("curl")
-        .args([
-            "-sfL",
-            "--max-time",
-            FETCH_TIMEOUT_SECS,
-            "-o",
-            "-",
-            url.as_str(),
-        ])
+        .args(["-sfL", "--max-time", FETCH_TIMEOUT_SECS, "--max-filesize"])
+        .arg(MAX_ICON_BYTES.to_string())
+        .args(["-o", "-", url.as_str()])
         .output()
         .ok()?;
-    if !output.status.success() || !looks_like_png(&output.stdout) {
+    if !output.status.success()
+        || output.stdout.len() > MAX_ICON_BYTES
+        || !looks_like_png(&output.stdout)
+    {
         return None;
     }
     Some(output.stdout)
+}
+
+fn cached_png(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size > MAX_ICON_BYTES as u64 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    // The file can also grow between stat and read.
+    file.take(MAX_ICON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_ICON_BYTES && looks_like_png(&bytes)).then_some(bytes)
 }
 
 /// One agent's mark as a `data:` URL, from the cache or from the vendor.
@@ -127,9 +144,7 @@ fn fetch(domain: &str) -> Option<Vec<u8>> {
 pub fn agent_icon(cache_root: &Path, domain: &str) -> Option<String> {
     let domain = tidy_domain(domain)?;
     let file = cache_file(cache_root, &domain);
-    if let Ok(held) = std::fs::read(&file)
-        && looks_like_png(&held)
-    {
+    if let Some(held) = cached_png(&file) {
         return Some(as_data_uri(&held));
     }
     let fetched = fetch(&domain)?;
@@ -141,6 +156,61 @@ pub fn agent_icon(cache_root: &Path, domain: &str) -> Option<String> {
     }
     let _ = std::fs::write(&file, &fetched);
     Some(as_data_uri(&fetched))
+}
+
+#[derive(Default)]
+struct IconCacheInner {
+    entries: HashMap<String, Arc<OnceLock<Option<String>>>>,
+    ready: VecDeque<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct IconCache {
+    inner: Mutex<IconCacheInner>,
+}
+
+impl IconCache {
+    pub(crate) fn get(&self, domain: &str) -> Option<String> {
+        let domain = tidy_domain(domain)?;
+        let slot = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .get(&domain)?
+            .clone();
+        slot.get()?.clone()
+    }
+
+    pub(crate) fn get_or_load(
+        &self,
+        domain: &str,
+        load: impl FnOnce(&str) -> Option<String>,
+    ) -> Option<String> {
+        let domain = tidy_domain(domain)?;
+        let slot = {
+            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(inner.entries.entry(domain.clone()).or_default())
+        };
+        // Wait only for this domain, never with the table locked. Evict only
+        // finished loads; another window asking mid-fetch must join this one.
+        slot.get_or_init(|| {
+            let uri = load(&domain);
+            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            if uri.is_some() {
+                if inner.ready.len() == MAX_MEMORY_ENTRIES
+                    && let Some(oldest) = inner.ready.pop_front()
+                {
+                    inner.entries.remove(&oldest);
+                }
+                inner.ready.push_back(domain);
+            } else {
+                inner.entries.remove(&domain);
+            }
+            uri
+        })
+        .clone()
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +298,84 @@ mod tests {
             Some(as_data_uri(&png)),
             "a cached icon under the injected root was not used"
         );
+    }
+
+    #[test]
+    fn icon_cache_serves_hits_without_reloading_and_bounds_entries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = IconCache::default();
+        let loads = AtomicUsize::new(0);
+        let first = cache.get_or_load("Example.COM", |domain| {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Some(format!("data:image/png;base64,{domain}"))
+        });
+        assert_eq!(first.as_deref(), Some("data:image/png;base64,example.com"));
+        assert_eq!(
+            cache.get("EXAMPLE.COM").as_deref(),
+            Some("data:image/png;base64,example.com")
+        );
+        let second = cache.get_or_load("example.com", |_| {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Some("unexpected".into())
+        });
+        assert_eq!(second, first);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        for i in 0..MAX_MEMORY_ENTRIES {
+            cache.get_or_load(&format!("d{i}.test"), |domain| Some(domain.to_owned()));
+        }
+        assert_eq!(cache.get("example.com"), None);
+        assert_eq!(cache.get("d0.test").as_deref(), Some("d0.test"));
+        assert_eq!(cache.get_or_load("retry.test", |_| None), None);
+        assert_eq!(
+            cache
+                .get_or_load("retry.test", |_| Some("ok".into()))
+                .as_deref(),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn icon_cache_coalesces_concurrent_loads_for_one_domain() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(IconCache::default());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(4));
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let cache = Arc::clone(&cache);
+                    let loads = Arc::clone(&loads);
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        cache.get_or_load("coalesce.example", |_| {
+                            loads.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                            Some("data:image/png;base64,shared".into())
+                        })
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        for result in results {
+            assert_eq!(result.as_deref(), Some("data:image/png;base64,shared"));
+        }
+    }
+
+    #[test]
+    fn an_oversized_cached_file_is_ignored() {
+        let cache = tempfile::tempdir().expect("no cache dir");
+        let file = cache_file(cache.path(), "oversized.invalid");
+        std::fs::create_dir_all(file.parent().expect("cache directory")).expect("make cache");
+        let mut huge = vec![0u8; MAX_ICON_BYTES + 16];
+        huge[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        std::fs::write(&file, huge).expect("write oversized file");
+        assert_eq!(cached_png(&file), None);
     }
 }

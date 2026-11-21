@@ -1172,7 +1172,7 @@ settingsRailItems.forEach((item) => {
  * fell out of the results, the first one still standing takes over: Orca's
  * `getFallbackVisibleSection`. Left alone, the rail would show one set of
  * names and the page a section absent from it. */
-function paintSettingsSearch() {
+function paintSettingsSearch(preferred = settingsPane) {
   const query = el("settings-search").value.trim().toLowerCase();
   const standing = [];
   for (const item of settingsRailItems) {
@@ -1183,10 +1183,10 @@ function paintSettingsSearch() {
   for (const box of settingsView.querySelectorAll(".settings-rail-group-box")) {
     box.hidden = ![...box.querySelectorAll(".settings-rail-item")].some((item) => !item.hidden);
   }
-  showSettingsPane(standing.includes(settingsPane) ? settingsPane : (standing[0] ?? settingsPane));
+  showSettingsPane(standing.includes(preferred) ? preferred : (standing[0] ?? preferred));
 }
 
-el("settings-search").addEventListener("input", paintSettingsSearch);
+el("settings-search").addEventListener("input", () => paintSettingsSearch());
 el("settings-back").addEventListener("click", () => setSettingsOpen(false));
 
 /* `mod+shift+n` as a person reads it on this operating system. */
@@ -2484,18 +2484,27 @@ function agentSaidName(id) {
  * for the same handful of agents, and the backend's own disk cache would still
  * be one round trip each. A promise is stored rather than the answer, so rows
  * that ask while the first fetch is in flight join it instead of starting a
- * second — and a domain that has no mark is remembered as `null`, so a machine
- * offline asks once per agent per window rather than once per repaint. */
+ * second. Settled answers (including offline misses) have a separate bound;
+ * evicting one never drops an in-flight request. */
 const agentMarks = new Map();
+const pendingAgentMarks = new Map();
+const MAX_SETTLED_AGENT_MARKS = 64;
 
 function agentMark(domain) {
-  if (!agentMarks.has(domain)) {
-    agentMarks.set(
+  if (!pendingAgentMarks.has(domain)) {
+    pendingAgentMarks.set(
       domain,
-      invoke("agent_icon", { domain }).catch(() => null),
+      invoke("agent_icon", { domain }).catch(() => null).then((uri) => {
+        pendingAgentMarks.delete(domain);
+        if (agentMarks.size >= MAX_SETTLED_AGENT_MARKS) {
+          agentMarks.delete(agentMarks.keys().next().value);
+        }
+        agentMarks.set(domain, uri);
+        return uri;
+      }),
     );
   }
-  return agentMarks.get(domain);
+  return pendingAgentMarks.get(domain);
 }
 
 /* The face an agent wears when there is no mark: its initial on a tile.
@@ -2516,19 +2525,39 @@ function agentLetterTile(row) {
  * Separate from building the element because it happens LATER: the tile is on
  * screen immediately and the mark replaces it when it lands, so a list never
  * waits on a network read to paint. */
-function paintAgentMark(wrap, domain) {
-  void agentMark(domain).then((uri) => {
-    // The list may have been rebuilt while this was in flight — a wrapper no
-    // longer in the document is nobody's mark.
-    if (!uri || !wrap.isConnected) return;
-    const image = document.createElement("img");
-    image.alt = "";
-    image.setAttribute("aria-hidden", "true");
-    image.src = uri;
-    wrap.prepend(image);
-    wrap.classList.remove("is-lettered");
-  });
+function drawAgentMark(wrap, uri) {
+  if (!uri) return;
+  const image = document.createElement("img");
+  image.alt = "";
+  image.onload = () => wrap.classList.remove("is-lettered");
+  image.onerror = () => image.remove();
+  image.src = uri;
+  wrap.prepend(image);
 }
+
+function paintAgentMark(wrap, domain) {
+  if (agentMarks.has(domain)) {
+    drawAgentMark(wrap, agentMarks.get(domain));
+  } else {
+    void agentMark(domain).then((uri) => {
+      if (wrap.isConnected) drawAgentMark(wrap, uri);
+    });
+  }
+}
+
+// Only persistent settings lists opt in. Their reconciler unobserves marks
+// removed before the person scrolls to them; transient menus stay eager.
+const deferredAgentMarks = typeof IntersectionObserver === "function"
+  ? new IntersectionObserver((entries) => {
+      for (const { target, isIntersecting } of entries) {
+        if (!isIntersecting || !target.dataset.deferredMark) continue;
+        deferredAgentMarks.unobserve(target);
+        const domain = target.dataset.deferredMark;
+        delete target.dataset.deferredMark;
+        if (target.isConnected) paintAgentMark(target, domain);
+      }
+    })
+  : null;
 
 /* The two marks the window carries itself (2026-11-05, the person: 「다운받아서
  * 하는게 더 효율적」). Claude's site favicon is its old tile and Codex's is
@@ -2549,14 +2578,19 @@ const CARRIED_AGENT_MARKS = Object.freeze({
  * not survive a redirect — so every image failed in the app while the browser
  * tests, which have no CSP, showed them all. The window admits no remote image
  * host at all now. See crates/zerocode-shell/src/icon.rs. */
-function agentIcon(row) {
+function agentIcon(row, defer = false) {
   const wrap = document.createElement("span");
+  wrap.setAttribute("aria-hidden", "true");
   const carried = CARRIED_AGENT_MARKS[row.id];
   if (carried) {
     wrap.className = "agent-ico is-carried";
     const image = document.createElement("img");
     image.alt = "";
     image.setAttribute("aria-hidden", "true");
+    image.onerror = () => {
+      wrap.replaceChildren(agentLetterTile(row));
+      wrap.classList.add("is-lettered");
+    };
     image.src = carried;
     wrap.appendChild(image);
     return wrap;
@@ -2565,8 +2599,18 @@ function agentIcon(row) {
   wrap.appendChild(agentLetterTile(row));
   // A row without a domain is a placeholder from before the registry loaded;
   // it keeps the letter rather than asking about nothing.
-  if (row.favicon_domain) paintAgentMark(wrap, row.favicon_domain);
+  const domain = row.favicon_domain?.trim().toLowerCase();
+  if (domain && defer && deferredAgentMarks && !agentMarks.has(domain)) {
+    wrap.dataset.deferredMark = domain;
+    deferredAgentMarks.observe(wrap);
+  } else if (domain) {
+    paintAgentMark(wrap, domain);
+  }
   return wrap;
+}
+
+for (const heading of document.querySelectorAll(".provider-heading")) {
+  heading.prepend(agentIcon({ id: heading.dataset.provider, favicon_domain: heading.dataset.faviconDomain }, true));
 }
 
 /* The pill row: 자동, 에이전트 없음, then one per installed agent.
@@ -2576,13 +2620,12 @@ function agentIcon(row) {
  * back out of, and it reads as 자동 until the tool appears. */
 function paintAgentPills() {
   const host = el("agent-pills");
-  host.replaceChildren();
   const installed = installedAgents();
   const chosenId = defaultAgentId();
   const chosen = chosenId && installed.some((row) => row.id === chosenId)
     ? defaultAgent
     : defaultAgent.kind === "blank" ? AGENT_BLANK : AGENT_AUTO;
-  const pill = (preference, label, front) => {
+  const pill = (preference, label, makeFront) => {
     const button = document.createElement("button");
     button.className = "agent-pill";
     button.type = "button";
@@ -2597,17 +2640,26 @@ function paintAgentPills() {
     // Orca leads 자동's pill with its check and ends every other pill with
     // one (`AgentsPane`, plugin-command-keybindings-BRnuynSD.js:1494-1521) —
     // the auto pill is the only one with no icon to open with.
-    if (front) button.append(front, name, mark);
+    if (makeFront) button.append(makeFront(), name, mark);
     else button.append(mark, name);
     button.addEventListener("click", () => chooseDefaultAgent(preference));
-    host.appendChild(button);
+    return button;
   };
-  pill(AGENT_AUTO, t("settings.agents.auto", "자동"));
-  const blank = document.createElement("span");
-  blank.className = "agent-ico";
-  blank.innerHTML = icon("terminal");
-  pill(AGENT_BLANK, t("settings.agents.blank", "에이전트 없음"), blank);
-  for (const row of installed) pill(agentPreference(row.id), row.name, agentIcon(row));
+  const item = (preference, label, makeFront, domain) => ({
+    key: defaultAgentId(preference) ?? preference.kind,
+    shape: [label, domain, sameDefaultAgent(preference, chosen)],
+    make: () => pill(preference, label, makeFront),
+  });
+  reconcileSettingsRows(host, [
+    item(AGENT_AUTO, t("settings.agents.auto", "자동")),
+    item(AGENT_BLANK, t("settings.agents.blank", "에이전트 없음"), () => {
+      const blank = document.createElement("span");
+      blank.className = "agent-ico";
+      blank.innerHTML = icon("terminal");
+      return blank;
+    }),
+    ...installed.map(row => item(agentPreference(row.id), row.name, () => agentIcon(row, true), row.favicon_domain)),
+  ]);
 }
 
 /* What each agent will be launched with, keyed by id. Read once when the
@@ -2726,7 +2778,6 @@ function permissionBadge(row) {
 /* One cached record and renderer for Settings and the board inspector. Details
  * are fetched only when opened; ordinary cards and status beats add no RPC. */
 const zoIntegrationRecords = new Map();
-const zoIntegrationViews = new Set();
 
 function zoIntegrationReason(reason) {
   const words = {
@@ -2782,8 +2833,7 @@ function rememberZoIntegration(record) {
   const old = zoIntegrationRecords.get(record.pane);
   if (old && old.updated_at > record.updated_at) return;
   zoIntegrationRecords.set(record.pane, record);
-  for (const view of zoIntegrationViews) {
-    if (!view.isConnected) { zoIntegrationViews.delete(view); continue; }
+  for (const view of document.querySelectorAll("details.zo-integration")) {
     if (view.dataset.pane === record.pane || view.dataset.pane === "") {
       if (view.dataset.pane) view.querySelector("summary").textContent = zoIntegrationSummary(record);
       view.refreshIntegration?.();
@@ -2803,7 +2853,6 @@ function zoIntegrationNode(pane = null) {
   const body = document.createElement("div");
   body.className = "zo-integration-body";
   root.append(summary, body);
-  zoIntegrationViews.add(root);
   let generation = 0;
   async function load(sourceRevision = null) {
     const asking = ++generation;
@@ -2883,7 +2932,7 @@ function agentRow(row) {
     '<span class="agent-chip"></span><span class="agent-row-body">' +
     '<span class="agent-row-name"></span><span class="agent-row-cmd"></span>' +
     '</span><span class="agent-row-note"></span>';
-  line.querySelector(".agent-chip").appendChild(agentIcon(row));
+  line.querySelector(".agent-chip").appendChild(agentIcon(row, true));
   // The launch line, editable — but only for an agent that is actually here.
   // Offering it for one that is not installed would be a setting for something
   // that cannot run.
@@ -3088,7 +3137,8 @@ async function commitAgentLaunch(command, args, hand) {
     failure = error;
   }
   await refreshLaunchPlans();
-  paintAgents();
+  // A rejected edit must restore the saved field even if its plan did not change.
+  paintAgents(args.agent);
   if (failure !== null) showError(String(failure));
 }
 
@@ -3108,21 +3158,52 @@ async function resetAgentLaunch(agent) {
   await commitAgentLaunch("reset_agent_launch", { agent }, handNow());
 }
 
-function paintAgents() {
+// Keep the node (including focus and open details) if its inputs didn't
+// change. Signatures stay on the node, not in serialized DOM attributes.
+function reconcileSettingsRows(host, wanted, keyAttr = "settingsRow") {
+  const previous = new Map(Array.from(host.children, node => [node.dataset[keyAttr], node]));
+  const language = locale === "system" ? systemLocale : locale;
+  const nodes = wanted.map(({ key, shape, make, force }) => {
+    const held = previous.get(key);
+    const signature = JSON.stringify([language, shape]);
+    if (!force && held && held._settingsShape === signature) {
+      previous.delete(key);
+      return held;
+    }
+    const node = make();
+    node.dataset[keyAttr] = key;
+    node._settingsShape = signature;
+    return node;
+  });
+  for (const stale of previous.values()) {
+    for (const mark of stale.querySelectorAll("[data-deferred-mark]")) deferredAgentMarks.unobserve(mark);
+    stale.remove();
+  }
+  reconcileElementOrder(host, nodes);
+  return nodes;
+}
+
+function paintAgents(editedAgent = null) {
   const installed = installedAgents();
   const available = agentRows.filter((row) => !row.installed);
-  el("agent-installed-count").textContent = String(installed.length);
-  el("agent-available-count").textContent = String(available.length);
+  writeTextContent(el("agent-installed-count"), String(installed.length));
+  writeTextContent(el("agent-available-count"), String(available.length));
   const fill = (host, rows, empty) => {
-    host.replaceChildren();
-    if (rows.length === 0) {
-      const line = document.createElement("p");
-      line.className = "agent-row agent-row-name";
-      line.textContent = empty;
-      host.appendChild(line);
-      return;
-    }
-    for (const row of rows) host.appendChild(agentRow(row));
+    reconcileSettingsRows(host, rows.length ? rows.map(row => ({
+      key: row.id,
+      shape: [row.name, row.favicon_domain, row.homepage_url, row.found_as, row.support,
+        row.unsupported_here, row.missing_requirement, row.takes_a_paste, row.readiness?.auth,
+        row.readiness?.evidence, launchPlans.get(row.id)],
+      force: row.id === editedAgent,
+      make: () => agentRow(row),
+    })) : [{
+      key: "", shape: empty, make: () => {
+        const line = document.createElement("p");
+        line.className = "agent-row agent-row-name";
+        line.textContent = empty;
+        return line;
+      },
+    }]);
   };
   fill(
     el("agent-installed"),
@@ -5100,7 +5181,7 @@ async function refreshClaudeAccounts() {
     accountReport = { accounts: [], can_add: false };
   }
   paintClaudeAccounts();
-  void verifyClaudeAccounts();
+  if (accountReport.accounts?.length) void verifyClaudeAccounts();
 }
 
 /* The truth about the TOKENS, asked of the CLI after the rows are already
@@ -5160,7 +5241,6 @@ function paintClaudeAccounts() {
     const key = claudeLoginKey(row);
     if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  const shown = locale === "system" ? systemLocale : locale;
   /* Every row this paint wants, each with the shape it is drawn from. A row
    * whose shape did not move is the row already standing — kept, not rebuilt:
    * the usage answer repaints this list on every beat, and the same rows made
@@ -5176,40 +5256,24 @@ function paintClaudeAccounts() {
     // to achieve it by subtraction.
     {
       key: "",
-      shape: JSON.stringify([shown, !accountReport.active]),
+      shape: !accountReport.active,
       make: () => systemDefaultRow(),
     },
     ...rows.map((row) => {
       const duplicate = (counts.get(claudeLoginKey(row)) ?? 0) > 1;
       return {
         key: row.id,
-        shape: JSON.stringify([
-          shown, row, duplicate, row.id === accountReport.active,
+        shape: [
+          row, duplicate, row.id === accountReport.active,
           row.id === switchingAccount, addingAccount,
-        ]),
+        ],
         make: () => accountRow(row, duplicate),
       };
     }),
   ];
-  const standing = new Map([...host.children].map((line) => [line.dataset.accountRow, line]));
-  const lines = wanted.map(({ key, shape, make }) => {
-    const held = standing.get(key);
-    if (held && held.dataset.accountShape === shape) return held;
-    const line = make();
-    line.dataset.accountRow = key;
-    line.dataset.accountShape = shape;
-    return line;
-  });
-  const keep = new Set(lines);
-  lines.forEach((line, at) => {
-    const there = host.children[at] ?? null;
-    if (there === line) return;
-    if (there && !keep.has(there)) there.replaceWith(line);
-    else host.insertBefore(line, there);
-  });
-  while (host.children.length > lines.length) host.lastElementChild.remove();
-  for (const row of rows) {
-    const gauge = host.querySelector(`.account-gauge[data-account="${CSS.escape(row.id)}"]`);
+  const lines = reconcileSettingsRows(host, wanted, "accountRow");
+  for (const [i, row] of rows.entries()) {
+    const gauge = lines[i + 1].querySelector(".account-gauge");
     const words = accountGaugeWords(row.id);
     if (gauge && gauge.textContent !== words) gauge.textContent = words;
   }
@@ -6353,7 +6417,7 @@ async function refreshCodexAccounts() {
     codexAccountReport = { accounts: [], can_add: false };
   }
   paintCodexAccounts();
-  void verifyCodexAccounts();
+  if (codexAccountReport.accounts?.length) void verifyCodexAccounts();
 }
 
 /* The truth about the TOKENS, asked of the CLI after the rows are on screen.
@@ -6390,20 +6454,21 @@ async function verifyCodexAccounts() {
 
 function paintCodexAccounts() {
   const rows = codexAccountReport.accounts ?? [];
-  el("codex-account-count").textContent = String(rows.length);
+  writeTextContent(el("codex-account-count"), String(rows.length));
   const host = el("codex-account-list");
-  host.replaceChildren();
   // The machine's own login first, always — it is what runs when nothing is
   // chosen, and a list that only shows the managed homes cannot say that.
-  host.appendChild(codexSystemRow());
-  for (const row of rows) host.appendChild(codexAccountRow(row));
+  reconcileSettingsRows(host, [
+    { key: "", shape: [!codexAccountReport.active, codexAccountReport.system_label, codexAccountReport.system_kind], make: codexSystemRow },
+    ...rows.map(row => ({ key: row.id, shape: [row, row.id === codexAccountReport.active], make: () => codexAccountRow(row) })),
+  ]);
   paintCodexAccountAdd();
   say(el("codex-account-note"), () => codexAccountNote(rows));
 }
 
 function paintCodexAccountAdd() {
   const codexAdd = el("codex-account-add");
-  codexAdd.disabled = addingCodexAccount || !codexAccountReport.can_add;
+  writeDisabled(codexAdd, addingCodexAccount || !codexAccountReport.can_add);
   say(codexAdd, () =>
     addingCodexAccount
       ? t("settings.codexAccounts.adding", "브라우저에서 로그인 중…")
@@ -6478,6 +6543,8 @@ async function reloginCodexLogin(button) {
     return;
   } finally {
     addingCodexAccount = false;
+    button.disabled = false;
+    paintCodexAccountAdd();
   }
   codexLoginMoved();
 }
@@ -6599,6 +6666,8 @@ async function reloginCodexAccount(row, button) {
     return;
   } finally {
     addingCodexAccount = false;
+    button.disabled = false;
+    paintCodexAccountAdd();
   }
   codexLoginMoved();
 }
@@ -6690,8 +6759,9 @@ async function refreshGoogleAccount() {
 
 function paintGoogleAccount() {
   const host = el("google-account-list");
-  host.replaceChildren();
-  host.appendChild(googleLoginRow());
+  reconcileSettingsRows(host, [
+    { key: "google", shape: [googleAccount, googleConsentUrl !== null], make: googleLoginRow },
+  ]);
   say(el("google-account-note"), () => googleAccountNote());
 }
 
@@ -6851,6 +6921,7 @@ async function startGoogleLogin(button) {
   try {
     url = await invoke("google_login_start", undefined, { hand: flowHand(started) });
   } catch (error) {
+    button.disabled = false;
     showError(String(error));
     paintGoogleAccount();
     return;
@@ -6991,9 +7062,12 @@ async function refreshCliLogins() {
 
 function paintCliLogins() {
   const host = el("cli-login-list");
-  host.replaceChildren();
   const rows = cliLogins.rows ?? [];
-  for (const row of rows) host.appendChild(cliLoginRow(row));
+  reconcileSettingsRows(host, rows.map(row => ({
+    key: row.agent,
+    shape: [row, cliLoginBusy.get(row.agent), cliLoginExpired(row)],
+    make: () => cliLoginRow(row),
+  })));
   say(el("cli-login-note"), () =>
     rows.length === 0
       ? t("settings.cliLogins.noRows", "이 창이 아는 CLI 로그인 길이 없습니다")
@@ -7012,6 +7086,7 @@ function paintCliLogins() {
 function cliLoginRow(row) {
   const line = document.createElement("div");
   line.className = "agent-row account-row";
+  line.appendChild(agentIcon({ id: row.agent, name: row.name, favicon_domain: row.favicon_domain }, true));
   const body = document.createElement("span");
   body.className = "agent-row-body account-body";
   const top = document.createElement("span");
@@ -9117,6 +9192,12 @@ function setLocale(code) {
   // Agent pills, permission badges and row notes are built dynamically, so
   // `applyLocale` cannot reach their source keys after they exist.
   paintAgents();
+  if (!settingsView.hidden && settingsPane === "provider-accounts") {
+    paintClaudeAccounts();
+    paintCodexAccounts();
+    paintGoogleAccount();
+    paintCliLogins();
+  }
   paintStackedWorkCount();
   paintUsageSegments();
   paintUsagePanel();
@@ -11058,7 +11139,9 @@ function setSettingsOpen(on, focus = null) {
     // reopens already narrowed by something typed an hour ago is a screen
     // missing most of itself for a reason nobody can see.
     el("settings-search").value = "";
-    paintSettingsSearch();
+    // Search selects a pane itself. Choose the destination once so opening
+    // here doesn't run all the provider probes again while still hidden.
+    paintSettingsSearch(PANE_OF[focus] ?? settingsPane);
     // Re-read on open rather than once at boot: an agent installed while this
     // window was up is the ordinary case, and the scan is a PATH walk.
     refreshAgents();
@@ -11072,25 +11155,9 @@ function setSettingsOpen(on, focus = null) {
     // The branch prefix rides along with it: one section, one open, one pair
     // of reads.
     void refreshWorktreePrefs();
-    // And whether the login behind each account is still there — a directory
-    // emptied by hand between two opens is exactly the case the row's second
-    // line exists to report.
-    refreshClaudeAccounts();
-    // Codex holds accounts by its own mechanism and needs the same re-read —
-    // and one more reason of its own: the row for the machine's own login is
-    // read live out of `~/.codex`, so a `codex login` run in a terminal
-    // changes what this list says without the window doing anything.
-    refreshCodexAccounts();
-    // And Google, for the sharpest version of that reason: `zo login google`
-    // and `zo logout` both write the file this card reads, so the login can
-    // change with the window doing nothing at all.
-    refreshGoogleAccount();
     // Same for the hooks: the agents' own config files are edited by their own
     // tools too, and this screen is where a person comes to check.
     refreshHooks();
-    // The pane the caller pointed at, or the one the screen was last on —
-    // Orca keeps `activeSectionId` across closes the same way.
-    showSettingsPane(PANE_OF[focus] ?? settingsPane);
   }
   settingsSection = on ? focus : null;
   settingsView.hidden = !on;

@@ -2672,10 +2672,16 @@ pub(crate) async fn agent_icon(
     state: State<'_, AppState>,
     domain: String,
 ) -> Result<Option<String>, String> {
+    if let Some(uri) = state.icon_cache().get(&domain) {
+        return Ok(Some(uri));
+    }
     let cache = state.cache_root().to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || icon::agent_icon(&cache, &domain))
-        .await
-        .map_err(|error| error.to_string())
+    let icon_cache = Arc::clone(state.icon_cache());
+    tauri::async_runtime::spawn_blocking(move || {
+        icon_cache.get_or_load(&domain, |clean| icon::agent_icon(&cache, clean))
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Mint the file Orca's "New Markdown" mints: `untitled.md` in the checkout
