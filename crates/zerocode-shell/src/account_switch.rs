@@ -1757,16 +1757,33 @@ struct Followers {
     person: u32,
     /// Left where they are, each worker with why.
     left: Vec<(String, String)>,
+    /// Every worker the look found seated, wherever it stood — the ones on
+    /// the landing already among them (t-124041).
+    seen: Vec<String>,
 }
 
 /// Every Claude pane on an account other than `landing`, sorted by what a
 /// switch can do with it (t-46106). The walled panes this switch moved are
 /// asleep or already on the landing by now, so they are not among them; a
 /// walled pane it could not move is, and may still follow.
-fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms: i64) -> Followers {
+///
+/// A pane at work whose move an older switch still owes (`owed_before`,
+/// t-124041) stays owed, whatever the table says of `landing` now: the end
+/// of its turn asks the table again ([`still_follows`]). On 2026-11-20 the
+/// person picked twice in three seconds, the second pick's table kept every
+/// pane from its account at that moment, and the panes the first pick owed
+/// were refused at their turn's end for a default that had moved on.
+fn followers_of(
+    host: &dyn Host,
+    landing: &str,
+    gauges: &[AccountGauge],
+    owed_before: &[String],
+    now_ms: i64,
+) -> Followers {
     let mut found = Followers::default();
     let seated = crate::orchestration::claude_workers_seated();
     for seat in &seated {
+        found.seen.push(seat.worker.clone());
         let Some(account) = host.pane_account(seat.term) else {
             found.left.push((
                 seat.worker.clone(),
@@ -1794,7 +1811,10 @@ fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms:
             .and_then(|tuning| tuning.model)
             .or_else(|| seat.model.clone());
         let verdict = judge_follower(&account, model.as_deref(), landing, gauges, now_ms);
-        if !matches!(verdict, Decision::Switch { .. }) {
+        let sends = matches!(verdict, Decision::Switch { .. });
+        let still_owed =
+            !sends && owed_before.contains(&seat.worker) && !rests_for_a_move(host, seat.term);
+        if !sends && !still_owed {
             found.left.push((
                 seat.worker.clone(),
                 format!(
@@ -1813,7 +1833,7 @@ fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms:
             generation: seat.generation,
             verdict,
         };
-        if rests_for_a_move(host, seat.term) {
+        if !still_owed && rests_for_a_move(host, seat.term) {
             found.now.push(row);
         } else {
             found.owed.push(row);
@@ -1837,8 +1857,11 @@ fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms:
 /// of them is touched; the ones between turns move now, by the road a
 /// walled pane takes, and the ones at work stay owed for the beat to move
 /// at their turn's end ([`follow_with`]). A move an older switch still owed
-/// a pane is this one's now. `logins` are the ones the switch was approved
-/// under. Answers the moves made.
+/// a pane is this one's now, whatever this one's table says of its landing
+/// (t-124041): a pane at work keeps it, and the end of its turn asks the
+/// table again; a pane this switch finds on the landing already, leaves, or
+/// counts the person's owes the older switch nothing any more. `logins` are
+/// the ones the switch was approved under. Answers the moves made.
 #[allow(clippy::too_many_arguments)]
 fn follow_the_default(
     host: &dyn Host,
@@ -1850,23 +1873,37 @@ fn follow_the_default(
     logins: &[(String, String)],
     now_ms: i64,
 ) -> Vec<MovedPane> {
-    let found = followers_of(host, landing, gauges, now_ms);
+    let owed_before: Vec<String> = book
+        .switches
+        .iter()
+        .filter(|older| older.key != journal.key)
+        .flat_map(|older| older.panes.iter())
+        .filter(|pane| pane.follows && !pane.rested && pane.to_pane.is_none())
+        .map(|pane| pane.worker.clone())
+        .collect();
+    let found = followers_of(host, landing, gauges, &owed_before, now_ms);
     for (worker, why) in &found.left {
         doors.log(&format!(
             "account-switch: {} leaves worker {worker} on its account — {why}",
             journal.key
         ));
     }
+    for row in &found.owed {
+        if !matches!(row.verdict, Decision::Switch { .. }) {
+            doors.log(&format!(
+                "account-switch: {} keeps worker {} owed its move at its turn's end — an older \
+                 switch owed it, and the table keeps it from {landing} now ({}): the end of its \
+                 turn asks the table again",
+                journal.key,
+                row.worker,
+                serde_json::to_string(&row.verdict).unwrap_or_default()
+            ));
+        }
+    }
     journal.person = journal.person.saturating_add(found.person);
     journal.left = journal
         .left
         .saturating_add(u32::try_from(found.left.len()).unwrap_or(u32::MAX));
-    let enlisted: Vec<&str> = found
-        .now
-        .iter()
-        .chain(&found.owed)
-        .map(|row| row.worker.as_str())
-        .collect();
     for row in found.now.iter().chain(&found.owed) {
         let Some(now) = crate::orchestration::worker_now(&row.worker) else {
             continue;
@@ -1887,7 +1924,7 @@ fn follow_the_default(
     for older in &mut book.switches {
         if older.key != journal.key {
             older.panes.retain(|pane| {
-                !(pane.follows && !pane.rested && enlisted.contains(&pane.worker.as_str()))
+                !(pane.follows && !pane.rested && found.seen.contains(&pane.worker))
             });
         }
     }
@@ -2044,7 +2081,7 @@ fn still_follows(
         Decision::Switch { .. }
     ) {
         return Err(format!(
-            "the table no longer sends this pane to {landing} — not moved"
+            "the table does not send this pane to {landing} now — not moved"
         ));
     }
     if !rests_for_a_move(host, row.term) {
