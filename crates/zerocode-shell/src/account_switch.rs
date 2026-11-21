@@ -1979,7 +1979,10 @@ fn followers_of(
             .or_else(|| seat.model.clone());
         let verdict = judge_follower(&account, model.as_deref(), landing, gauges, now_ms);
         let sends = matches!(verdict, Decision::Switch { .. });
-        if !sends && !(wait_for_room && verdict.landing_blocked()) {
+        // On the person's own pick, a landing with no room for the pane
+        // keeps it owed until a newer reading has room (t-124254).
+        let waits = wait_for_room && verdict.landing_blocked();
+        if !sends && !waits {
             found.left.push((
                 seat.worker.clone(),
                 format!(
