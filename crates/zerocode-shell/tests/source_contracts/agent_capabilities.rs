@@ -206,6 +206,18 @@ fn the_model_roads_branch_on_no_agents_name() {
             block_after(&core_orchestration, "fn carries_model("),
         ),
         (
+            "served_by_zo",
+            block_after(&core_orchestration, "fn served_by_zo("),
+        ),
+        (
+            "lists_model",
+            block_after(&core_orchestration, "fn lists_model("),
+        ),
+        (
+            "listed_by_a_cli",
+            block_after(&core_orchestration, "fn listed_by_a_cli("),
+        ),
+        (
             "agent_row",
             block_after(&core_orchestration, "fn agent_row("),
         ),

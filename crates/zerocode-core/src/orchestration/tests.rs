@@ -13617,7 +13617,13 @@ fn an_auto_summons_takes_a_listed_cli_only_on_a_fresh_list_that_holds_its_model(
         !example.contains(&"grok".to_string()),
         "an unread list said yes: {example:?}"
     );
-    assert!(example.contains(&"antigravity".to_string()), "{example:?}");
+    // An id the family table pins to no provider that a CLI's own fresh
+    // list holds goes to the CLIs that list it only (the review's I6): zo's
+    // four stand aside. One no list holds keeps the old rule.
+    assert!(
+        !example.contains(&"antigravity".to_string()),
+        "a CLI's own id went to a zo-served agent: {example:?}"
+    );
     let other = chosen("another-model");
     assert!(!other.contains(&"devin".to_string()), "{other:?}");
     assert!(other.contains(&"antigravity".to_string()), "{other:?}");

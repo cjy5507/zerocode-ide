@@ -17126,27 +17126,57 @@ pub fn runs_model(agent: &str, model: &str) -> bool {
 /// rule first, for every agent: a Claude or GPT id runs on the agent whose
 /// gauge is that provider's, so a CLI that also lists the same id (kiro
 /// lists `claude-sonnet-4.5`) never takes it onto another service's account.
-/// An agent whose models zo's own provider rows serve needs nothing more, as
-/// before. Every other agent carries it only when its lineup — read, no
-/// older than the lineup's refresh rule
-/// ([`crate::summon_difficulty::lineup::REFRESH_AFTER_MS`]) — holds it: an
+/// An agent whose models zo's own provider rows serve carries it as before —
+/// unless the id is one the family table pins to no provider and some CLI's
+/// own list holds it (`listed_elsewhere`, [`listed_by_a_cli`]): then only
+/// the CLIs that list it do (the review's I6 — devin's own ids no longer
+/// go to claude). Every other agent carries it only when its lineup — read,
+/// no older than the lineup's refresh rule — holds it ([`lists_model`]): an
 /// unread or old lineup, or none at all, is "unknown", never "yes".
-fn carries_model(launcher: &dyn Launcher, agent: &str, model: &str, now_ms: i64) -> bool {
-    use crate::capabilities::ModelSource;
+fn carries_model(
+    launcher: &dyn Launcher,
+    agent: &str,
+    model: &str,
+    now_ms: i64,
+    listed_elsewhere: bool,
+) -> bool {
     if !runs_model(agent, model) {
         return false;
     }
-    let source = crate::agent::agent_spec(agent).map(|spec| spec.harness.models);
-    if matches!(
-        source,
-        Some(ModelSource::ZoCatalog(_) | ModelSource::ZoCatalogAll)
-    ) {
-        return true;
+    if served_by_zo(agent) {
+        return !listed_elsewhere;
     }
+    lists_model(launcher, agent, model, now_ms)
+}
+
+/// Whether zo's own provider rows serve `agent`'s models (its row's source).
+fn served_by_zo(agent: &str) -> bool {
+    use crate::capabilities::ModelSource;
+    matches!(
+        crate::agent::agent_spec(agent).map(|spec| spec.harness.models),
+        Some(ModelSource::ZoCatalog(_) | ModelSource::ZoCatalogAll)
+    )
+}
+
+/// Whether `agent`'s lineup — read, no older than the lineup's refresh rule
+/// ([`crate::summon_difficulty::lineup::REFRESH_AFTER_MS`]) — holds `model`.
+fn lists_model(launcher: &dyn Launcher, agent: &str, model: &str, now_ms: i64) -> bool {
     launcher.model_list(agent).is_some_and(|held| {
         now_ms.saturating_sub(held.read_at_ms) < crate::summon_difficulty::lineup::REFRESH_AFTER_MS
             && held.answer.listed().iter().any(|one| one.id == model)
     })
+}
+
+/// Whether `model` is an id the family table pins to no provider's gauge
+/// and some CLI's own fresh lineup holds — a CLI zo does not serve, that
+/// takes a model at all (the review's I6, t-124593).
+fn listed_by_a_cli(launcher: &dyn Launcher, model: &str, now_ms: i64) -> bool {
+    family_gauge(model).flatten().is_none()
+        && crate::agent::AGENT_SPECS.iter().any(|spec| {
+            !served_by_zo(spec.id)
+                && runs_model(spec.id, model)
+                && lists_model(launcher, spec.id, model, now_ms)
+        })
 }
 
 /// The pinned model's own vendor CLI — the agent whose gauge is the one the
@@ -19699,11 +19729,16 @@ pub fn summonable(
     model: Option<&str>,
 ) -> Vec<crate::summon_choice::Summonable> {
     let history = summons_history(ledger);
+    let listed_elsewhere = model.is_some_and(|model| listed_by_a_cli(launcher, model, now_ms));
     installed_rooms(launcher, now_ms)
         .unwrap_or_default()
         .into_iter()
         .filter(|room| !room.at_wall)
-        .filter(|room| model.is_none_or(|model| carries_model(launcher, &room.id, model, now_ms)))
+        .filter(|room| {
+            model.is_none_or(|model| {
+                carries_model(launcher, &room.id, model, now_ms, listed_elsewhere)
+            })
+        })
         .map(|room| {
             let record = history.get(&room.id).cloned().unwrap_or_default();
             crate::summon_choice::Summonable {
