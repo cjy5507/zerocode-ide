@@ -3740,6 +3740,17 @@ return zcEncode({ ok: true, value: {
 } });
 "#;
 
+pub(crate) fn diagnose_facts_script() -> String {
+    automation_script(
+        &serde_json::json!({
+            "unsupported": UNSUPPORTED_BROWSER_WORDS,
+            "login": LOGIN_WORDS,
+            "top": DIAGNOSE_TOP,
+        }),
+        &browser_guest_script(BROWSER_DIAGNOSE_FACTS),
+    )
+}
+
 /// Why a page is not working, as facts: the record by the clock, the ring's
 /// counts, the page's words. The verdict is `browser_diagnose::diagnosis`.
 #[tauri::command]
@@ -3767,15 +3778,7 @@ pub(crate) async fn automate_diagnose(
         .get(label)
         .map(|url| scrub_url_credentials(url))
         .unwrap_or_default();
-    let script = automation_script(
-        &serde_json::json!({
-            "unsupported": UNSUPPORTED_BROWSER_WORDS,
-            "login": LOGIN_WORDS,
-            "top": DIAGNOSE_TOP,
-        }),
-        BROWSER_DIAGNOSE_FACTS,
-    );
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    let reply = page_json(&pane, diagnose_facts_script(), BROWSER_CALLBACK_DEADLINE).await?;
     let value = sanitize_eval_value(page_value(reply)?, 0);
     let text = |held: &serde_json::Value, name: &str| {
         held.get(name)

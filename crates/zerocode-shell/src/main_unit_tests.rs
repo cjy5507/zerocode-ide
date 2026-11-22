@@ -5162,6 +5162,92 @@ fn diagnosis_reads_the_table_top_down() {
     );
 }
 
+mod diagnose_tests {
+    use super::{PageFacts, diagnose_words, diagnosis};
+    use crate::browser_guest_runtime::BROWSER_GUEST_KEY;
+    use crate::cmd::browser::diagnose_facts_script;
+
+    #[test]
+    fn diagnose_script_reads_the_ring_by_its_real_name() {
+        let script = diagnose_facts_script();
+        assert!(
+            !script.contains("__GUEST_STATE__"),
+            "diagnose script still contains the __GUEST_STATE__ placeholder"
+        );
+        let guest_key = BROWSER_GUEST_KEY.trim();
+        assert!(
+            script.contains(&format!("window.{guest_key}?.ring")),
+            "diagnose script must read the ring from window.{guest_key}"
+        );
+    }
+
+    #[test]
+    fn diagnose_words_keeps_page_clues_after_a_document_error() {
+        let facts = PageFacts {
+            url: "https://example.test/forbidden".into(),
+            nav: "finished".into(),
+            document_status: Some(403),
+            login_word: Some("로그인".into()),
+            unsupported_browser_word: Some("unsupported browser".into()),
+            password_field: true,
+            ring_present: true,
+            ..PageFacts::default()
+        };
+
+        let words = diagnose_words(&facts, &diagnosis(&facts));
+        let mut lines = words.lines();
+        assert_eq!(
+            lines.next(),
+            Some("문서 자체가 403 — https://example.test/forbidden")
+        );
+        let details: Vec<_> = lines.collect();
+        assert!(
+            details.contains(&"- 로그인 단서 — 제목에 「로그인」"),
+            "{words}"
+        );
+        assert!(
+            details.contains(&"- 브라우저 지원 단서 — 페이지에 「unsupported browser」"),
+            "{words}"
+        );
+        assert!(!words.contains("비밀번호"), "{words}");
+    }
+
+    #[test]
+    fn diagnose_words_keeps_the_login_verdict_on_a_successful_document() {
+        let facts = PageFacts {
+            nav: "finished".into(),
+            document_status: Some(200),
+            login_word: Some("로그인".into()),
+            ring_present: true,
+            ..PageFacts::default()
+        };
+
+        let words = diagnose_words(&facts, &diagnosis(&facts));
+        assert_eq!(
+            words.lines().next(),
+            Some("로그인 필요 — 제목에 「로그인」 (프로필 기본)")
+        );
+    }
+
+    #[test]
+    fn diagnose_words_omits_clue_lines_without_matching_words() {
+        let facts = PageFacts {
+            nav: "finished".into(),
+            document_status: Some(200),
+            ring_present: true,
+            ..PageFacts::default()
+        };
+
+        let words = diagnose_words(&facts, &diagnosis(&facts));
+        assert!(
+            !words.lines().any(|line| {
+                line.starts_with("- 로그인 단서 —") || line.starts_with("- 브라우저 지원 단서 —")
+            }),
+            "{words}"
+        );
+    }
+}
+
 /// A load is dead by the clock, not by wry.
 ///
 /// Started with no Finished for NAV_DEAD_AFTER_SECS reads `dead` — to a

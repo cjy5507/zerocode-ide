@@ -11191,7 +11191,7 @@ mod tests {
         assert!(
             gathering.contains("browser_records().get(label)")
                 && gathering.contains("nav.observed(now)")
-                && gathering.contains("BROWSER_DIAGNOSE_FACTS")
+                && gathering.contains("diagnose_facts_script()")
                 && gathering.contains("sanitize_eval_value(page_value(reply)?, 0)"),
             "the facts are no longer the record's and the ring's, scrubbed:\n{gathering}"
         );

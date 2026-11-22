@@ -238,6 +238,12 @@ pub(super) fn diagnose_words(facts: &PageFacts, diagnosis: &Diagnosis) -> String
         "- 프로필: {}\n",
         facts.profile.as_deref().unwrap_or("기본")
     ));
+    if let Some(word) = &facts.login_word {
+        out.push_str(&format!("- 로그인 단서 — 제목에 「{word}」\n"));
+    }
+    if let Some(word) = &facts.unsupported_browser_word {
+        out.push_str(&format!("- 브라우저 지원 단서 — 페이지에 「{word}」\n"));
+    }
     out.push_str(&format!(
         "- 실패 요청: {}건{}\n",
         facts.failed_requests,
