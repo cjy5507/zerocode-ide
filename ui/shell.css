@@ -20846,7 +20846,7 @@ details[open] > .helper-cap::after {
   max-height: min(40dvh, 24rem);
   overflow-y: auto;
   padding: var(--space-1);
-  border: var(--rule-width) solid var(--chat-composer-edge);
+  border: 1px solid var(--chat-composer-edge);
   border-radius: var(--radius-md);
   background: var(--surface-raised);
   box-shadow: var(--shadow-soft);
@@ -20861,12 +20861,12 @@ details[open] > .helper-cap::after {
   position: fixed;
   inset: auto;
   /* The room the window leaves the menu, its edges kept, is the painter's
-   * (`--menu-room`, `standComposerMenu`). The box stands inside it, its own
-   * padding and edge within (t-125261: a row longer than a 320px window), and
-   * stands 16rem of content wherever the room allows, as it always stood. */
-  --menu-content-room: calc(var(--menu-room, 100vw) - 2 * (var(--space-1) + var(--rule-width)));
-  min-width: min(16rem, var(--menu-content-room));
-  max-width: var(--menu-content-room);
+   * (`--menu-room`, `standComposerMenu`): the box — its padding and edge
+   * within, as every box here is measured — stands inside it (t-125261: a
+   * row longer than a 320px window), and 16rem wide wherever the room
+   * allows, as it always stood. */
+  min-width: min(16rem, var(--menu-room, 100vw));
+  max-width: var(--menu-room, 100vw);
 }
 
 .composer-menu-search {
@@ -20875,7 +20875,6 @@ details[open] > .helper-cap::after {
   top: 0;
   z-index: 1;
   width: 100%;
-  box-sizing: border-box;
   margin-bottom: var(--space-1);
   padding: var(--space-1) var(--space-2);
   border: var(--rule-width) solid var(--edge-rule);
