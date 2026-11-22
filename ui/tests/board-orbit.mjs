@@ -1431,6 +1431,9 @@ async function testOrbitStillness(browser, origin, ok) {
       document.querySelector('#board-view [data-relations-view="orbit"]').click();
       await window.__BOARD_SETTLED__();
     });
+    await page.evaluate((timeout) => window.__UNTIL__(
+      () => (window.__ORBIT__()?.frames ?? 0) > 0, "the first reduced-motion 3D frame", timeout,
+    ), ORBIT_SETTLE_MS);
     const yaw = await page.evaluate(() => window.__ORBIT__()?.camera?.yaw ?? null);
     const still = await countOver(page, 800);
     ok("reduced motion stands the 3D view still: no turning and no frames while nothing changes",

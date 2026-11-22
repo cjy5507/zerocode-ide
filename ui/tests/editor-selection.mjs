@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { installHarnessWaits } from "./harness-waits.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The markdown editor's selection is the terminal's own highlight.
@@ -67,10 +68,10 @@ export async function exerciseEditorSelection(aaBodyText) {
   });
   await openFile("/w/repo/guide.md");
   const tab = tabs.find((one) => one.id === "file:/w/repo/guide.md");
-  tab.raw = true;
-  paintFileView(tab);
-  const editor = editorShowing(tab);
   const view = [...document.querySelectorAll(".file-view")].find((one) => one.dataset.tab === tab.id);
+  view.querySelector(".file-view-mode").click();
+  await window.__UNTIL__(() => editorShowing(tab), "the markdown source editor");
+  const editor = editorShowing(tab);
   const host = view.querySelector(".file-edit");
   editor.focus();
   editor.dispatch({ selection: { anchor: 0, head: editor.state.doc.length } });
@@ -123,6 +124,7 @@ export async function exerciseEditorSelection(aaBodyText) {
 export async function testEditorSelection(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
+    await installHarnessWaits(page);
     const seen = await page.evaluate(exerciseEditorSelection, AA_BODY_TEXT);
     const both = [seen.current, seen.flipped];
     ok(
