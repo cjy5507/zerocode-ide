@@ -10699,9 +10699,7 @@ listen("hook:activity", (event) => {
   // A tool call is a line in the transcript already; the conversation view on
   // this pane, if it is up, reads it now (`pollHelperPages` is the one reader).
   const term = Number(/^term:(\d+)$/.exec(pane)?.[1]);
-  if (Number.isInteger(term) && paneChatOn(term) && activeHelperPage()?.worker.term === term) {
-    void pollHelperPages();
-  }
+  if (Number.isInteger(term) && paneChatOn(term)) readPaneChatOnHook(term);
   // Sidebar rows and graph nodes both show the current activity. The shared
   // paint coalescer still asks the backend once; keyed graph nodes update only
   // this line and reuse the unchanged topology and edges.
@@ -13795,7 +13793,7 @@ listen("hook:agent", (event) => {
     // The transcript this page reads was written before the hook fired — the
     // answer before Stop, the call before PreToolUse — so the page on this
     // pane reads it now, not on its next tick.
-    if (activeHelperPage()?.worker.term === term) void pollHelperPages();
+    readPaneChatOnHook(term);
   }
   // Which conversation, when the event said. Recorded before the early return
   // below: a repeated state is still the event that told us the session id, and
@@ -15949,10 +15947,19 @@ const helperClock = idlePoller({
   tick: () => void pollHelperPages(),
 });
 
-// A pane's conversation is not read while nobody can see the window
-// (`pollHelperPages`): its hooks are kept, and it is at rest by the time the
-// window is seen again, so `helperClock` will not wake it — read and paint it
-// once, then (t-125261).
+/* A hook's word to the pane's page on screen: read now — the transcript the
+ * page reads was written before the hook fired. Never while nobody can see the
+ * window: a document its CLI writes whole is read whole, and a hidden window's
+ * hooks read it at every call for no one (t-125261). The hooks are kept, and
+ * the window seen again reads the page once (below); an answer a read already
+ * out brings is delivered as ever (`pollHelperPages`). */
+function readPaneChatOnHook(term) {
+  if (!windowAway() && activeHelperPage()?.worker.term === term) void pollHelperPages();
+}
+
+// A pane's conversation its hooks did not read while nobody could see the
+// window is at rest by the time the window is seen again, so `helperClock`
+// will not wake it — read and paint it once, then (t-125261).
 document.addEventListener("visibilitychange", () => {
   if (windowAway()) return;
   const page = activeHelperPage();
@@ -15964,17 +15971,13 @@ document.addEventListener("visibilitychange", () => {
 // `hook:agent` follows it: the page on screen reads it (t-125261).
 listen("pane:live-turns", ({ payload }) => {
   const term = payload?.term;
-  if (paneChatOn(term) && activeHelperPage()?.worker.term === term) void pollHelperPages();
+  if (paneChatOn(term)) readPaneChatOnHook(term);
 });
 
 async function pollHelperPages() {
   const tab = activeHelperPage();
   if (!tab) return;
   const held = tab.worker.helper;
-  // A pane's own conversation waits until the window is seen again: a document
-  // its CLI writes whole is read whole, and a hidden window's hooks would read
-  // it at every call for no one (t-125261).
-  if (held.id === PANE_LOG_ID && windowAway()) return;
   // News that arrives while a read is out is not lost: the read that is out
   // cannot carry it, so one more follows it (`wire:update` between polls).
   if (held.polling) {
