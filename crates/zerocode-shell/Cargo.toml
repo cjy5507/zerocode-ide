@@ -188,6 +188,7 @@ semver = "1"
 # are in the lock through the plugin, at the versions it uses.
 tar = "0.4"
 flate2 = "1"
+mimalloc = { version = "=0.1.52", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 # The app selects one native store explicitly instead of relying on keyring's

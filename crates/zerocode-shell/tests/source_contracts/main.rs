@@ -17552,7 +17552,8 @@ mod tests {
             window.contains("return (editorWrapCompartment ??= new window.CM6.Compartment());")
                 && window.contains("editorWrapCompartmentOf().reconfigure(extension)")
                 && window.contains("tab.cmState = tab.cmState.update({")
-                && window.contains("return (diffWrapCompartment ??= new window.CM6.Compartment());")
+                && window
+                    .contains("return (diffWrapCompartment ??= new window.CM6.Compartment());")
                 && window.contains("diffWrapCompartmentOf().reconfigure(extension)"),
             "a wrap change no longer reconfigures mounted, parked, and diff editor states"
         );

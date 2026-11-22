@@ -16,6 +16,9 @@
 // behind it is the giveaway of a port that was never finished.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[global_allocator]
+static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
@@ -257,6 +260,7 @@ mod vault_opencode_scan;
 mod vault_walk;
 mod vendor_cli;
 mod view_census;
+mod webview_memory;
 mod window_runtime;
 mod wire_runtime;
 mod work_item_store;
@@ -4141,20 +4145,25 @@ fn main() -> ExitCode {
             } if label == MAIN_WINDOW_LABEL && cmd::appearance::close_asks_first(handle) => {
                 api.prevent_close();
             }
-            tauri::RunEvent::WindowEvent { label, event, .. }
-                if label == MAIN_WINDOW_LABEL
-                    && matches!(event, tauri::WindowEvent::Focused(true)) =>
-            {
-                handle
-                    .state::<AppState>()
-                    .native_tray()
-                    .clear_activity(handle);
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Focused(focused),
+                ..
+            } => {
+                if label == MAIN_WINDOW_LABEL && focused {
+                    handle
+                        .state::<AppState>()
+                        .native_tray()
+                        .clear_activity(handle);
+                }
+                webview_memory::note_window_focus(handle, &label, focused);
             }
             tauri::RunEvent::WindowEvent {
                 label,
                 event: tauri::WindowEvent::Destroyed,
                 ..
             } => {
+                webview_memory::forget_window(&label);
                 note_window_event(
                     handle.state::<AppState>().local_data_root(),
                     &format!("window destroyed: {label}"),
