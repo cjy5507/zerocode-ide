@@ -164,7 +164,17 @@ export function checkWindowScope({ scripts, vendored = [], acorn, eslintScope, n
   // block resolved, its own declarations among them; ESLint settles those
   // against the global scope's variables afterwards, and so does this.
   const declared = new Set(scope.variables.map((variable) => variable.name));
-  const allowed = new Set([...ECMASCRIPT, ...BROWSER, ...vendored.flatMap((script) => VENDORED[script] ?? [])]);
+  const lazyVendored = [];
+  for (const { text } of scripts) {
+    for (const [, lazy] of text.matchAll(/loadVendorScript\(\s*["']\.\/(vendor\/[^"']+)["']/g)) {
+      if (!vendored.includes(lazy) && !lazyVendored.includes(lazy)) lazyVendored.push(lazy);
+    }
+  }
+  const allowed = new Set([
+    ...ECMASCRIPT,
+    ...BROWSER,
+    ...[...vendored, ...lazyVendored].flatMap((script) => VENDORED[script] ?? []),
+  ]);
 
   const findings = [];
   // JavaScript permits repeated function/var declarations, but the window's

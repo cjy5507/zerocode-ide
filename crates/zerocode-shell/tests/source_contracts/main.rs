@@ -7330,28 +7330,19 @@ mod tests {
         let styles = include_str!("../../../../ui/shell.css");
         let tokens = include_str!("../../../../ui/tokens.css");
 
-        // The vendor file is loaded, and it is loaded BEFORE the window —
-        // `defer` preserves document order, which is what lets `paintEditor`
-        // read `window.CM6` without a loader or a readiness check.
+        let boot = include_str!("../../../../ui/shell-boot.js");
+        let dist = include_str!("../../../../scripts/build-ui-dist.mjs");
         assert!(
-            markup.contains("<script defer src=\"./vendor/cm6.js\"></script>"),
-            "ui/index.html does not load the vendored editor, so `window.CM6` \
-             is undefined the first time a file is opened"
+            !markup.contains("./vendor/cm6.js"),
+            "ui/index.html loads vendor/cm6.js eagerly at boot instead of on demand"
         );
-        let vendor_at = markup
-            .find("./vendor/cm6.js")
-            .expect("the vendor script tag was just asserted");
-        let first = crate::ui_source::WINDOW_PARTS
-            .first()
-            .map(|(name, _)| format!("./{name}"))
-            .expect("the window has at least one part");
-        let window_at = markup
-            .find(&first)
-            .expect("ui/index.html has always loaded the window");
         assert!(
-            vendor_at < window_at,
-            "the editor is loaded after the window that uses it — with two \
-             `defer` scripts the order in the markup IS the execution order"
+            boot.contains("loadVendorScript(\"./vendor/cm6.js\", \"CM6\")"),
+            "ui/shell-boot.js does not lazy-load vendor/cm6.js on demand"
+        );
+        assert!(
+            dist.contains("\"vendor/cm6.js\""),
+            "scripts/build-ui-dist.mjs does not ship vendor/cm6.js"
         );
 
         // Monaco is not here, on any road.
@@ -7399,19 +7390,14 @@ mod tests {
                     .to_string()
             })
             .collect();
-        let mut expected = vec![
-            "./vendor/cm6.js".to_string(),
-            "./vendor/three.js".to_string(),
-        ];
-        expected.extend(
-            crate::ui_source::WINDOW_PARTS
-                .iter()
-                .map(|(name, _)| format!("./{name}")),
-        );
+        let expected: Vec<String> = crate::ui_source::WINDOW_PARTS
+            .iter()
+            .map(|(name, _)| format!("./{name}"))
+            .collect();
         assert_eq!(
             sources, expected,
-            "ui/index.html loads something other than the vendored editor and \
-             this window's own files, or loads them in the wrong order"
+            "ui/index.html loads something other than this window's own files, \
+             or loads them in the wrong order"
         );
 
         // The highlight ramp is OURS. Orca calls `defineTheme` zero times and
@@ -7511,16 +7497,23 @@ mod tests {
     #[test]
     fn the_3d_renderer_is_vendored_three_on_the_editors_road() {
         let markup = include_str!("../../../../ui/index.html");
-        let tag = "<script defer src=\"./vendor/three.js\"></script>";
-        let vendor_at = markup
-            .find(tag)
-            .expect("ui/index.html does not load the vendored three.js");
-        let view_at = markup
-            .find("./shell-board-orbit.js")
-            .expect("ui/index.html loads the 3D view");
+        let boot = include_str!("../../../../ui/shell-boot.js");
+        let dist = include_str!("../../../../scripts/build-ui-dist.mjs");
         assert!(
-            vendor_at < view_at,
-            "three.js is loaded after the view that uses it"
+            !markup.contains("./vendor/three.js"),
+            "ui/index.html loads vendor/three.js eagerly at boot instead of on demand"
+        );
+        assert!(
+            boot.contains("loadVendorScript(\"./vendor/three.js\", \"THREE\")"),
+            "ui/shell-boot.js does not lazy-load vendor/three.js on demand"
+        );
+        assert!(
+            dist.contains("\"vendor/three.js\""),
+            "scripts/build-ui-dist.mjs does not ship vendor/three.js"
+        );
+        assert!(
+            markup.contains("./shell-board-orbit.js"),
+            "ui/index.html does not load the 3D view"
         );
 
         // The CSP admits no worker and no `blob:`, and the window's console
@@ -17556,11 +17549,11 @@ mod tests {
             );
         }
         assert!(
-            window.contains("const editorWrapCompartment = new window.CM6.Compartment();")
-                && window.contains("editorWrapCompartment.reconfigure(extension)")
+            window.contains("return (editorWrapCompartment ??= new window.CM6.Compartment());")
+                && window.contains("editorWrapCompartmentOf().reconfigure(extension)")
                 && window.contains("tab.cmState = tab.cmState.update({")
-                && window.contains("const diffWrapCompartment = new window.CM6.Compartment();")
-                && window.contains("diffWrapCompartment.reconfigure(extension)"),
+                && window.contains("return (diffWrapCompartment ??= new window.CM6.Compartment());")
+                && window.contains("diffWrapCompartmentOf().reconfigure(extension)"),
             "a wrap change no longer reconfigures mounted, parked, and diff editor states"
         );
         let editor_typed = block_after(window, "function editorTyped(tab, typed) {");

@@ -518,6 +518,51 @@ function idlePoller({ wanted, every, tick, onResume }) {
   return { sync };
 }
 
+const vendorLoads = new Map();
+let vendorCm6Failed = false;
+let vendorThreeFailed = false;
+
+function loadVendorScript(src, globalName) {
+  if (typeof window[globalName] === "object" && window[globalName] !== null) {
+    return Promise.resolve(window[globalName]);
+  }
+  let pending = vendorLoads.get(src);
+  if (pending) return pending;
+  pending = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = () => {
+      if (typeof window[globalName] === "object" && window[globalName] !== null) {
+        resolve(window[globalName]);
+      } else {
+        vendorLoads.delete(src);
+        reject(new Error(`${src} loaded without window.${globalName}`));
+      }
+    };
+    script.onerror = () => {
+      vendorLoads.delete(src);
+      reject(new Error(`failed to load ${src}`));
+    };
+    document.head.appendChild(script);
+  });
+  vendorLoads.set(src, pending);
+  return pending;
+}
+
+function ensureVendorCm6() {
+  return loadVendorScript("./vendor/cm6.js", "CM6").catch((error) => {
+    vendorCm6Failed = true;
+    throw error;
+  });
+}
+
+function ensureVendorThree() {
+  return loadVendorScript("./vendor/three.js", "THREE").catch((error) => {
+    vendorThreeFailed = true;
+    throw error;
+  });
+}
+
 const tabstrip = el("tabstrip");
 const stage = el("stage");
 const placeholder = el("placeholder");

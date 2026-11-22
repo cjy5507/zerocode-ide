@@ -15,27 +15,6 @@
          the design cannot drift apart. -->
     <link rel="stylesheet" href="./tokens.css" />
     <link rel="stylesheet" href="./shell.css" />
-    <!-- The editor, vendored. CodeMirror 6 built offline into one IIFE that
-         hangs itself on `window.CM6` — see ui/vendor/build-cm6.mjs for what is
-         in it and how to remake it. It is FIRST and it is `defer` like the
-         window: defer preserves order, so `shell.js` runs with `CM6` already
-         defined and `paintEditor` never has to wait for a loader.
-
-         Measured, because the choice was measured: Orca ships Monaco 0.55.1 —
-         15 MB of editor on disk, +22 MB of main-thread heap, and a separate
-         11 MB TypeScript worker isolate for every `.ts` tab — to run syntax
-         highlighting, find/replace, folding and multi-cursor with its LSP
-         client never called and all three diagnostic channels switched off.
-         This file is that same working surface at 1.38 MB, one thread, no
-         worker and no `blob:` URL — which is why the CSP below is untouched. -->
-    <script defer src="./vendor/cm6.js"></script>
-    <!-- The window's one WebGL renderer, vendored the same way: three.js
-         built offline into one IIFE on `window.THREE` — see
-         ui/vendor/build-three.mjs for which symbols are in it and how to
-         remake it. Before the window for the same `defer` reason, so
-         `shell-knowledge-3d.js` and `shell-board-orbit.js` find `THREE`
-         defined. No worker, no `blob:`. -->
-    <script defer src="./vendor/three.js"></script>
     <script defer src="./shell-boot.js"></script>
     <script defer src="./shell-i18n.js"></script>
     <script defer src="./shell-pane-lifecycle.js"></script>

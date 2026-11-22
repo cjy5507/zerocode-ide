@@ -593,6 +593,17 @@ function paintKnowledgeUniverse(view, layout) {
     return;
   }
   if (universe === undefined) {
+    if (typeof THREE !== "object" || THREE === null) {
+      void ensureVendorThree().then(
+        () => void paintKnowledgeView(),
+        () => {
+          knowledgeUniverseFailed = true;
+          knowledgeUniverseRising = false;
+          paintKnowledgeDimension(view);
+        },
+      );
+      return;
+    }
     universe = makeKnowledgeUniverse(view);
     if (!universe.mount()) {
       universe.dispose();

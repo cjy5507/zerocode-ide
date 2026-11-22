@@ -8877,6 +8877,11 @@ body.is-dragging-pane {
   border-left: var(--rule-width) solid var(--edge-rule);
 }
 
+.diff-chunk {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto calc(var(--space-5) * 50);
+}
+
 .diff-line {
   display: flex;
   padding-right: var(--space-4);

@@ -4292,13 +4292,16 @@ async function openDiff(path, opts = {}) {
     setActiveTab(held.id);
     return;
   }
+  const cm6Ready = diffSideBySide ? ensureVendorCm6() : null;
   let view;
   try {
     view = await invoke("file_diff", { path });
   } catch (error) {
+    cm6Ready?.catch(() => {});
     showError(`${path}: ${error}`);
     return;
   }
+  if (cm6Ready) await cm6Ready.catch(() => {});
   // The notes are read before the diff is drawn, not after: a diff that
   // paints bare and then grows its cards a beat later reads as flicker.
   await refreshDiffNotes();
@@ -6206,7 +6209,12 @@ function notebookCellEl(cell) {
   return card;
 }
 
+const NB_FIRST_CELLS = 16;
+const NB_PROGRESSIVE_MIN = 24;
+const NB_STEP_CELLS = 24;
+
 function paintNotebook(body, text) {
+  const stamp = (body._nbPaint = (body._nbPaint ?? 0) + 1);
   let book;
   try {
     book = parseNotebook(text);
@@ -6217,15 +6225,46 @@ function paintNotebook(body, text) {
       error: String(error?.message ?? error),
     });
     body.appendChild(said);
-    return;
+    return { total: 0, code: 0, markdown: 0 };
   }
   const head = document.createElement("div");
   head.className = "nb-head";
   head.textContent = [book.kernel, book.language, t("nb.cells", "{{n}}개 셀", { n: book.cells.length })]
     .filter(Boolean)
     .join(" · ");
-  body.appendChild(head);
-  for (const cell of book.cells) body.appendChild(notebookCellEl(cell));
+  const firstCount = book.cells.length > NB_PROGRESSIVE_MIN ? NB_FIRST_CELLS : book.cells.length;
+  const frag = document.createDocumentFragment();
+  frag.appendChild(head);
+  for (let index = 0; index < firstCount; index += 1) {
+    frag.appendChild(notebookCellEl(book.cells[index]));
+  }
+  body.appendChild(frag);
+  if (firstCount < book.cells.length) {
+    const savedMdWhere = mdWhere;
+    let cursor = firstCount;
+    const step = () => {
+      if (body._nbPaint !== stamp || !body.isConnected) return;
+      const end = Math.min(cursor + NB_STEP_CELLS, book.cells.length);
+      const batch = document.createDocumentFragment();
+      const prev = mdWhere;
+      mdWhere = savedMdWhere;
+      try {
+        for (; cursor < end; cursor += 1) batch.appendChild(notebookCellEl(book.cells[cursor]));
+      } finally {
+        mdWhere = prev;
+      }
+      body.appendChild(batch);
+      if (cursor < book.cells.length) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  let code = 0;
+  let markdown = 0;
+  for (const cell of book.cells) {
+    if (cell.kind === "code") code += 1;
+    else if (cell.kind === "markdown") markdown += 1;
+  }
+  return { total: book.cells.length, code, markdown };
 }
 
 /* ---- 노트북 탭 (1-g40) ----
@@ -6284,20 +6323,20 @@ function paintIpynbView(tab) {
   page.replaceChildren();
   // 마크다운 셀 안의 상대 경로와 앵커는 노트북이 선 자리에서 잰다(1-g36의 자리).
   mdWhere = { base: dirname(tab.path), page };
+  let tally;
   try {
-    paintNotebook(page, tab.text ?? "");
+    tally = paintNotebook(page, tab.text ?? "");
   } finally {
     mdWhere = null;
   }
   // 셈은 그려진 판에서 읽는다 — 판이 곧 원본이므로 JSON을 두 번 가르지 않는다.
-  const cells = [...page.querySelectorAll(".nb-cell")];
   const counts = host.querySelector(".ipynb-counts");
   counts.textContent =
-    cells.length === 0
+    tally.total === 0
       ? ""
       : t("ipynb.counts", "코드 {{code}} · 마크다운 {{markdown}}", {
-          code: String(cells.filter((one) => one.dataset.kind === "code").length),
-          markdown: String(cells.filter((one) => one.dataset.kind === "markdown").length),
+          code: String(tally.code),
+          markdown: String(tally.markdown),
         });
 }
 
@@ -6390,20 +6429,28 @@ function diffWordSpans(lines) {
   return marks;
 }
 
+let diffLineTemplate = null;
+function diffLineShell() {
+  if (!diffLineTemplate) {
+    diffLineTemplate = document.createElement("div");
+    diffLineTemplate.innerHTML =
+      '<span class="diff-num"></span><span class="diff-num"></span><span class="diff-text"></span>';
+  }
+  return diffLineTemplate.cloneNode(true);
+}
+
 /* One row of a diff: two gutters, the text, and the word mark where a pair
  * of lines differs in the middle (`diffWordSpans`). The review surface and
  * the conversation's inline diff under an edit (`toolDiffNode`) draw the
  * same row from the same backend shape (`zerocode_core::compact_diff`). */
 function diffLineNode(line, marked) {
-  const row = document.createElement("div");
+  const row = diffLineShell();
   row.className = `diff-line diff-line--${line.kind}`;
-  row.innerHTML =
-    '<span class="diff-num"></span><span class="diff-num"></span>' +
-    '<span class="diff-text"></span>';
-  const [before, after] = row.querySelectorAll(".diff-num");
+  const before = row.firstChild;
+  const after = before.nextSibling;
+  const text = after.nextSibling;
   before.textContent = line.old ?? "";
   after.textContent = line.new ?? "";
-  const text = row.querySelector(".diff-text");
   if (marked) {
     const [from, to] = marked;
     const word = document.createElement("span");
@@ -6416,6 +6463,9 @@ function diffLineNode(line, marked) {
   return row;
 }
 
+const DIFF_CHUNK_MIN_LINES = 200;
+const DIFF_CHUNK_SIZE = 50;
+
 function paintDiffLines(body, path, lines, repaint) {
   const notes = diffNotes.filter((note) => note.file_path === path);
   const byLine = new Map();
@@ -6425,20 +6475,28 @@ function paintDiffLines(body, path, lines, repaint) {
     byLine.set(note.line_number, at);
   }
   const words = diffWordSpans(lines);
+  const frag = document.createDocumentFragment();
+  const chunked = lines.length > DIFF_CHUNK_MIN_LINES;
+  let target = frag;
   for (const [index, line] of lines.entries()) {
+    if (chunked && index % DIFF_CHUNK_SIZE === 0) {
+      target = document.createElement("div");
+      target.className = "diff-chunk";
+      frag.appendChild(target);
+    }
     const row = diffLineNode(line, words.get(index));
     const lineNumber = Number(line.new ?? 0);
     if (lineNumber > 0) row.dataset.line = String(lineNumber);
     // The annotated line marks itself, not just the card under it: on a long
     // hunk the card scrolls away from the line it is about.
     if (lineNumber > 0 && byLine.has(lineNumber)) row.classList.add("has-note");
-    body.appendChild(row);
+    target.appendChild(row);
     if (lineNumber > 0) {
       for (const note of byLine.get(lineNumber) ?? []) {
-        body.appendChild(noteCard({ path, repaint }, note));
+        target.appendChild(noteCard({ path, repaint }, note));
       }
       if (composingAt?.line === lineNumber && composingAt?.path === path) {
-        body.appendChild(
+        target.appendChild(
           noteComposer({
             initial: "",
             onCancel: () => {
@@ -6465,8 +6523,9 @@ function paintDiffLines(body, path, lines, repaint) {
     const empty = document.createElement("div");
     empty.className = "diff-line diff-line--meta";
     empty.textContent = t("sourceControl.noCommit", "비교할 커밋이 없습니다 — 아직 추적되지 않는 파일입니다.");
-    body.appendChild(empty);
+    frag.appendChild(empty);
   }
+  body.appendChild(frag);
   return notes;
 }
 
@@ -6861,10 +6920,10 @@ function applyEditingPrefs(next) {
   if (before?.editor_minimap_enabled !== editingPrefs.editor_minimap_enabled) {
     for (const held of editorViews.values()) syncEditorMinimap(held);
   }
-  if (before?.editor_word_wrap !== editingPrefs.editor_word_wrap) {
+  if (before?.editor_word_wrap !== editingPrefs.editor_word_wrap && window.CM6) {
     const extension = editingPrefs.editor_word_wrap ? window.CM6.EditorView.lineWrapping : [];
     for (const held of editorViews.values()) {
-      held.editor.dispatch({ effects: editorWrapCompartment.reconfigure(extension) });
+      held.editor.dispatch({ effects: editorWrapCompartmentOf().reconfigure(extension) });
     }
     // Background files have no EditorView: their immutable state is parked on
     // the tab so undo, folds, selection and history survive a switch. Apply
@@ -6872,15 +6931,15 @@ function applyEditingPrefs(next) {
     for (const tab of tabs) {
       if (!tab.cmState) continue;
       tab.cmState = tab.cmState.update({
-        effects: editorWrapCompartment.reconfigure(extension),
+        effects: editorWrapCompartmentOf().reconfigure(extension),
       }).state;
     }
   }
-  if (before?.diff_word_wrap !== editingPrefs.diff_word_wrap) {
+  if (before?.diff_word_wrap !== editingPrefs.diff_word_wrap && window.CM6) {
     const extension = editingPrefs.diff_word_wrap ? window.CM6.EditorView.lineWrapping : [];
     for (const held of diffViews.values()) {
-      held.merge.a.dispatch({ effects: diffWrapCompartment.reconfigure(extension) });
-      held.merge.b.dispatch({ effects: diffWrapCompartment.reconfigure(extension) });
+      held.merge.a.dispatch({ effects: diffWrapCompartmentOf().reconfigure(extension) });
+      held.merge.b.dispatch({ effects: diffWrapCompartmentOf().reconfigure(extension) });
     }
   }
   if (
@@ -7757,6 +7816,12 @@ function changesMergeBody(tab, section) {
   const CM = window.CM6;
   const host = document.createElement("div");
   host.className = "changes-merge";
+  if (!CM) {
+    void ensureVendorCm6().then(() => {
+      if (stillShowing(tab)) paintChangesSection(tab, section.path);
+    }, () => {});
+    return host;
+  }
   const key = changesSectionKey(tab, section.path);
   dropChangesMerge(key);
   const merge = new CM.MergeView({

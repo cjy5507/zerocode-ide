@@ -364,7 +364,7 @@ function agentOrbitCapable() {
     agentOrbitProbed = true;
     let context = null;
     try {
-      context = typeof window.THREE === "object" ? document.createElement("canvas").getContext("webgl2") : null;
+      context = !vendorThreeFailed ? document.createElement("canvas").getContext("webgl2") : null;
     } catch {
       context = null;
     }
@@ -667,6 +667,18 @@ function agentOrbitShown(state) {
  * 선택만 바뀐 판은 라벨 둘과 빛의 곱만 고친다. 렌더러를 짓지 못한 판은 카드로 다시 선다. */
 function paintAgentOrbit(view, model) {
   if (!agentOrbitShowing(view)) return;
+  if (typeof window.THREE !== "object" || window.THREE === null) {
+    void ensureVendorThree().then(
+      () => {
+        if (agentOrbitShowing(view)) agentOrbitRepaint(view);
+      },
+      () => {
+        agentOrbitBroken = "unsupported";
+        agentOrbitRepaint(view);
+      },
+    );
+    return;
+  }
   const state = agentOrbitState(view);
   if (!state) {
     if (agentOrbitBroken) Promise.resolve().then(() => agentOrbitRepaint(view));

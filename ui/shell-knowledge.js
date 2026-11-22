@@ -926,6 +926,7 @@ function openKnowledgeGraph() {
   knowledgeAskedAt = 0;
   /* 문을 여는 것은 「어느 모드로 서는가」를 한 번 묻는 일이기도 하다(S2). */
   knowledgeEntryPending = true;
+  if (knowledgeGlSupported()) void ensureVendorThree().catch(() => {});
   openTab({ ...KNOWLEDGE_TAB });
 }
 
@@ -9076,6 +9077,13 @@ async function paintKnowledgeView(tab = knowledgeTab()) {
   knowledgeSubgraph(layout);
   paintKnowledgeTier(view);
   /* 판의 크기는 여기서, 점과 선을 쓰기 전에 읽는다 — 프레임의 viewBox가 이것을 쓴다. */
+  if (knowledgeGlSupported() && (typeof THREE !== "object" || typeof THREE.WebGLRenderer !== "function")) {
+    try {
+      await ensureVendorThree();
+    } catch {
+      knowledgeGlAble = false;
+    }
+  }
   const canvas = view.querySelector(".knowledge-canvas");
   layout.viewport = { wide: canvas.clientWidth, tall: canvas.clientHeight, fresh: true };
   knowledgePainterFor(view).paintTopology(layout);

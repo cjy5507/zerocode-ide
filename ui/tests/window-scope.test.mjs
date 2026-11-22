@@ -273,6 +273,11 @@ test("a function defined in a script the page does not load is not defined to th
 test("a vendored bundle's names are the page's only while the page loads the bundle", async () => {
   const withBundle = await ran({ "index.html": html("vendor/three.js", "main.js"), "vendor/three.js": "", "main.js": "THREE.Scene;\n" });
   assert.equal(withBundle.code, 0);
+  const withLazy = await ran({
+    "index.html": html("main.js"),
+    "main.js": "function loadVendorScript(s, g) { return s + g; }\nloadVendorScript(\"./vendor/three.js\", \"THREE\");\nTHREE.Scene;\n",
+  });
+  assert.equal(withLazy.code, 0);
   const without = await ran({ "index.html": html("main.js"), "main.js": "THREE.Scene;\n" });
   assert.equal(without.code, 1);
 });

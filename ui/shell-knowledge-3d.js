@@ -393,7 +393,7 @@ function knowledgeGlSupported() {
   if (knowledgeGlAble !== null) return knowledgeGlAble;
   try {
     /* 렌더러가 실리지 않은 창(`ui/vendor/three.js`가 빠진 판)은 그릴 수 없다 — SVG가 선다. */
-    if (typeof THREE !== "object" || typeof THREE.WebGLRenderer !== "function") {
+    if (vendorThreeFailed) {
       knowledgeGlAble = false;
       return knowledgeGlAble;
     }

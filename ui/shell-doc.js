@@ -1132,6 +1132,8 @@ async function openFile(path, opts = {}) {
     setActiveTab(held.id);
     return;
   }
+  const mode = renderedAs(path);
+  const cm6Ready = mode === "text" || opts.raw ? ensureVendorCm6() : null;
   let opened;
   try {
     opened = await invoke("read_text_file", {
@@ -1139,10 +1141,18 @@ async function openFile(path, opts = {}) {
       ...(opts.allowMissing && { allowMissing: true }),
     });
   } catch (error) {
+    cm6Ready?.catch(() => {});
     sayUnopened(path, error, opts);
     return;
   }
-  const mode = renderedAs(path);
+  if (cm6Ready) {
+    try {
+      await cm6Ready;
+    } catch (error) {
+      sayUnopened(path, error, opts);
+      return;
+    }
+  }
   // Review notes are part of the first Markdown frame. Painting them a beat
   // later makes the document jump and briefly lies about the note count.
   if (mode === "markdown") await refreshDiffNotes();
@@ -1907,8 +1917,14 @@ function editorThemeExtension() {
   return editorTheme;
 }
 
-const editorWrapCompartment = new window.CM6.Compartment();
-const diffWrapCompartment = new window.CM6.Compartment();
+let editorWrapCompartment = null;
+let diffWrapCompartment = null;
+function editorWrapCompartmentOf() {
+  return (editorWrapCompartment ??= new window.CM6.Compartment());
+}
+function diffWrapCompartmentOf() {
+  return (diffWrapCompartment ??= new window.CM6.Compartment());
+}
 let editingPrefs = null;
 let editingPrefsSpec = null;
 let systemFontSuggestions = [];
@@ -1961,7 +1977,7 @@ function editorExtensions(tab) {
     // Orca's file editor defaults `editorWordWrap` to ON (`=== false ? "off"
     // : "on"`), and the textarea this replaces was pinned `wrap="off"` — a
     // long line meant a horizontal scrollbar under every other line.
-    editorWrapCompartment.of(editingPrefs?.editor_word_wrap ? CM.EditorView.lineWrapping : []),
+    editorWrapCompartmentOf().of(editingPrefs?.editor_word_wrap ? CM.EditorView.lineWrapping : []),
     // Words already in the file, which is the only completion source with
     // nothing behind it. Worth saying plainly: Orca's is bigger on paper and
     // barely bigger in practice — its TypeScript worker is never given a
@@ -2347,6 +2363,12 @@ function restoreEditorPlace(held, tab, at) {
 }
 
 function paintEditor(view, tab) {
+  if (!window.CM6) {
+    void ensureVendorCm6().then(() => {
+      if (stillShowing(tab)) paintEditor(view, tab);
+    }, () => {});
+    return;
+  }
   const host = view.querySelector(".file-edit");
   if (tab.draft === undefined) tab.draft = tab.text;
   let held = editorViews.get(tab.pane);
@@ -2585,7 +2607,7 @@ function diffExtensions(tab, editable) {
     CM.EditorView.editable.of(editable),
     CM.keymap.of([...CM.defaultKeymap, ...CM.historyKeymap]),
     editable ? CM.history() : [],
-    diffWrapCompartment.of(editingPrefs?.diff_word_wrap ? CM.EditorView.lineWrapping : []),
+    diffWrapCompartmentOf().of(editingPrefs?.diff_word_wrap ? CM.EditorView.lineWrapping : []),
     editorThemeExtension(),
     mergeThemeExtension(),
     CM.syntaxHighlighting(editorHighlightStyle()),
@@ -2653,6 +2675,12 @@ function diffTyped(tab, typed) {
 }
 
 function paintDiffMerge(view, tab) {
+  if (!window.CM6) {
+    void ensureVendorCm6().then(() => {
+      if (stillShowing(tab)) paintDiffView(tab);
+    }, () => {});
+    return;
+  }
   const host = view.querySelector(".diff-merge");
   const CM = window.CM6;
   // A stamp is what `write_text_file` demands back, so a document without one

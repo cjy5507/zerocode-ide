@@ -280,6 +280,7 @@ function diffFileName(path) {
  * language object, once per name (a file's name is not the language's: `one.sh` and `two.sh` share
  * it) — or null. */
 function diffLanguageOf(path) {
+  if (!window.CM6) return null;
   const file = diffFileName(path);
   const name = file === "" ? "" : window.CM6.languageNameFor(file);
   if (name === "") return null;
@@ -314,6 +315,14 @@ function watchDiffRowsShow(rows) {
 
 /* Put the rows that show in the fences' line, the first row drawn first. */
 function queueDiffRows(rows) {
+  if (rows.length === 0) return;
+  if (!window.CM6) {
+    if (vendorCm6Failed) return;
+    codeColour.pendingDiffRows ??= new Set();
+    for (const row of rows) codeColour.pendingDiffRows.add(row);
+    void ensureVendorCm6().then(drainPendingCodeColour, () => {});
+    return;
+  }
   followCodeSelection();
   for (const row of rows.reverse()) {
     const text = row.querySelector(":scope > .diff-text");
@@ -2349,8 +2358,23 @@ function codeSliceEnded(clock) {
 
 /* Whether this page can colour: the editor's table and its walk over a tree. */
 function codeColourable() {
-  codeColour.able ??= typeof window.CM6?.highlightTree === "function" && typeof window.CM6?.languageFor === "function";
-  return codeColour.able;
+  if (window.CM6) {
+    codeColour.able ??= typeof window.CM6.highlightTree === "function" && typeof window.CM6.languageFor === "function";
+    return codeColour.able;
+  }
+  return !vendorCm6Failed;
+}
+
+function drainPendingCodeColour() {
+  if (!window.CM6) return;
+  const hosts = codeColour.pendingHosts ? [...codeColour.pendingHosts] : [];
+  codeColour.pendingHosts?.clear();
+  for (const host of hosts) {
+    if (host.isConnected) colourCodeIn(host);
+  }
+  const rows = codeColour.pendingDiffRows ? [...codeColour.pendingDiffRows] : [];
+  codeColour.pendingDiffRows?.clear();
+  if (rows.length > 0) queueDiffRows(rows.filter((row) => row.isConnected));
 }
 
 /* The editor's ramp as roles: one class a colour, named by the colour's
@@ -2371,6 +2395,7 @@ function codeColourHighlighter() {
 /* The language a fence's first word names, or null — once a word: a legacy
  * mode is a new language each time the table makes it. */
 function codeLanguageOf(info) {
+  if (!window.CM6) return null;
   const word = String(info ?? "").trim().split(/[\s,{]/, 1)[0].toLowerCase();
   if (word === "") return null;
   if (!codeColour.languages.has(word)) {
@@ -2387,6 +2412,13 @@ function codeLanguageOf(info) {
  * unpainted — the throw is the page's to see, a moment later. */
 function colourCodeIn(host) {
   if (!codeColourable()) return;
+  if (!window.CM6) {
+    if (host.querySelector("pre.md-block") === null) return;
+    codeColour.pendingHosts ??= new Set();
+    codeColour.pendingHosts.add(host);
+    void ensureVendorCm6().then(drainPendingCodeColour, () => {});
+    return;
+  }
   followCodeSelection();
   const clock = codeSliceClock(false);
   for (const pre of host.querySelectorAll("pre.md-block")) {

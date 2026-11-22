@@ -789,17 +789,22 @@ await page.evaluate(async () => { setEveryProjectClosed(false); await refreshWor
 /* The vendored editor is there and it is CodeMirror. Asserted before anything
  * below drives it, because every later failure would otherwise read as a
  * broken assertion rather than a missing `<script>`. */
-const vendored = await page.evaluate(() => ({
-  loaded: typeof window.CM6 === "object" && window.CM6 !== null,
-  view: typeof window.CM6?.EditorView === "function",
-  // The extension table, and the one mapping the ledger names.
-  rust: window.CM6?.languageNameFor("src/main.rs"),
-  plain: window.CM6?.languageNameFor("NOTES"),
-  monaco: typeof window.monaco !== "undefined",
-}));
+const vendored = await page.evaluate(async () => {
+  const eager = typeof window.CM6 === "object" && window.CM6 !== null;
+  await ensureVendorCm6();
+  return {
+    eager,
+    loaded: typeof window.CM6 === "object" && window.CM6 !== null,
+    view: typeof window.CM6?.EditorView === "function",
+    // The extension table, and the one mapping the ledger names.
+    rust: window.CM6?.languageNameFor("src/main.rs"),
+    plain: window.CM6?.languageNameFor("NOTES"),
+    monaco: typeof window.monaco !== "undefined",
+  };
+});
 ok(
-  "the vendored CodeMirror is loaded, maps rs to rust, and no Monaco came with it",
-  vendored.loaded && vendored.view && vendored.rust === "rust" && vendored.plain === "" && !vendored.monaco,
+  "the vendored CodeMirror loads lazily on demand, maps rs to rust, and no Monaco came with it",
+  !vendored.eager && vendored.loaded && vendored.view && vendored.rust === "rust" && vendored.plain === "" && !vendored.monaco,
   JSON.stringify(vendored),
 );
 

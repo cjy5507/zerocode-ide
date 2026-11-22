@@ -375,6 +375,7 @@ export async function testConversationDiffColours(browser, origin, ok) {
       host.style.cssText = "position:fixed;left:0;top:0;width:640px;height:200px;z-index:2147483000;background:var(--surface-abyss)";
       document.body.append(host);
       const tab = { path: "probe.ts", version: null };
+      await ensureVendorCm6();
       const view = new window.CM6.MergeView({
         a: { doc: "// removed comment\nconst a = 1;\n", extensions: diffExtensions(tab, false) },
         b: { doc: "// added comment\nconst a = 2;\n", extensions: diffExtensions(tab, false) },
