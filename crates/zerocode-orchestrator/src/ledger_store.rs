@@ -30,6 +30,8 @@
 //! ledger at once stays in `validate_loaded`, which runs after this and has
 //! the last word.
 
+use std::borrow::Cow;
+
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::room::RoomMark;
@@ -238,6 +240,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         quota_wait INTEGER NOT NULL DEFAULT 0 CHECK (quota_wait IN (0, 1)),
         exit_unconfirmed TEXT,
         in_worktree INTEGER NOT NULL DEFAULT 0 CHECK (in_worktree IN (0, 1)),
+        written_superseded TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -546,6 +549,11 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
             "in_worktree",
             "INTEGER NOT NULL DEFAULT 0 CHECK (in_worktree IN (0, 1))",
         ),
+        /* The release a person's settings row named when the catalog had
+         * superseded it and the summons ran its live successor (t-125871):
+         * NULL for other launches. It is advisory metadata outside the
+         * existing integrity formats so older readers can open the store. */
+        ("ledger_workers", "written_superseded", "TEXT"),
     ];
     /* Unversioned digest rows were written by format generation one. Derive
      * the migration default from the format's single named constant so the
@@ -1284,6 +1292,18 @@ fn require_ledger_tables(connection: &Connection) -> Result<(), EffectJournalErr
     }
 }
 
+/// Both integrity formats hash the worker columns that older readers see.
+fn worker_for_integrity(row: &WorkerRow) -> Cow<'_, WorkerRow> {
+    if row.written_superseded.is_some() {
+        Cow::Owned(WorkerRow {
+            written_superseded: None,
+            ..row.clone()
+        })
+    } else {
+        Cow::Borrowed(row)
+    }
+}
+
 /// Generation one's digests: each table hashed as one JSON document.
 ///
 /// No longer written. Kept, byte for byte, to check the witnesses a store
@@ -1330,6 +1350,11 @@ fn table_digests_v1(
         .map(|row| row.messages.as_ref())
         .collect::<Vec<_>>();
     let served_rows = served_row_digests(&projection.served);
+    let workers = projection
+        .workers
+        .iter()
+        .map(worker_for_integrity)
+        .collect::<Vec<_>>();
 
     Ok([
         table_digest(&projection.runs)?,
@@ -1340,7 +1365,7 @@ fn table_digests_v1(
         table_digest(&gate_options)?,
         table_digest(&projection.attachments)?,
         table_digest(&projection.dispatches)?,
-        table_digest(&projection.workers)?,
+        table_digest(&workers)?,
         table_digest(&projection.messages)?,
         table_digest(&projection.inboxes)?,
         table_digest(&inbox_pending)?,
@@ -1517,7 +1542,7 @@ impl Family {
             Self::Gates => serde_json::to_vec(&projection.gates[at]),
             Self::Attachments => serde_json::to_vec(&projection.attachments[at]),
             Self::Dispatches => serde_json::to_vec(&projection.dispatches[at]),
-            Self::Workers => serde_json::to_vec(&projection.workers[at]),
+            Self::Workers => serde_json::to_vec(&worker_for_integrity(&projection.workers[at])),
             Self::Messages => serde_json::to_vec(&projection.messages[at]),
             Self::Inboxes => serde_json::to_vec(&projection.inboxes[at]),
             Self::Bound => serde_json::to_vec(&projection.bound[at]),
@@ -2571,8 +2596,9 @@ fn insert_row(
                     started_ms, dispatch, model, effort, session, ready_by_ms,
                     hook_unreachable_since_ms, pane_missing_since_ms,
                     taken_over, checkout, quiet_at, archive, started_by, adopted_by,
-                    on_quota_wall, quota_wait, exit_unconfirmed, in_worktree
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                    on_quota_wall, quota_wait, exit_unconfirmed, in_worktree,
+                    written_superseded
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
                 params![
                     ledger_id,
                     place,
@@ -2600,6 +2626,7 @@ fn insert_row(
                     row.quota_wait,
                     document(row.exit_unconfirmed.as_ref())?,
                     row.in_worktree,
+                    row.written_superseded,
                 ],
             )?;
             Ok(1)
@@ -3486,7 +3513,7 @@ fn read_repairable_from_head(
                 session, ready_by_ms, hook_unreachable_since_ms,
                 pane_missing_since_ms, taken_over, checkout, quiet_at, archive,
                 started_by, adopted_by, on_quota_wall, quota_wait, exit_unconfirmed,
-                in_worktree
+                in_worktree, written_superseded
            FROM ledger_workers WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -3502,6 +3529,7 @@ fn read_repairable_from_head(
                 (
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(24)?,
                 ),
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<i64>>(11)?,
@@ -3587,6 +3615,7 @@ fn read_repairable_from_head(
                     dispatch,
                     model: tuned.0,
                     effort: tuned.1,
+                    written_superseded: tuned.2,
                     session: session
                         .as_deref()
                         .map(serde_json::from_str)
@@ -4007,6 +4036,7 @@ pub(crate) fn a_ledger_with_every_table(
             dispatch: dispatch.map(str::to_string),
             model: None,
             effort: None,
+            written_superseded: None,
             session: None,
             ready_by_ms: None,
             hook_unreachable_since_ms: None,
@@ -4457,6 +4487,9 @@ mod tests {
                 // And the grown launch receipt, loaded for the same reason.
                 model: Some("m-big".to_string()),
                 effort: Some("high".to_string()),
+                // Left empty for the digest pin's reason (below); the set
+                // value rides its own round trip.
+                written_superseded: None,
                 session: Some(zerocode_core::ProviderSession {
                     key: zerocode_core::provider_session::SessionKey::SessionId,
                     id: "session-grown".to_string(),
@@ -4770,6 +4803,63 @@ mod tests {
             "the row written before summoners were recorded stays empty, and \
              the one that names its parent keeps it"
         );
+    }
+
+    /// The release a person's row named when its live successor ran
+    /// (t-125871) survives the trip through SQLite, and a row written before
+    /// the column existed reads back as one with none — kept apart from the
+    /// canonical fixture for the digest pin's reason.
+    #[test]
+    fn a_superseded_written_release_comes_back_and_an_older_row_stays_empty() {
+        let store = a_store();
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        let mut followed = projection.workers[0].clone();
+        followed.id = "w-11".to_string();
+        followed.written_superseded = Some("example-family-a-max".to_string());
+        projection.workers.push(followed);
+        write(&store, "one", 0, 1, &projection, 10).expect("it writes");
+
+        let held = read(&store, "one", projection.schema)
+            .expect("it reads")
+            .expect("it is there");
+        let written: Vec<Option<&str>> = held
+            .projection
+            .workers
+            .iter()
+            .map(|worker| worker.written_superseded.as_deref())
+            .collect();
+        assert_eq!(written, vec![None, Some("example-family-a-max")]);
+    }
+
+    #[test]
+    fn a_superseded_written_release_keeps_the_legacy_integrity_values() {
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        let legacy = (
+            bytes_held(&projection),
+            table_digests_v1(&projection).unwrap(),
+            generation_two_root(&projection),
+        );
+        projection.workers[0].written_superseded = Some("example-family-a-max".into());
+        assert_eq!(
+            (
+                bytes_held(&projection),
+                table_digests_v1(&projection).unwrap(),
+                generation_two_root(&projection),
+            ),
+            legacy,
+        );
+
+        let (_root, path, store) = a_current_store();
+        let connection = store.connection().unwrap();
+        write(&connection, "one", 0, 1, &projection, 10).unwrap();
+        // The previous reader selects the same columns as a store with no
+        // value in this column. Leave the persisted integrity values alone.
+        connection
+            .execute("UPDATE ledger_workers SET written_superseded = NULL", [])
+            .unwrap();
+        drop(connection);
+        drop(store);
+        crate::workflow_store::WorkflowStore::open(&path).expect("legacy view opens");
     }
 
     /// Who holds an open batch, and since when, survives the trip through
@@ -5422,6 +5512,7 @@ mod tests {
                  ALTER TABLE ledger_workers DROP COLUMN exit_unconfirmed;
                  ALTER TABLE ledger_runs DROP COLUMN project;
                  ALTER TABLE ledger_workers DROP COLUMN in_worktree;
+                 ALTER TABLE ledger_workers DROP COLUMN written_superseded;
                  ALTER TABLE ledger_runs DROP COLUMN folded;
                  ALTER TABLE ledger_runs DROP COLUMN room;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",

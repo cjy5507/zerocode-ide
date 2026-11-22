@@ -7976,6 +7976,8 @@ function workerPick(state, agent, model) {
  * focus across the repaints its own save asks for (busy, then answered),
  * the first of which disables it. */
 let workerFocus = null;
+// The last saved cell stays selected for the preview across catalog reads.
+let workerNextCell = null;
 
 function paintWorkerModels(state) {
   const table = el("summon-profiles-table");
@@ -8029,6 +8031,7 @@ function paintWorkerModels(state) {
   if (refresh) refresh.disabled = typesafeBusy;
   paintWorkerSources(state);
   paintWorkerFoot(state);
+  paintWorkerNext(state);
   workerFocus = keep && typesafeBusy ? keep : null;
   if (keep && !typesafeBusy) {
     table.querySelector(`[data-agent="${CSS.escape(keep.agent)}"][data-difficulty="${CSS.escape(keep.difficulty)}"][data-field="${CSS.escape(keep.field)}"]`)?.focus();
@@ -8098,17 +8101,21 @@ function workerCell(state, agent, row) {
   Object.assign(model.dataset, { agent, difficulty: row.difficulty, field: "model" });
   model.setAttribute("aria-label", t("settings.workerModels.modelLabel", "{{agent}} {{difficulty}} 모델", { agent: who, difficulty }));
   model.append(workerOption("", auto(row.autoModel), !row.writtenModel));
+  // The model the cell shows picked: the person's — or, for a release the
+  // catalog has since superseded, the live release of its line that runs in
+  // its place (t-125871); the line under the cell names the one written.
+  const picked = row.writtenSuperseded ? row.model : row.writtenModel;
   const picks = state.summonLineup?.[agent] ?? [];
   const own = picks.filter((pick) => !pick.connection);
   const fit = own.filter((pick) => pick.fits.includes(row.difficulty));
   const other = own.filter((pick) => !pick.fits.includes(row.difficulty));
-  if (fit.length) model.append(workerGroup(t("settings.workerModels.fits", "{{difficulty}}에 맞는 모델", { difficulty }), fit, row.writtenModel));
-  if (other.length) model.append(workerGroup(t("settings.workerModels.others", "그 밖의 모델"), other, row.writtenModel));
+  if (fit.length) model.append(workerGroup(t("settings.workerModels.fits", "{{difficulty}}에 맞는 모델", { difficulty }), fit, picked));
+  if (other.length) model.append(workerGroup(t("settings.workerModels.others", "그 밖의 모델"), other, picked));
   if (state.summonAgents?.[agent]?.anyProvider) {
     for (const connection of state.summonSources?.connections ?? []) {
       const linked = picks.filter((pick) => pick.connection && pick.provider === connection.name);
       if (connection.usable && linked.length) {
-        model.append(workerGroup(t("settings.workerModels.connection", "연결 · {{name}}", { name: connection.name }), linked, row.writtenModel));
+        model.append(workerGroup(t("settings.workerModels.connection", "연결 · {{name}}", { name: connection.name }), linked, picked));
       } else if (!connection.usable && connection.models.length) {
         // A connection without its key is listed and offers nothing.
         const group = document.createElement("optgroup");
@@ -8118,11 +8125,11 @@ function workerCell(state, agent, row) {
       }
     }
   }
-  if (row.writtenModel && !picks.some((pick) => pick.id === row.writtenModel)) {
+  if (picked && !picks.some((pick) => pick.id === picked)) {
     // A model the person wrote stays theirs when the list moves under it.
     const group = document.createElement("optgroup");
     group.label = t("settings.workerModels.unlistedGroup", "목록에 없는 모델");
-    group.append(workerOption(row.writtenModel, row.writtenModel, true));
+    group.append(workerOption(picked, picked, true));
     model.append(group);
   }
   model.classList.toggle("is-auto", !row.writtenModel);
@@ -8160,9 +8167,24 @@ function workerCell(state, agent, row) {
 }
 
 /* What moved under a choice the person made: the model left the list, an
- * older release of it, or an effort the model does not take. A row the
- * lineup chose says nothing — it follows the list by itself. */
+ * older release of it — run as its newer release, or only flagged — or an
+ * effort the model does not take. A row the lineup chose says nothing — it
+ * follows the list by itself. */
 function workerCellWarning(row) {
+  let brought = null;
+  if (row.writtenEffort && row.effortClamped) {
+    const words = { from: row.effortClamped.from, to: row.effortClamped.to };
+    brought = row.effort === row.effortClamped.to
+      ? t("settings.workerModels.effortBrought", "이 모델은 {{from}}을(를) 받지 않아 {{to}}(으)로 뜹니다", words)
+      : t("settings.workerModels.effortOutside", "이 모델이 받지 않는 사고 깊이입니다({{to}}까지)", words);
+  }
+  // A release the catalog superseded runs as the live release of its line
+  // (t-125871): the cell shows that one, and this line names the one written
+  // — with the effort it was brought to, when the newer one takes less.
+  if (row.writtenSuperseded) {
+    const followed = t("settings.workerModels.followed", "적은 {{written}}의 새 버전 {{model}}(으)로 뜹니다", { written: row.writtenSuperseded, model: row.model });
+    return brought ? `${followed} · ${brought}` : followed;
+  }
   const standing = row.standing?.kind;
   if (row.writtenModel && standing === "unlisted") return t("settings.workerModels.unlisted", "공급자 목록에서 빠진 모델입니다");
   if (row.writtenModel && standing === "superseded") {
@@ -8171,13 +8193,7 @@ function workerCellWarning(row) {
       : t("settings.workerModels.supersededPlain", "이전 세대 모델입니다");
   }
   if (row.writtenModel && standing === "missing") return t("settings.workerModels.missing", "오늘 목록에 없는 모델입니다");
-  if (row.writtenEffort && row.effortClamped) {
-    const words = { from: row.effortClamped.from, to: row.effortClamped.to };
-    return row.effort === row.effortClamped.to
-      ? t("settings.workerModels.effortBrought", "이 모델은 {{from}}을(를) 받지 않아 {{to}}(으)로 뜹니다", words)
-      : t("settings.workerModels.effortOutside", "이 모델이 받지 않는 사고 깊이입니다({{to}}까지)", words);
-  }
-  return null;
+  return brought;
 }
 
 /* Where today's list came from: each login's answer by the words the model
@@ -8243,9 +8259,11 @@ function paintWorkerFoot(state) {
 
 /* The words the next summons puts on the agent's command line for a row the
  * person just saved — the backend's own spelling of them (`row.launch`). */
-function paintWorkerNext(agent, row) {
+function paintWorkerNext(state) {
   const box = el("worker-models-next");
-  if (!box) return;
+  if (!box || !workerNextCell) return;
+  const { agent, difficulty } = workerNextCell;
+  const row = workerRow(state, agent, difficulty);
   box.hidden = !row?.launch?.length;
   if (box.hidden) return;
   el("worker-models-next-label").textContent = t("settings.workerModels.next", "다음 소환 — {{agent}} · {{difficulty}}", { agent: agentName(agent), difficulty: workerDifficulty(row.difficulty).name });
@@ -8270,16 +8288,18 @@ function workerRowRefusal(error) {
 function saveWorkerCell(agent, difficulty, model, effort, note = "") {
   return runKeyCardStep(WORKER_MODELS_CARD, async () => {
     try {
-      return await invoke("set_summon_profile", { agent, difficulty, model, effort });
+      const state = await invoke("set_summon_profile", { agent, difficulty, model, effort });
+      workerNextCell = { agent, difficulty };
+      return state;
     } catch (error) {
       throw Object.assign(new Error(workerRowRefusal(error)), { kind: "failed" });
     }
   }, (state) => {
     const row = workerRow(state, agent, difficulty);
-    paintWorkerNext(agent, row);
+    const automatic = t("settings.workerModels.autoPlain", "자동");
     const said = row
       ? t("settings.workerModels.saved", "저장했습니다 — 다음 {{agent}} {{difficulty}} 소환부터 {{model}} · {{effort}}", {
-        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model, effort: row.effort ?? t("settings.workerModels.autoPlain", "자동"),
+        agent: agentName(agent), difficulty: workerDifficulty(difficulty).name, model: row.model ?? automatic, effort: row.effort ?? automatic,
       })
       : t("settings.workerModels.savedPlain", "저장했습니다.");
     return note ? `${said} ${note}` : said;

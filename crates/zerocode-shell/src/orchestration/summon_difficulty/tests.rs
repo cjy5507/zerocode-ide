@@ -331,12 +331,12 @@ fn replay_execution_outcomes() {
         let worker = run.worker(&dispatch.worker).unwrap();
         row["agent"] = json!(worker.agent);
         row["executionModel"] = json!(worker.model);
-        let high =
-            difficulty::profile(&Value::Null, &worker.agent, difficulty::LADDER[2].0).unwrap();
-        row["baselineHigh"] = json!(
-            high.is_some_and(|p| worker.model.as_deref() == Some(p.model.as_str())
-                && row["effort"].as_str() == p.effort.as_deref())
-        );
+        // Whether the hard row ran is what the summons recorded against the
+        // lineup of its own day: no table of model names can say it after
+        // the fact (t-125871), so a row that recorded nothing ran none.
+        if row.get("baselineHigh").is_none() {
+            row["baselineHigh"] = json!(false);
+        }
         row["attempt"] = json!(
             run.dispatches
                 .iter()
@@ -392,8 +392,9 @@ fn fresh_summonses_read_the_hosts_table_and_sealed_handovers_keep_their_tuning()
         profile("codex", difficulty::LADDER[0].0, key)
             .unwrap()
             .unwrap()
-            .model,
-        "gpt-test-profile"
+            .model
+            .as_deref(),
+        Some("gpt-test-profile")
     );
     drop(fresh);
     let sealed = origin_with(key, None, false, root);
@@ -426,15 +427,19 @@ fn a_fresh_summons_reads_todays_lineup_and_keeps_the_persons_row() {
     };
     let held = origin_with_lineup_for_tests(key, Value::Null, lineup.clone());
     let row = profile("claude", low, key).unwrap().unwrap();
-    assert_eq!(row.model, "model-b", "the lineup's easy rung");
+    assert_eq!(
+        row.model.as_deref(),
+        Some("model-b"),
+        "the lineup's easy rung"
+    );
     assert_eq!(row.from, difficulty::lineup::Source::Lineup);
     drop(held);
     let person = json!({"smart":{difficulty::PROFILES_SETTING:{"claude":{low:{"model":"model-x","effort":"high"}}}}});
     let held = origin_with_lineup_for_tests(key, person.clone(), lineup.clone());
     let row = profile("claude", low, key).unwrap().unwrap();
     assert_eq!(
-        (row.model.as_str(), row.from),
-        ("model-x", difficulty::lineup::Source::Person)
+        (row.model.as_deref(), row.from),
+        (Some("model-x"), difficulty::lineup::Source::Person)
     );
     drop(held);
     assert!(
@@ -447,6 +452,48 @@ fn a_fresh_summons_reads_todays_lineup_and_keeps_the_persons_row() {
     );
     let listed = rows_in(&person, "claude", &lineup).unwrap();
     assert_eq!(listed.len(), difficulty::LADDER.len());
+}
+
+/// t-125871: a person's row that names a release the window's lineup has
+/// since superseded launches the live release of its line, read off the
+/// window's own snapshot — no name in the code — and `agent-list`'s rows
+/// say the same; the setting stays as written.
+#[test]
+fn a_fresh_summons_runs_the_live_release_for_a_superseded_one_the_person_wrote() {
+    use zerocode_core::summon_difficulty::lineup::{Lineup, Seen};
+    let key = ["superseded-team", "%1", "superseded-request"];
+    let high = difficulty::LADDER[2].0;
+    let (old, new) = ("example-family-a-max", "example-family-a2-max");
+    let catalog = json!({"models": [
+        {"provider": "claude", "id": old, "band": "superseded", "supersededBy": new},
+        {"provider": "claude", "id": new, "band": "rest", "rungs": ["easy", "medium"]},
+        {"provider": "claude", "id": "example-hard", "band": "second", "rungs": ["hard"]},
+    ]});
+    let lineup = crate::summon_lineup::Snapshot {
+        lineups: std::collections::BTreeMap::from([(
+            "claude".to_string(),
+            Lineup::from_catalog(&catalog, "claude").unwrap(),
+        )]),
+        seen: Seen::default(),
+    };
+    let person = json!({"smart":{difficulty::PROFILES_SETTING:{"claude":{high:{"model": old}}}}});
+    let held = origin_with_lineup_for_tests(key, person.clone(), lineup.clone());
+    let row = profile("claude", high, key).unwrap().unwrap();
+    assert_eq!(
+        (row.model.as_deref(), row.from),
+        (Some(new), difficulty::lineup::Source::Person)
+    );
+    assert_eq!(row.written_model.as_deref(), Some(old), "as written");
+    drop(held);
+    let listed = rows_in(&person, "claude", &lineup).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|row| row.difficulty == high)
+            .and_then(|row| row.model.as_deref()),
+        Some(new),
+        "agent-list's rows"
+    );
 }
 
 /* ---- the one switch (t-11989) ---- */
@@ -497,6 +544,41 @@ impl zerocode_core::orchestration::Launcher for Seated<'_> {
     }
 }
 
+/// The window's lineup a summons in these tests reads — synthetic names only
+/// (t-125871: no table of real names stands behind a row): one claude model
+/// at the easy and ordinary rungs, one at the hard.
+fn claude_today() -> crate::summon_lineup::Snapshot {
+    use zerocode_core::summon_difficulty::lineup::{Lineup, Seen};
+    let catalog = json!({"models": [
+        {"provider": "claude", "id": "example-easy-1", "band": "rest", "rungs": ["easy", "medium"]},
+        {"provider": "claude", "id": "example-hard-1", "band": "second", "rungs": ["hard"]},
+    ]});
+    crate::summon_lineup::Snapshot {
+        lineups: std::collections::BTreeMap::from([(
+            "claude".to_string(),
+            Lineup::from_catalog(&catalog, "claude").expect("a lineup"),
+        )]),
+        seen: Seen::default(),
+    }
+}
+
+/// The pair a summons under [`claude_today`] launches at `level` when the
+/// person wrote no row there.
+fn todays_row(level: &str) -> difficulty::Profile {
+    difficulty::lineup::row_at(
+        &Value::Null,
+        "claude",
+        level,
+        claude_today().lineups.get("claude"),
+        None,
+        0,
+    )
+    .expect("a row that launches")
+    .expect("a row at every level")
+    .profile()
+    .expect("a model at every level")
+}
+
 /// One `worker-start` of a claude worker with `flags`, planned by the ledger
 /// on the seats of `wire` from a coordinator's checkout at `checkout`: the
 /// reply, and the reservation the window carries on.
@@ -511,11 +593,12 @@ fn summoned(
     let launcher = Seated { wire };
     // The window's own observation of the summoning pane, under the key
     // the ledger names it by.
-    let _origin = origin_with(
+    let _origin = origin_held(
         [team.id.as_str(), "%1", request],
         Some(checkout.to_path_buf()),
         true,
         wire.settings_root(),
+        claude_today(),
     );
     let mut reply = Value::Null;
     let mut prepared = None;
@@ -573,9 +656,7 @@ fn a_switch_left_on_carries_out_the_difficulty_answer_for_an_open_dial() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 0);
     let wire = switched_on(&home, &endpoint, None);
     let (reply, prepared) = summoned(&wire, home.path(), "", "open-dials");
-    let low = difficulty::profile(&Value::Null, "claude", difficulty::LADDER[0].0)
-        .unwrap()
-        .unwrap();
+    let low = todays_row(difficulty::LADDER[0].0);
     assert_eq!(reply["model"], json!(low.model), "{reply}");
     assert_eq!(reply["effort"], json!(low.effort), "{reply}");
     assert_eq!(
@@ -648,9 +729,7 @@ fn under_the_switch_a_pin_applies_no_answer_and_a_persons_off_asks_nothing() {
         Some(zerocode_core::jev::JevMode::Off.key()),
     );
     let (reply, prepared) = summoned(&wire, home.path(), "", "off");
-    let unjudged = difficulty::profile(&Value::Null, "claude", difficulty::UNJUDGED_DIFFICULTY)
-        .unwrap()
-        .unwrap();
+    let unjudged = todays_row(difficulty::UNJUDGED_DIFFICULTY);
     assert_eq!(reply["model"], json!(unjudged.model), "{reply}");
     assert_eq!(reply["effort"], json!(unjudged.effort), "{reply}");
     assert!(recorded(&wire, &prepared, home.path()).is_empty());
@@ -672,9 +751,7 @@ fn under_the_switch_a_late_answer_launches_the_unjudged_row_within_the_wall() {
     let began = Instant::now();
     let (reply, prepared) = summoned(&wire, home.path(), "", "late");
     assert!(began.elapsed() < Duration::from_millis(difficulty::APPLY_DEADLINE_MS + 400));
-    let unjudged = difficulty::profile(&Value::Null, "claude", difficulty::UNJUDGED_DIFFICULTY)
-        .unwrap()
-        .unwrap();
+    let unjudged = todays_row(difficulty::UNJUDGED_DIFFICULTY);
     assert_eq!(reply["model"], json!(unjudged.model), "{reply}");
     assert_eq!(reply["effort"], json!(unjudged.effort), "{reply}");
     let receipt = prepared
@@ -920,11 +997,12 @@ fn live_the_switch_carries_out_real_answers() {
     let mut team = zerocode_core::agent_teams::Team::new("team-live", "test-token", 1);
     let mut summon = |at: i64, argv: Vec<String>| {
         let request = argv.last().cloned().unwrap_or_default();
-        let _origin = origin_with(
+        let _origin = origin_held(
             [team.id.as_str(), "%1", request.as_str()],
             Some(home.path().to_path_buf()),
             true,
             wire.settings_root(),
+            claude_today(),
         );
         let planned = zerocode_core::orchestration::plan(
             &mut ledger,
@@ -974,11 +1052,7 @@ fn live_the_switch_carries_out_real_answers() {
         .expect("a worker was reserved");
     let rows = recorded(&wire, &prepared, home.path());
     let row = rows.first().expect("the summons' row");
-    let row_of = |level: &str| {
-        difficulty::profile(&Value::Null, "claude", level)
-            .unwrap()
-            .unwrap()
-    };
+    let row_of = todays_row;
     println!(
         "difficulty: outcome={} chosen={} confidence={} applied={} requests={} elapsedMs={} -> launched model={} effort={}",
         row["outcome"],

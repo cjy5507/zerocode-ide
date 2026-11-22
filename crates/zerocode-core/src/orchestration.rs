@@ -1664,6 +1664,13 @@ pub struct Worker {
     /// The reasoning-effort word beside it, under the same contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The release the person's settings row named when the catalog had
+    /// superseded it, so this launch ran the live release of its line —
+    /// `model` — in its place (t-125871): why that model, for whoever reads
+    /// the row later. `None` for every other launch, and for every row
+    /// written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_superseded: Option<String>,
     /// The provider's own handle for this worker's conversation.
     ///
     /// This is the durable half of restart resume: the pane is routing
@@ -1813,6 +1820,7 @@ impl std::fmt::Debug for Worker {
             .field("dispatch", &self.dispatch)
             .field("model", &self.model)
             .field("effort", &self.effort)
+            .field("written_superseded", &self.written_superseded)
             .field("session", &self.session)
             .field("ready_by_ms", &self.ready_by_ms)
             .field("hook_unreachable_since_ms", &self.hook_unreachable_since_ms)
@@ -10173,6 +10181,7 @@ impl Ledger {
             dispatch: dispatch_id.clone(),
             model: tuning.model,
             effort: tuning.effort,
+            written_superseded: tuning.written_superseded,
             session: None,
             ready_by_ms: tuning.ready_by_ms,
             hook_unreachable_since_ms: None,
@@ -19646,7 +19655,7 @@ fn pair_plan(
                     .ok()
                     .flatten()
             })
-            .filter(|row| row.from != crate::summon_difficulty::lineup::Source::Person)
+            .filter(|row| row.from == crate::summon_difficulty::lineup::Source::Lineup)
             .collect()
     } else {
         Vec::new()
@@ -20343,7 +20352,7 @@ fn dials_why(
 ) -> serde_json::Value {
     let model = pick
         .map(|(model, _, _)| model.as_str())
-        .or_else(|| row.map(|row| row.model.as_str()));
+        .or_else(|| row.and_then(|row| row.model.as_deref()));
     let facts = turn.map(|(_, _, _, facts)| facts);
     let record = model.and_then(|model| facts?.records.get(model));
     // A summons at its CLI's default is measured under that word, as its
@@ -20510,6 +20519,35 @@ const DIALS_FROM_CHALLENGE: &str = "challenge";
 /// agent's own CLI launched with its default; `dials.why.effortRule`: nobody
 /// chose an effort, so none went on the command line (t-74181).
 const DIALS_FROM_CLI_DEFAULT: &str = crate::summon_difficulty::lineup::CLI_DEFAULT;
+/// `dials.cliDefault.why`: no model list was read for the agent, so a summons
+/// that left its model open names none (t-125871).
+const CLI_DEFAULT_NO_LINEUP: &str = "no_lineup";
+/// `dials.cliDefault.why`: the agent's list was read and offers no model at
+/// the difficulty the summons ran at.
+const CLI_DEFAULT_NO_MODEL_HERE: &str = "no_model_here";
+
+/// `dials.cliDefault` (t-125871): why a summons that left its model open put
+/// none on `agent`'s command line — as a word and as a sentence a person
+/// reads. No table of model names stands in for the list, so the agent's CLI
+/// runs its own default model.
+fn cli_default_reason(agent: &str, lineup_read: bool) -> serde_json::Value {
+    let (why, says) = if lineup_read {
+        (
+            CLI_DEFAULT_NO_MODEL_HERE,
+            format!(
+                "Today's model list offers {agent} no model at this difficulty, so {agent}'s CLI runs its own default model."
+            ),
+        )
+    } else {
+        (
+            CLI_DEFAULT_NO_LINEUP,
+            format!(
+                "No model list was read for {agent}, so no model was named and {agent}'s CLI runs its own default model."
+            ),
+        )
+    };
+    serde_json::json!({ "why": why, "says": says })
+}
 
 /// Whether `agent`'s command line takes an effort at all — the measured
 /// launch table carries an effort ride for it.
@@ -20534,6 +20572,8 @@ pub fn ladder_efforts(agent: &str) -> Vec<&'static str> {
 /// All the verdicts live here, before anything is minted: an agent outside
 /// the table cannot take a model, an agent whose row carries no effort ride
 /// cannot take an effort, and an empty value is a flag wearing no request.
+/// An effort ride is independent of the model flag: it also tunes the CLI's
+/// default model.
 fn launch_tuning(
     agent: &str,
     model: Option<&str>,
@@ -21292,6 +21332,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
 pub struct Tuning {
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The release the person's row named, when `model` is the live release
+    /// the catalog names in its place ([`Worker::written_superseded`]).
+    pub written_superseded: Option<String>,
     pub retry_of: Option<String>,
     /// The absolute readiness deadline, already resolved from
     /// `--timeout-ms` (or its default) against the summons' own clock.
@@ -25186,7 +25229,7 @@ fn plan_inner(
             let model_turn = facts
                 .filter(|_| {
                     profile.as_ref().is_some_and(|row| {
-                        row.from != crate::summon_difficulty::lineup::Source::Person
+                        row.from == crate::summon_difficulty::lineup::Source::Lineup
                     })
                 })
                 .map(|facts| {
@@ -25211,7 +25254,7 @@ fn plan_inner(
                 effort
                     .clone()
                     .map(|own| (own, None))
-                    .or_else(|| profile.as_ref()?.person_effort_on(runs, held_lineup))
+                    .or_else(|| profile.as_ref()?.person_effort_on(Some(runs), held_lineup))
             };
             let model_pick: Option<(String, Option<String>, &str)> = match &model_turn {
                 Some((_, _, Some(challenge), _)) => Some((
@@ -25265,7 +25308,8 @@ fn plan_inner(
                 .and_then(|row| {
                     let runs = model_pick
                         .as_ref()
-                        .map_or(row.model.as_str(), |(picked, _, _)| picked.as_str());
+                        .map(|(picked, _, _)| picked.as_str())
+                        .or(row.model.as_deref());
                     row.person_effort_on(runs, held_lineup)
                 })
                 .map_or((None, None), |(bound, clamped)| (Some(bound), clamped));
@@ -25279,6 +25323,27 @@ fn plan_inner(
                 (None, None, Some(jev)) => (Some(jev.clone()), DIALS_FROM_JEV),
                 (None, None, None) => (None, DIALS_FROM_CLI_DEFAULT),
             };
+            // The release the person's row named, when the catalog had
+            // superseded it and the row runs the live release of its line
+            // (t-125871): said in the reply and kept on the worker's row, so
+            // whoever reads either knows why that model.
+            let written_superseded = (model.is_none() && model_pick.is_none())
+                .then(|| profile.as_ref()?.written_superseded.clone())
+                .flatten();
+            // Why a summons that left its model open names none (t-125871):
+            // no list was read for the agent, or the list has no model at
+            // this difficulty — no table of names stands in for it.
+            let cli_default = (model.is_none()
+                && model_pick.is_none()
+                && profile.as_ref().is_none_or(|row| row.model.is_none())
+                && open
+                && takes_effort(&agent))
+            .then(|| {
+                cli_default_reason(
+                    &agent,
+                    launcher.model_facts(&agent, summons_origin).is_some(),
+                )
+            });
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
                     // Always a word: the rung the answer chose, else the one
@@ -25287,11 +25352,13 @@ fn plan_inner(
                     "difficulty": chosen.unwrap_or(crate::summon_difficulty::UNJUDGED_DIFFICULTY),
                     "difficultyFrom": match (chosen, &profile) {
                         (Some(_), _) => DIALS_FROM_JEV,
-                        (None, Some(row)) if row.from == crate::summon_difficulty::lineup::Source::Person => {
+                        (None, Some(row)) if row.from == crate::summon_difficulty::lineup::Source::Lineup => {
+                            DIALS_FROM_FACTS
+                        }
+                        (None, Some(_)) if effort_from == DIALS_FROM_PERSON || model_from == DIALS_FROM_PERSON => {
                             DIALS_FROM_PERSON
                         }
-                        (None, Some(_)) => DIALS_FROM_FACTS,
-                        (None, None) => DIALS_FROM_NONE,
+                        (None, _) => DIALS_FROM_NONE,
                     },
                     // Why no judgment chose, when none did (t-45961).
                     "unjudged": chosen.is_none().then(|| unjudged_reason(
@@ -25309,6 +25376,12 @@ fn plan_inner(
                         receipts.model.as_ref().and_then(|row| row["outcome"].as_str()),
                     )),
                     "effortClamped": effort_clamped.as_ref().filter(|_| effort_from == DIALS_FROM_PERSON),
+                    // The release the person's row named, when the live
+                    // release of its line ran in its place (t-125871).
+                    "writtenSuperseded": written_superseded,
+                    // Why no model went on the command line, when none did
+                    // for a summons that left it open (t-125871).
+                    "cliDefault": cli_default,
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
                     // Why this pair, in the facts a person asks for: where the
                     // model stands, what set its effort, how much finished
@@ -25343,10 +25416,7 @@ fn plan_inner(
                 });
             let effort = chosen_effort;
             let model = model.or_else(|| model_pick.as_ref().map(|(picked, _, _)| picked.clone()));
-            let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
-            if effort.is_some() && model.is_none() {
-                return Err("--effort requires --model or a configured summon profile".to_string());
-            }
+            let model = model.or_else(|| profile.as_ref()?.model.clone());
             // A worker that carries a task is told how to report it, unless
             // somebody asked for a bare one — an operator starting an agent to
             // work with by hand does not want a protocol in its composer.
@@ -25580,6 +25650,7 @@ fn plan_inner(
                     tuning: Tuning {
                         model: model.clone(),
                         effort: effort.clone(),
+                        written_superseded,
                         retry_of: retry_of.clone(),
                         ready_by_ms: Some(now_ms.saturating_add(i64::from(ready_in_ms))),
                         // The summons' own standing order — unless the gate
@@ -25625,8 +25696,7 @@ fn plan_inner(
                 .ok()
                 .flatten()
                 .is_some_and(|hard| {
-                    let same_pair =
-                        model.as_deref() == Some(hard.model.as_str()) && effort == hard.effort;
+                    let same_pair = model == hard.model && effort == hard.effort;
                     let row_ran = model_pick.is_none()
                         && profile
                             .as_ref()
@@ -25641,9 +25711,8 @@ fn plan_inner(
                     teacher_effort,
                     baseline_high,
                     receipt: difficulty_receipt.map(|mut receipt| {
-                        if model.is_none() {
-                            // The answer set no launch dial when the CLI kept
-                            // its own model and effort defaults.
+                        if model.is_none() && effort_from != DIALS_FROM_PERSON {
+                            // The chosen row supplied neither launch dial.
                             receipt["applied"] = serde_json::json!(false);
                         }
                         receipt
@@ -27835,6 +27904,9 @@ fn worker_json(run: &Run, worker: &Worker, team: &Team) -> serde_json::Value {
         // where the agent's own default was taken.
         "model": worker.model,
         "effort": worker.effort,
+        // The release the person's row named when the live release of its
+        // line ran in its place (t-125871); `null` for any other launch.
+        "writtenSuperseded": worker.written_superseded,
         "providerPeer": provider_peer(&worker.agent, &run.id, &worker.id),
         // Only the capability is public. The provider id itself is restart
         // material, not roster data, and never leaves the durable worker row.
@@ -28476,6 +28548,8 @@ pub struct WorkerRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_superseded: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<ProviderSession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_by_ms: Option<i64>,
@@ -28869,6 +28943,7 @@ impl Ledger {
                     dispatch: worker.dispatch.clone(),
                     model: worker.model.clone(),
                     effort: worker.effort.clone(),
+                    written_superseded: worker.written_superseded.clone(),
                     session: worker.session.clone(),
                     ready_by_ms: worker.ready_by_ms,
                     hook_unreachable_since_ms: worker.hook_unreachable_since_ms,
@@ -29146,6 +29221,7 @@ impl Ledger {
                     dispatch: row.dispatch,
                     model: row.model,
                     effort: row.effort,
+                    written_superseded: row.written_superseded,
                     session: row.session,
                     ready_by_ms: row.ready_by_ms,
                     hook_unreachable_since_ms: row.hook_unreachable_since_ms,

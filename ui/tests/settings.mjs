@@ -33,35 +33,43 @@ import {
 } from "./settings-quality.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const SUMMON_PROFILES = JSON.parse(await readFile(resolve(UI, "..", "crates", "zerocode-core", "src", "summon-profiles.json"), "utf8"));
+/* The model this harness's lineup runs at each difficulty when nobody wrote a
+ * row — synthetic names only: no table of model names ships with the window
+ * (t-125871), so the harness's lineup is its own. */
+const FIXTURE_AUTO = {
+  codex: { low: { model: "example-codex-low" }, mid: { model: "example-codex-mid" }, high: { model: "example-codex-high" } },
+  claude: { low: { model: "example-claude" }, mid: { model: "example-claude" }, high: { model: "example-claude" } },
+};
+/* The releases this harness's catalog has superseded, and the live release
+ * of each one's line that stands in its place (`Lineup::current_release`). */
+const FIXTURE_SUPERSEDED = { codex: { "example-codex-old": FIXTURE_AUTO.codex.high.model } };
 /* What this harness's lineup offers each agent (`summon_lineup` picks): the
- * shipped table's models, one newly arrived, and for zo — which runs any
- * provider's model — a connection's. */
+ * models above, one newly arrived, and for zo — which runs any provider's
+ * model — a connection's. */
 const FIXTURE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const FIXTURE_LINEUP = {
   codex: [
     ...["low", "mid", "high"].map((difficulty) => ({
-      id: SUMMON_PROFILES.codex[difficulty].model, fresh: false, provider: "openai", connection: false,
+      id: FIXTURE_AUTO.codex[difficulty].model, fresh: false, provider: "openai", connection: false,
       efforts: FIXTURE_EFFORTS, effortsKnown: true, fits: [difficulty],
     })),
     { id: "gpt-fixture-new", fresh: true, provider: "openai", connection: false, efforts: ["low", "medium", "high"], effortsKnown: true, fits: ["low"] },
   ],
   claude: [
-    { id: SUMMON_PROFILES.claude.low.model, fresh: false, provider: "claude", connection: false, efforts: FIXTURE_EFFORTS, effortsKnown: true, fits: ["low", "mid", "high"] },
+    { id: FIXTURE_AUTO.claude.low.model, fresh: false, provider: "claude", connection: false, efforts: FIXTURE_EFFORTS, effortsKnown: true, fits: ["low", "mid", "high"] },
   ],
   zo: [
-    { id: SUMMON_PROFILES.claude.low.model, fresh: false, provider: "claude", connection: false, efforts: FIXTURE_EFFORTS, effortsKnown: true, fits: ["low", "mid", "high"] },
+    { id: FIXTURE_AUTO.claude.low.model, fresh: false, provider: "claude", connection: false, efforts: FIXTURE_EFFORTS, effortsKnown: true, fits: ["low", "mid", "high"] },
     { id: "fixture-router/model-x", fresh: false, provider: "fixture-router", connection: true, efforts: ["medium", "high", "max"], effortsKnown: false, fits: ["low"] },
   ],
 };
-/* The rows each agent runs when nobody wrote one: the shipped table, and for
- * zo — which the table has no row for — the lineup's model. Each names a
- * model only: no effort is shipped, and an effort nobody wrote stays off the
- * command line for the agent's CLI to default (t-74181). */
-const FIXTURE_SHIPPED = {
-  ...SUMMON_PROFILES,
+/* The rows each agent runs when nobody wrote one: the lineup's model, and for
+ * zo the claude model it lists. Each names a model only: an effort nobody
+ * wrote stays off the command line for the agent's CLI to default (t-74181). */
+const FIXTURE_AUTO_ROWS = {
+  ...FIXTURE_AUTO,
   zo: Object.fromEntries(["low", "mid", "high"].map((difficulty) =>
-    [difficulty, { model: SUMMON_PROFILES.claude.low.model }])),
+    [difficulty, { model: FIXTURE_AUTO.claude.low.model }])),
 };
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
   await readFile(
@@ -888,6 +896,7 @@ class StatefulBackend {
     this.terminalSessions = [];
     this.routerPresets = [...ROUTER_PRESETS_CATALOG];
     this.zoSettings = { providers: [] };
+    this.summonSuperseded = clone(FIXTURE_SUPERSEDED);
     // What `zo models --json` lists besides the settings' routers: the
     // login models, the sources' reports and the aliases (t-75762) — a
     // test swaps them. Routers zo reads from its own environment ride
@@ -3558,7 +3567,9 @@ class StatefulBackend {
         if (model && model !== kept.model && !picks.some((pick) => pick.id === model)) {
           throw { kind: "summon-row", message: `${model} is not in today's lineup`, refusal: { kind: "notListed", model } };
         }
-        const rides = model ?? SUMMON_PROFILES[agent]?.[difficulty]?.model;
+        // The model the effort rides is the one that runs: a superseded
+        // release's live successor (`lineup::runs_as`, t-125871).
+        const rides = this.summonSuperseded[agent]?.[model] ?? model ?? FIXTURE_AUTO[agent]?.[difficulty]?.model;
         const takes = picks.find((pick) => pick.id === rides)?.efforts;
         if (effort && takes && !takes.includes(effort) && !(effort === kept.effort && model === (kept.model ?? null))) {
           throw { kind: "summon-row", message: `${rides} takes ${takes.join(", ")}`, refusal: { kind: "effortOutside", effort, model: rides, takes } };
@@ -3969,24 +3980,27 @@ class StatefulBackend {
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
       // The rows a person wrote, and what each difficulty runs (t-14437),
       // as `summon_difficulty::lineup::rows` answers them (t-74181): each
-      // written field, the model the shipped table's where none is written,
-      // and no effort where none is written — the agent's CLI runs its own
-      // default, so the command line names the model alone.
+      // written field — a superseded release as the live release of its line
+      // (t-125871) — the lineup's model where none is written, and no effort
+      // where none is written — the agent's CLI runs its own default, so the
+      // command line names the model alone.
       summonProfiles: clone(smart.summonProfiles ?? {}),
-      summonRows: Object.fromEntries(Object.entries(FIXTURE_SHIPPED).map(([agent, levels]) => [
+      summonRows: Object.fromEntries(Object.entries(FIXTURE_AUTO_ROWS).map(([agent, levels]) => [
         agent,
         Object.entries(levels).map(([difficulty, auto]) => {
           const written = smart.summonProfiles?.[agent]?.[difficulty] ?? {};
-          const model = written.model ?? auto.model;
+          const followed = this.summonSuperseded[agent]?.[written.model] ?? null;
+          const model = followed ?? written.model ?? auto.model;
           const effort = written.effort ?? null;
           const effortWords = !effort ? [] : agent === "codex"
             ? ["-c", `model_reasoning_effort=${effort}`]
             : ["--effort", effort];
           return {
-            difficulty, model, effort, from: written.model ? "person" : "table", candidates: [],
+            difficulty, model, effort, from: written.model ? "person" : "lineup", candidates: [],
             effortRule: effort ? "person" : "cli-default",
             autoModel: auto.model, autoEffort: null,
             writtenModel: written.model ?? null, writtenEffort: written.effort ?? null,
+            ...(followed ? { writtenSuperseded: written.model } : {}),
             standing: { kind: FIXTURE_LINEUP[agent]?.some((pick) => pick.id === model) ? "listed" : "missing" },
             launch: ["--model", model, ...effortWords],
           };
@@ -8426,6 +8440,33 @@ await test("판단 기능별 진단은 기본으로 접고 사용자가 펼친�
   return "diagnostic details retained and opt-in";
 });
 
+await test("다음 소환 미리보기는 목록이 후속 모델을 알리면 같은 칸의 명령으로 바뀐다 (t-125871)", async () => {
+  const page = await context.newPage();
+  const previous = backend.zoSettings.smart;
+  const old = "gpt-fixture-new";
+  const successor = FIXTURE_AUTO.codex.high.model;
+  try {
+    await installTauri(page, "summon-preview");
+    await bootPage(page, "summon-preview");
+    await openSettings(page, "orchestration");
+    const model = page.locator('#summon-profiles-table select[data-agent="codex"][data-difficulty="low"][data-field="model"]');
+    await model.selectOption(old);
+    const preview = page.locator("#worker-models-next-words");
+    await preview.waitFor({ state: "visible" });
+    assertEqual(await preview.textContent(), `--model ${old}`);
+    backend.summonSuperseded.codex[old] = successor;
+    await page.evaluate(() => window.__SETTINGS_TEST_EMIT__("summon-lineup:read", {}));
+    await page.waitForFunction((id) =>
+      document.querySelector('#summon-profiles-table select[data-agent="codex"][data-difficulty="low"][data-field="model"]')?.value === id,
+    successor, { timeout: UI_TIMEOUT });
+    assertEqual(await preview.textContent(), `--model ${successor}`, "the preview kept the old command");
+  } finally {
+    delete backend.summonSuperseded.codex[old];
+    backend.zoSettings.smart = previous;
+    await page.close();
+  }
+});
+
 await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 켜고 끈다 — 카드에 고를 모드는 없다", async () => {
   await openJudgmentSettings(pageA);
   backend.keychain.delete(TYPESAFE_SERVICE);
@@ -8593,13 +8634,13 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await lowModel.waitFor({ timeout: UI_TIMEOUT });
   assertEqual(await lowModel.inputValue(), "", "an automatic cell showed a written model");
   assertEqual(await lowModel.locator("option").first().textContent(),
-    await said("settings.workerModels.auto", "자동 · {{value}}", { value: SUMMON_PROFILES.codex.low.model }));
+    await said("settings.workerModels.auto", "자동 · {{value}}", { value: FIXTURE_AUTO.codex.low.model }));
   const offered = (select) => select.locator("option:not([disabled])").evaluateAll((all) => all.map((option) => option.value).filter(Boolean));
   const fits = (pick) => pick.fits.includes("low");
   assertEqual(await offered(lowModel),
     [...FIXTURE_LINEUP.codex.filter(fits), ...FIXTURE_LINEUP.codex.filter((pick) => !fits(pick))].map((pick) => pick.id),
     "the cell offers the lineup — the models for its difficulty first — and nothing else");
-  assertEqual(await offered(lowEffort), FIXTURE_LINEUP.codex.find((pick) => pick.id === SUMMON_PROFILES.codex.low.model).efforts,
+  assertEqual(await offered(lowEffort), FIXTURE_LINEUP.codex.find((pick) => pick.id === FIXTURE_AUTO.codex.low.model).efforts,
     "the effort offers what the row's model takes");
   // A connection's models are the zo row's to pick from; a keyless one is
   // listed and offers nothing.
@@ -8653,6 +8694,24 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await pageA.waitForFunction(() => !typesafeBusy);
   assertEqual(backend.zoSettings.smart.summonProfiles, undefined, "a cleared cell left a table behind");
   assertEqual(await lowModel.inputValue(), "");
+  // A release the person wrote that the catalog has since superseded runs as
+  // the live release of its line (t-125871): the cell shows the release that
+  // runs, and the line under it names the one written — which stays written.
+  const [oldRelease, liveRelease] = Object.entries(FIXTURE_SUPERSEDED.codex)[0];
+  backend.zoSettings.smart = { ...backend.zoSettings.smart, summonProfiles: { codex: { high: { model: oldRelease } } } };
+  await pageA.evaluate(() => refreshTypeSafe());
+  const highModel = cellOf("codex", "high", "model");
+  await pageA.waitForFunction(() => !typesafeBusy);
+  assertEqual(await highModel.inputValue(), liveRelease, "the cell did not show the release that runs");
+  assertEqual(await highModel.evaluate((select) => select.closest(".worker-models-cell").querySelector(".worker-models-said").textContent),
+    await said("settings.workerModels.followed", "적은 {{written}}의 새 버전 {{model}}(으)로 뜹니다", { written: oldRelease, model: liveRelease }));
+  assertEqual(await highModel.evaluate((select, written) => [...select.querySelectorAll("optgroup option")].some((option) => option.value === written), oldRelease),
+    false, "the superseded release was offered as a pick");
+  assertEqual(backend.zoSettings.smart.summonProfiles, { codex: { high: { model: oldRelease } } }, "showing the row rewrote the setting");
+  const backAt = backend.calls.length;
+  await pageA.locator('#summon-profiles-table .worker-models-reset[data-agent="codex"][data-difficulty="high"]').click();
+  assertEqual((await backend.waitForCall("A", "set_summon_profile", backAt)).args, { agent: "codex", difficulty: "high", model: null, effort: null });
+  await pageA.waitForFunction(() => !typesafeBusy);
   // 「목록 새로고침」 asks for a fresh read and paints its answer.
   const refreshAt = backend.calls.length;
   await pageA.click("#worker-models-refresh");

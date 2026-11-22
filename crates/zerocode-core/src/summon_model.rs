@@ -738,7 +738,7 @@ mod tests {
     fn a_challengers_turn_tries_the_least_tried_new_model_at_easy_and_ordinary_work() {
         let row = |difficulty: &'static str| Row {
             difficulty,
-            model: "model-a".into(),
+            model: Some("model-a".into()),
             effort: None,
             from: Source::Lineup,
             band: None,
@@ -762,6 +762,7 @@ mod tests {
             auto_effort: None,
             written_model: None,
             written_effort: None,
+            written_superseded: None,
             standing: None,
             launch: Vec::new(),
         };

@@ -6903,6 +6903,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
             dispatch: None,
             model: None,
             effort: None,
+            written_superseded: None,
             session: None,
             ready_by_ms: None,
             hook_unreachable_since_ms: None,
@@ -13288,7 +13289,7 @@ fn a_worker_is_tuned_only_as_its_agent_spells_it() {
     assert_eq!(seen["model"], "opus-x");
     assert_eq!(seen["effort"], serde_json::Value::Null);
 
-    // Effort is a config word for codex — and only beside a model.
+    // Codex takes effort as a config override with or without a model.
     let planned = bench.run("worker-start --agent codex --model m1 --effort high");
     let Effect::Split { ref command, .. } = planned.effect else {
         panic!("no split: {:?}", planned.effect);
@@ -13298,11 +13299,13 @@ fn a_worker_is_tuned_only_as_its_agent_spells_it() {
         "{command}"
     );
     let alone = bench.run("worker-start --agent codex --effort high");
-    assert_eq!(alone.reply.exit_code, 1);
+    assert_eq!(alone.reply.exit_code, 0, "{}", alone.reply.stderr);
+    let Effect::Split { ref command, .. } = alone.effect else {
+        panic!("no split: {:?}", alone.effect);
+    };
     assert!(
-        alone.reply.stderr.contains("--effort requires --model"),
-        "{}",
-        alone.reply.stderr
+        command.starts_with("codex -c model_reasoning_effort=high"),
+        "{command}"
     );
 
     // Claude spells effort as a first-class flag, not a config override.
@@ -28442,9 +28445,10 @@ fn a_difficulty_answer_without_a_model_keeps_the_cli_defaults() {
                 "the answer changed no launch dial"
             );
         } else {
-            assert_eq!(planned.reply.exit_code, 1);
-            assert!(planned.reply.stderr.contains("--effort requires --model"));
-            assert!(planned.prepared_worker_start.is_none());
+            assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+            let said: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+            assert!(said["model"].is_null());
+            assert_eq!(said["effort"], "high");
         }
     }
 }
@@ -28494,51 +28498,34 @@ fn summon_outcome_requires_receipt_and_bound_landing_and_a_retry_revokes_success
     assert_eq!((revised.rework_rounds, revised.retry_count), (1, 1));
 }
 
+/// Today's codex list for the summons tests below — synthetic names only:
+/// one model at the easy and ordinary rungs, one at the hard.
+fn codex_today() -> crate::summon_difficulty::lineup::Lineup {
+    crate::summon_difficulty::lineup::Lineup::from_catalog(
+        &serde_json::json!({"models": [
+            {"provider": "openai", "id": "example-easy-1", "band": "rest", "rungs": ["easy", "medium"]},
+            {"provider": "openai", "id": "example-hard-1", "band": "second", "rungs": ["hard"]},
+        ]}),
+        "openai",
+    )
+    .expect("a lineup")
+}
+
 #[test]
 fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin() {
-    struct Profiles;
-    impl Launcher for Profiles {
-        fn command_for(
-            &self,
-            agent: &str,
-            prompt: &str,
-            tuning: &[String],
-        ) -> Result<String, String> {
-            Catalog(&["codex", "claude"]).command_for(agent, prompt, tuning)
-        }
-        fn difficulty_profile(
-            &self,
-            agent: &str,
-            difficulty: &str,
-            _: [&str; 3],
-        ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
-            crate::summon_difficulty::lineup::row_at(
-                &serde_json::Value::Null,
-                agent,
-                difficulty,
-                None,
-                None,
-                0,
-            )
-        }
-        fn choose_assign(
-            &self,
-            asked: &crate::summon_assign::AssignAsk,
-            _: [&str; 3],
-        ) -> crate::summon_assign::Receipts {
-            crate::summon_assign::Receipts {
-                difficulty: asked
-                    .difficulty
-                    .as_ref()
-                    .map(|_| serde_json::json!({"chosen":"low", "applied":true})),
-                model: None,
-                ..Default::default()
-            }
-        }
-    }
-    let default = crate::summon_difficulty::profile(&serde_json::Value::Null, "codex", "low")
-        .unwrap()
-        .unwrap();
+    let low = crate::summon_difficulty::LADDER[0].0;
+    let default = crate::summon_difficulty::lineup::row_at(
+        &serde_json::Value::Null,
+        "codex",
+        low,
+        Some(&codex_today()),
+        None,
+        0,
+    )
+    .unwrap()
+    .unwrap()
+    .profile()
+    .unwrap();
     for (flags, model, effort) in [
         ("", default.model.as_str(), default.effort.as_deref()),
         ("--effort high", default.model.as_str(), Some("high")),
@@ -28548,12 +28535,18 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
             Some("xhigh"),
         ),
     ] {
+        let launcher = RowsOf {
+            root: serde_json::Value::Null,
+            lineup: Some(codex_today()),
+            chosen: low,
+            tuning: std::sync::Mutex::default(),
+        };
         let mut bench = Bench::new();
         bench.json("run-create --name profiles");
         let planned = planned_on(
             &mut bench.ledger,
             &mut bench.team,
-            &Profiles,
+            &launcher,
             &format!("worker-start --agent codex --prompt translate {flags}"),
             bench.clock + 1,
         );
@@ -28571,47 +28564,19 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
 /// CLI's own default effort (t-74181), both written run as written.
 #[test]
 fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
-    struct Screen {
-        root: serde_json::Value,
-        tuning: std::sync::Mutex<Vec<String>>,
-    }
-    impl Launcher for Screen {
-        fn command_for(
-            &self,
-            agent: &str,
-            prompt: &str,
-            tuning: &[String],
-        ) -> Result<String, String> {
-            *self.tuning.lock().unwrap() = tuning.to_vec();
-            Catalog(&["codex", "claude"]).command_for(agent, prompt, tuning)
-        }
-        fn difficulty_profile(
-            &self,
-            agent: &str,
-            difficulty: &str,
-            _: [&str; 3],
-        ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
-            crate::summon_difficulty::lineup::row_at(&self.root, agent, difficulty, None, None, 0)
-        }
-        fn choose_assign(
-            &self,
-            asked: &crate::summon_assign::AssignAsk,
-            _: [&str; 3],
-        ) -> crate::summon_assign::Receipts {
-            crate::summon_assign::Receipts {
-                difficulty: asked
-                    .difficulty
-                    .as_ref()
-                    .map(|_| serde_json::json!({"chosen":"low", "applied":true})),
-                model: None,
-                ..Default::default()
-            }
-        }
-    }
     let low = crate::summon_difficulty::LADDER[0].0;
-    let default = crate::summon_difficulty::profile(&serde_json::Value::Null, "codex", low)
-        .unwrap()
-        .unwrap();
+    let default = crate::summon_difficulty::lineup::row_at(
+        &serde_json::Value::Null,
+        "codex",
+        low,
+        Some(&codex_today()),
+        None,
+        0,
+    )
+    .unwrap()
+    .unwrap()
+    .profile()
+    .unwrap();
     for (cell, model, effort) in [
         (
             serde_json::json!({"effort": "high"}),
@@ -28630,16 +28595,25 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
         ),
     ] {
         let root = serde_json::json!({"smart": {"summonProfiles": {"codex": {low: cell}}}});
-        let shown = crate::summon_difficulty::lineup::row_at(&root, "codex", low, None, None, 0)
-            .unwrap()
-            .unwrap();
+        let shown = crate::summon_difficulty::lineup::row_at(
+            &root,
+            "codex",
+            low,
+            Some(&codex_today()),
+            None,
+            0,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
-            (shown.model.as_str(), shown.effort.as_deref()),
-            (model, effort),
+            (shown.model.as_deref(), shown.effort.as_deref()),
+            (Some(model), effort),
             "{cell}"
         );
-        let screen = Screen {
+        let screen = RowsOf {
             root,
+            lineup: Some(codex_today()),
+            chosen: low,
             tuning: std::sync::Mutex::default(),
         };
         let mut bench = Bench::new();
@@ -28667,6 +28641,203 @@ fn a_row_the_settings_screen_wrote_is_what_the_summons_launches() {
             shown.launch
         );
     }
+}
+
+/// A launcher whose rows are `lineup::row_at` over the settings `root` and
+/// `lineup` it holds, whose difficulty answer is always `chosen`, and which
+/// keeps the launch words of the last command it built.
+struct RowsOf {
+    root: serde_json::Value,
+    lineup: Option<crate::summon_difficulty::lineup::Lineup>,
+    chosen: &'static str,
+    tuning: std::sync::Mutex<Vec<String>>,
+}
+
+impl Launcher for RowsOf {
+    fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
+        *self.tuning.lock().unwrap() = tuning.to_vec();
+        Catalog(&["codex", "claude"]).command_for(agent, prompt, tuning)
+    }
+    fn difficulty_profile(
+        &self,
+        agent: &str,
+        difficulty: &str,
+        _: [&str; 3],
+    ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
+        crate::summon_difficulty::lineup::row_at(
+            &self.root,
+            agent,
+            difficulty,
+            self.lineup.as_ref(),
+            None,
+            0,
+        )
+    }
+    fn choose_assign(
+        &self,
+        asked: &crate::summon_assign::AssignAsk,
+        _: [&str; 3],
+    ) -> crate::summon_assign::Receipts {
+        crate::summon_assign::Receipts {
+            difficulty: asked
+                .difficulty
+                .as_ref()
+                .map(|_| serde_json::json!({"chosen": self.chosen, "applied": true})),
+            model: None,
+            ..Default::default()
+        }
+    }
+}
+
+/// t-125871: a summons that leaves its model open, on a row where the person
+/// wrote a release the catalog has since superseded, runs the live release
+/// that stands for it — no code names either — and the reply and the
+/// worker's row both say which release was written and which ran, so the
+/// coordinator and the person can read why that model.
+#[test]
+fn an_open_model_dial_runs_the_live_release_of_a_superseded_row_and_says_which() {
+    let (old, new) = ("example-family-a-max", "example-family-a2-max");
+    let high = crate::summon_difficulty::LADDER[2].0;
+    let launcher = RowsOf {
+        root: serde_json::json!({"smart": {"summonProfiles": {"codex": {high: {"model": old}}}}}),
+        lineup: crate::summon_difficulty::lineup::Lineup::from_catalog(
+            &serde_json::json!({"models": [
+                {"provider": "openai", "id": old, "band": "superseded", "supersededBy": new},
+                {"provider": "openai", "id": new, "band": "rest", "rungs": ["easy", "medium"]},
+                {"provider": "openai", "id": "example-hard", "band": "second", "rungs": ["hard"]},
+            ]}),
+            "openai",
+        ),
+        chosen: high,
+        tuning: std::sync::Mutex::default(),
+    };
+    let mut bench = Bench::new();
+    bench.json("run-create --name superseded");
+    let planned = planned_on(
+        &mut bench.ledger,
+        &mut bench.team,
+        &launcher,
+        "worker-start --agent codex --prompt translate",
+        bench.clock + 1,
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+    assert_eq!(reply["model"], new, "{reply}");
+    let tuning = launcher.tuning.lock().unwrap().clone();
+    assert!(
+        tuning.iter().any(|word| word == new) && !tuning.iter().any(|word| word == old),
+        "launched with {tuning:?}"
+    );
+    assert_eq!(reply["dials"]["modelFrom"], "person", "{reply}");
+    assert_eq!(reply["dials"]["writtenSuperseded"], old, "{reply}");
+    // The bench seats no pane, so the reservation reads back as released:
+    // `--all` lists it with the row the ledger kept.
+    let workers = bench.json("worker-list --all");
+    assert_eq!(workers["workers"][0]["model"], new, "{workers}");
+    assert_eq!(workers["workers"][0]["writtenSuperseded"], old, "{workers}");
+}
+
+/// t-125871: with no list read for the agent, a summons names no model —
+/// no table of names stands in for the list — so its CLI runs its own
+/// default, and the reply says why in one line.
+#[test]
+fn with_no_list_read_a_summons_names_no_model_and_says_why() {
+    for agent in ["codex", "claude"] {
+        let launcher = RowsOf {
+            root: serde_json::Value::Null,
+            lineup: None,
+            chosen: crate::summon_difficulty::LADDER[0].0,
+            tuning: std::sync::Mutex::default(),
+        };
+        let mut bench = Bench::new();
+        bench.json("run-create --name unread");
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &launcher,
+            &format!("worker-start --agent {agent} --prompt translate"),
+            bench.clock + 1,
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+        assert!(reply["model"].is_null(), "{agent}: {reply}");
+        let tuning = launcher.tuning.lock().unwrap().clone();
+        assert!(
+            !tuning.iter().any(|word| word == "--model"),
+            "{agent} launched with {tuning:?}"
+        );
+        assert_eq!(reply["dials"]["modelFrom"], "cli-default", "{reply}");
+        assert_eq!(reply["dials"]["cliDefault"]["why"], "no_lineup", "{reply}");
+        assert!(
+            reply["dials"]["cliDefault"]["says"]
+                .as_str()
+                .is_some_and(|says| says.contains(agent)),
+            "{reply}"
+        );
+    }
+}
+
+fn unread_lineup_effort_summons(use_flag: bool) {
+    for (agent, expected) in [
+        ("codex", ["-c", "model_reasoning_effort=high"]),
+        ("claude", ["--effort", "high"]),
+    ] {
+        let high = crate::summon_difficulty::LADDER[2].0;
+        let root = if use_flag {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({"smart": {"summonProfiles": {agent: {high: {"effort": "high"}}}}})
+        };
+        let launcher = RowsOf {
+            root,
+            lineup: None,
+            chosen: high,
+            tuning: std::sync::Mutex::default(),
+        };
+        let mut bench = Bench::new();
+        bench.json("run-create --name unread");
+        let flags = if use_flag { " --effort high" } else { "" };
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &launcher,
+            &format!("worker-start --agent {agent} --prompt translate{flags}"),
+            bench.clock + 1,
+        );
+        assert_eq!(
+            planned.reply.exit_code, 0,
+            "{agent}: {}",
+            planned.reply.stderr
+        );
+        let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+        assert!(reply["model"].is_null(), "{reply}");
+        assert_eq!(reply["effort"], "high", "{reply}");
+        assert_eq!(reply["dials"]["modelFrom"], "cli-default", "{reply}");
+        assert_eq!(reply["dials"]["cliDefault"]["why"], "no_lineup", "{reply}");
+        let tuning = launcher.tuning.into_inner().unwrap();
+        assert!(
+            tuning
+                .iter()
+                .take(expected.len())
+                .map(String::as_str)
+                .eq(expected),
+            "{agent}: {tuning:?}"
+        );
+        assert!(
+            !tuning.iter().any(|word| word == "--model"),
+            "{agent}: {tuning:?}"
+        );
+    }
+}
+
+#[test]
+fn unread_lineup_keeps_effort_from_settings() {
+    unread_lineup_effort_summons(false);
+}
+
+#[test]
+fn unread_lineup_accepts_an_explicit_effort_without_a_model() {
+    unread_lineup_effort_summons(true);
 }
 
 /// t-14437: a model nobody typed reaches the coordinator — agent-list names

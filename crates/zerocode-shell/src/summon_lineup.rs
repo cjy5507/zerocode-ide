@@ -894,4 +894,111 @@ mod tests {
             1_000 + 8 * REFRESH_AFTER_MS
         ));
     }
+
+    /// The strings in `text` shaped like a model id — a lowercase word, a
+    /// hyphen and a digit somewhere (`example-family-2-max`) — on lines that
+    /// are not comments.
+    fn model_shaped(text: &str) -> Vec<String> {
+        let shaped = |word: &str| {
+            word.starts_with(|first: char| first.is_ascii_lowercase())
+                && word.contains('-')
+                && word.contains(|one: char| one.is_ascii_digit())
+                && word.chars().all(|one| {
+                    one.is_ascii_lowercase() || one.is_ascii_digit() || one == '-' || one == '.'
+                })
+        };
+        let quoted = |line: &str| {
+            let mut found = Vec::new();
+            let mut open: Option<String> = None;
+            let mut escaped = false;
+            for one in line.chars() {
+                if let Some(word) = open.as_mut() {
+                    if escaped {
+                        word.push(one);
+                        escaped = false;
+                    } else if one == '\\' {
+                        escaped = true;
+                    } else if one == '"' {
+                        found.extend(open.take());
+                    } else {
+                        word.push(one);
+                    }
+                } else if one == '"' {
+                    open = Some(String::new());
+                }
+            }
+            found
+        };
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(quoted)
+            .filter(|word| shaped(word))
+            .collect()
+    }
+
+    /// t-125871 (contract): the code that picks a summons' model names no
+    /// model — every name a summons launches comes from the list the window
+    /// read or the row the person wrote (the person, 11-22: 「하드코딩금지
+    /// … 모델목록을 보고 거기서 뽑아야함」). Read as it ships, in this crate
+    /// and in the core: every file under a name that starts with `summon`
+    /// (code and data alike), the CLI-list reader and the agent catalog
+    /// whose rows put a model on a command line — each without its trailing
+    /// test module, test files skipped.
+    #[test]
+    fn no_model_name_is_written_in_the_code_that_picks_a_summons_model() {
+        fn walk(dir: &Path, into: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("a source folder").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, into);
+                } else {
+                    into.push(path);
+                }
+            }
+        }
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crates folder");
+        let named = ["cli_models.rs", "agent.rs", "capabilities.rs"];
+        let mut read = Vec::new();
+        for source in ["zerocode-shell", "zerocode-core"].map(|one| crates.join(one).join("src")) {
+            let mut files = Vec::new();
+            walk(&source, &mut files);
+            for path in files {
+                let within = path
+                    .strip_prefix(&source)
+                    .expect("inside its source folder");
+                let summons = within
+                    .iter()
+                    .any(|part| part.to_str().is_some_and(|part| part.starts_with("summon")));
+                let test = within.iter().any(|part| {
+                    part.to_str().is_some_and(|part| {
+                        part == "tests" || part == "tests.rs" || part.ends_with("_tests.rs")
+                    })
+                });
+                let catalog = within
+                    .to_str()
+                    .is_some_and(|within| named.contains(&within));
+                if (summons || catalog) && !test {
+                    read.push(path);
+                }
+            }
+        }
+        assert!(read.len() > named.len(), "{read:?}");
+        let mut named_in_code = Vec::new();
+        for path in &read {
+            let text = std::fs::read_to_string(path).expect("a source file");
+            let shipped = text
+                .split("\n#[cfg(test)]\nmod tests {")
+                .next()
+                .unwrap_or_default();
+            for word in model_shaped(shipped) {
+                named_in_code.push(format!("{}: {word}", path.display()));
+            }
+        }
+        assert!(
+            named_in_code.is_empty(),
+            "a model is named in the code that picks one: {named_in_code:#?}"
+        );
+    }
 }

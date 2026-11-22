@@ -97,6 +97,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 dispatch: Some(format!("dispatch-{}", at % DISPATCH_COUNT)),
                 model: Some("bench-model".to_string()),
                 effort: Some("high".to_string()),
+                written_superseded: None,
                 session: None,
                 ready_by_ms: None,
                 hook_unreachable_since_ms: None,

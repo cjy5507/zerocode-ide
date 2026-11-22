@@ -749,15 +749,14 @@ fn baseline_high_is_the_hard_row_as_it_ran_not_any_summons_of_its_model() {
         0,
     )
     .unwrap()
-    .expect("a hard row");
+    .expect("a hard row")
+    .model
+    .expect("a model for the hard row");
     let (reply, prepared) = summon_with(
         &Assigned::late(),
-        &format!(
-            "worker-start --agent claude --model {} --prompt translate-labels",
-            hard.model
-        ),
+        &format!("worker-start --agent claude --model {hard} --prompt translate-labels"),
     );
-    assert_eq!(reply["model"], hard.model.as_str(), "{reply}");
+    assert_eq!(reply["model"], hard, "{reply}");
     assert!(
         !prepared
             .difficulty_shadow

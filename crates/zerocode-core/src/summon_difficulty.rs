@@ -8,12 +8,12 @@ use serde_json::{Value, json};
 pub const RUBRIC_VERSION: u32 = 2;
 pub mod lineup;
 pub mod outcomes;
+/// Where the rows a person wrote live in the settings' smart table. Nothing
+/// ships beside them: with no row written and no lineup read, a summons names
+/// no model and the agent's CLI runs its own default (t-125871 — a shipped
+/// table of model names launched releases its own catalog had superseded;
+/// the person, 2026-11-22: 「하드코딩금지 … 모델목록을 보고 거기서 뽑아야함」).
 pub const PROFILES_SETTING: &str = "summonProfiles";
-/// The shipped launch table: the model each agent's difficulty falls back to
-/// when no lineup names one. Its rows name models only — no effort is ours
-/// to ship (t-74181): the model seat chooses one with the model, the person
-/// may write one, and otherwise the agent's CLI runs at its own default.
-pub const DEFAULT_PROFILES: &str = include_str!("summon-profiles.json");
 /// The difficulty a summons nobody judged runs at (t-45961): the ladder's
 /// top, whose row is the person's own where they wrote one and otherwise the
 /// lineup's hard rung — the provider's top implementation model. Never the
@@ -51,23 +51,6 @@ impl Written {
     pub const fn is_empty(&self) -> bool {
         self.model.is_none() && self.effort.is_none()
     }
-
-    /// The row as the launch profile it names, when it writes a model.
-    #[must_use]
-    pub fn whole(&self) -> Option<Profile> {
-        Some(Profile {
-            model: self.model.clone()?,
-            effort: self.effort.clone(),
-        })
-    }
-}
-
-#[must_use]
-pub fn profiles(root: &Value) -> Value {
-    root.get(crate::jev::SMART_SETTINGS_KEY)
-        .and_then(|s| s.get(PROFILES_SETTING))
-        .cloned()
-        .unwrap_or_else(|| serde_json::from_str(DEFAULT_PROFILES).unwrap_or_default())
 }
 
 /// Only the rows a person wrote (`{}` when none) — what a settings screen
@@ -141,23 +124,6 @@ pub fn written_launchable(agent: &str, written: &Written) -> Result<(), String> 
     Ok(())
 }
 
-/// An explicit settings entry replaces its default row, including invalid
-/// entries: a typo must not silently launch an unintended model.
-pub fn profile(root: &Value, agent: &str, difficulty: &str) -> Result<Option<Profile>, String> {
-    profile_in(root, agent, difficulty, None)
-}
-
-/// [`profile`] read against today's lineup ([`lineup::rows`]): a default row
-/// is the lineup's model for the difficulty, and the shipped table is the
-/// road back when no lineup was read.
-pub fn profile_in(
-    root: &Value,
-    agent: &str,
-    difficulty: &str,
-    lineup: Option<&lineup::Lineup>,
-) -> Result<Option<Profile>, String> {
-    Ok(lineup::row_at(root, agent, difficulty, lineup, None, 0)?.map(|row| row.profile()))
-}
 pub const SPEC_CHAR_CAP: usize = 400;
 pub const TITLE_CHAR_CAP: usize = crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP;
 pub const APPLY_DEADLINE_MS: u64 = 2_000;
@@ -257,33 +223,33 @@ pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The rows a person wrote are the only table there is (t-125871): with
+    /// none written the settings hold none, a written row runs as written —
+    /// with no lineup read, nothing is checked against one — and a row that
+    /// cannot launch is refused.
     #[test]
-    fn profiles_use_the_editable_table_and_refuse_invalid_overrides() {
-        let defaults = profiles(&Value::Null);
-        validate_profiles(&defaults).unwrap();
-        for (agent, levels) in defaults.as_object().unwrap() {
-            for (difficulty, configured) in levels.as_object().unwrap() {
-                assert_eq!(
-                    serde_json::to_value(profile(&Value::Null, agent, difficulty).unwrap())
-                        .unwrap(),
-                    *configured
-                );
-            }
-        }
-        let mut changed = defaults.clone();
-        changed["codex"][LADDER[0].0]["model"] = json!("gpt-test-profile");
+    fn profiles_are_the_rows_the_person_wrote_and_refuse_invalid_ones() {
+        assert_eq!(written_profiles(&Value::Null), json!({}));
+        let low = LADDER[0].0;
+        let mut changed = json!({"codex": {low: {"model": "example-profile-1"}}});
+        validate_profiles(&changed).unwrap();
         let root = json!({crate::jev::SMART_SETTINGS_KEY:{PROFILES_SETTING:changed}});
+        assert_eq!(written_profiles(&root), changed);
         assert_eq!(
-            profile(&root, "codex", LADDER[0].0).unwrap().unwrap().model,
-            "gpt-test-profile"
+            lineup::row_at(&root, "codex", low, None, None, 0)
+                .unwrap()
+                .unwrap()
+                .profile()
+                .unwrap()
+                .model,
+            "example-profile-1"
         );
-        changed["codex"][LADDER[0].0]["effort"] = json!("");
-        changed["codex"][LADDER[0].0]["model"] = json!("gpt-test-profile");
+        changed["codex"][low]["effort"] = json!("");
         assert!(validate_profiles(&changed).is_err());
     }
     /// t-74181 (source contract): no difficulty-to-effort table, in code or
-    /// in data. The ladder carries an option and its meaning only, the
-    /// shipped table names models only, and the code that builds a default
+    /// in data. The ladder carries an option and its meaning only, no table
+    /// of rows ships at all (t-125871), and the code that builds a default
     /// row names no effort word — what a summons nobody chose an effort for
     /// runs at is its CLI's own default.
     #[test]
@@ -307,15 +273,6 @@ mod tests {
         let lineup = include_str!("summon_difficulty/lineup.rs");
         let lineup = lineup.split("#[cfg(test)]").next().expect("code");
         assert_eq!(quoted(lineup), Vec::<&str>::new(), "lineup.rs");
-        let shipped: Value = serde_json::from_str(DEFAULT_PROFILES).unwrap();
-        for (agent, rows) in shipped.as_object().unwrap() {
-            for (difficulty, row) in rows.as_object().unwrap() {
-                assert!(
-                    row.get("effort").is_none(),
-                    "summon-profiles.json {agent} {difficulty} ships an effort: {row}"
-                );
-            }
-        }
         let orchestration = include_str!("orchestration.rs");
         assert!(
             !orchestration.contains("fn difficulty_effort("),

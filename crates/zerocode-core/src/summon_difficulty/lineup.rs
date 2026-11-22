@@ -1,27 +1,34 @@
 //! The live lineup a summons picks from (t-14437).
 //!
-//! The launch table (`summon-profiles.json`) named one model per difficulty,
-//! and nothing in it moved when a provider shipped a model: a new release
-//! reached a worker only when somebody typed `--model` by hand. This module
-//! reads the lineup the window already reads for the model chip (`zo models
-//! --json`, one road, each row carrying the band and rungs zo's own tier
-//! classifier gave it and the efforts the model accepts) and turns it into
-//! choices: for every difficulty, the model and effort that run, where that
-//! came from, and what else today's lineup offers there.
+//! A launch table once named one model per difficulty, and nothing in it
+//! moved when a provider shipped a model: a new release reached a worker only
+//! when somebody typed `--model` by hand. This module reads the lineup the
+//! window already reads for the model chip (`zo models --json`, one road,
+//! each row carrying the band and rungs zo's own tier classifier gave it and
+//! the efforts the model accepts) and turns it into choices: for every
+//! difficulty, the model and effort that run, where that came from, and what
+//! else today's lineup offers there.
 //!
 //! - A difficulty's default is the lineup's model for its rung (`easy`,
 //!   `medium`, `hard`), with no effort of ours: the agent's CLI runs it at
 //!   its own default unless the person wrote an effort (t-74181 — a coded
 //!   "easy and ordinary work at the model's highest effort", then a coded
 //!   ladder ending at `max` and a shipped table of efforts, put default rows
-//!   at `max`; the person, 2026-10-28: no table, in code or in data). The
-//!   table's model is only the road back when no lineup was read or it has
-//!   no model for the rung, and a row says which road it took. Which pair a
-//!   summons runs — the effort included — is the model seat's to judge
-//!   ([`crate::summon_model`]); these rows are what runs when it abstains or
-//!   does not act.
-//! - A row the person wrote is theirs and never moves; a saved row equal to
-//!   the shipped one is the shipped one.
+//!   at `max`; the person, 2026-10-28: no table, in code or in data). With no
+//!   lineup read there is no default row: the CLI selects its own model
+//!   and still receives any effort the person wrote. No table of model names
+//!   stands in for the list (t-125871; the person, 2026-11-22: 「하드코딩금지
+//!   … 모델목록을 보고 거기서 뽑아야함」). Which pair a summons runs — the
+//!   effort included — is the model seat's to judge ([`crate::summon_model`]);
+//!   these rows are what runs when it abstains or does not act.
+//! - A row the person wrote is theirs and runs as written, but for one fact
+//!   the catalog states: a release it has superseded runs as the live release
+//!   of its line the catalog names ([`Lineup::current_release`], t-125871 —
+//!   the screen offers only live models, so a folded release in a row was the
+//!   newest of its line when it was picked; the person, 2026-11-22: 「sol도
+//!   6.2가 나옴.. 왜 6.1 을 소환함」). The setting stays as written, and the
+//!   row says which release it was ([`Row::written_superseded`]). A summons
+//!   that names its own `--model` runs it as named.
 //! - A model without a band is offered only at the lowest difficulty: nothing
 //!   says it can carry more. A folded model — unlisted, or an older release
 //!   of its own line — is nobody's choice.
@@ -584,14 +591,16 @@ impl Seen {
 
 /// Where a row's model came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Source {
-    /// The person wrote it in settings.
+    /// The person wrote it in settings — or wrote a release the catalog has
+    /// since superseded, and the live release of its line runs in its place
+    /// ([`Row::written_superseded`]).
     Person,
     /// Today's lineup, by the model's rung.
     Lineup,
-    /// The shipped table: no lineup was read, or it had no model here.
-    Table,
+    /// The CLI selects its own model when the row only supplies an effort.
+    CliDefault,
 }
 
 /// Who set a row's effort — the line a person reads beside it. Never a rule
@@ -635,7 +644,8 @@ pub struct Candidate {
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     pub difficulty: &'static str,
-    pub model: String,
+    /// `None`: the agent's CLI selects its default model.
+    pub model: Option<String>,
     /// `None`: no effort goes on the command line ([`EffortRule::CliDefault`]).
     pub effort: Option<String>,
     pub from: Source,
@@ -653,41 +663,50 @@ pub struct Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort_clamped: Option<Clamp>,
     pub candidates: Vec<Candidate>,
-    /// What runs here once the person's row is cleared — the lineup's or
-    /// the table's pair; `None` when neither has a model for it.
+    /// What runs here once the person's row is cleared — the lineup's pair;
+    /// `None` when it has no model for it (or no lineup was read).
     pub auto_model: Option<String>,
     pub auto_effort: Option<String>,
     /// The fields the person wrote; `None` where the lineup fills it.
     pub written_model: Option<String>,
     pub written_effort: Option<String>,
-    /// Where the row's model stands in today's lineup; `None` when no
-    /// lineup was read.
+    /// The release the person wrote, when the catalog has since superseded
+    /// it and the row runs the live release of its line in its place
+    /// (t-125871): what a reader is told beside the model that runs. `None`
+    /// when the row runs what was written, or nobody wrote a model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_superseded: Option<String>,
+    /// Where the row's model stands in today's lineup, when both are known.
     pub standing: Option<Standing>,
     /// The words a summons puts on the agent's command line for this row
-    /// (`--model …`, and the effort the way this agent's CLI takes it).
+    /// (the model and effort flags the agent's CLI takes, for each dial set).
     pub launch: Vec<String>,
 }
 
 /// One road's answer for a row: its pair, and where each half came from.
 #[derive(Clone)]
 struct Picked {
-    model: String,
+    model: Option<String>,
     effort: Option<String>,
     from: Source,
     effort_rule: EffortRule,
     effort_clamped: Option<Clamp>,
+    /// [`Row::written_superseded`].
+    written_superseded: Option<String>,
 }
 
 impl Row {
+    /// The launch pair when the row selects a model.
     #[must_use]
-    pub fn profile(&self) -> Profile {
-        Profile {
-            model: self.model.clone(),
+    pub fn profile(&self) -> Option<Profile> {
+        Some(Profile {
+            model: self.model.clone()?,
             effort: self.effort.clone(),
-        }
+        })
     }
 
-    /// The effort the person wrote on this row as it runs on `model`, and
+    /// The effort the person wrote on this row as it runs on `model` (`None`
+    /// for the CLI's default model), and
     /// where it was brought from when `model` does not accept it as written;
     /// `None` when the person wrote no effort here (t-74181). On the row's
     /// own model it is the row's; an effort written alone binds whatever
@@ -697,17 +716,20 @@ impl Row {
     #[must_use]
     pub fn person_effort_on(
         &self,
-        model: &str,
+        model: Option<&str>,
         lineup: Option<&Lineup>,
     ) -> Option<(String, Option<Clamp>)> {
         if self.effort_rule != EffortRule::Person {
             return None;
         }
-        if model == self.model || self.written_model.is_some() {
+        if model == self.model.as_deref() || self.written_model.is_some() {
             return Some((self.effort.clone()?, self.effort_clamped.clone()));
         }
         let written = self.written_effort.clone()?;
-        Some(effort_on(lineup.and_then(|held| held.find(model)), written))
+        Some(effort_on(
+            lineup.and_then(|held| held.find(model?)),
+            written,
+        ))
     }
 }
 
@@ -721,10 +743,12 @@ fn effort_on(model: Option<&LiveModel>, wanted: String) -> (String, Option<Clamp
     }
 }
 
-/// Every difficulty `agent` has a row at, read against today's lineup.
+/// Every difficulty `agent` has a row at, read against today's lineup — and
+/// with no lineup read, only the rows the person wrote: no model of ours
+/// stands in for the list (t-125871).
 ///
 /// # Errors
-/// A person's row that cannot launch (the refusal [`super::profile`] gives).
+/// A person's row that cannot launch ([`super::written_launchable`]).
 pub fn rows(
     root: &Value,
     agent: &str,
@@ -732,24 +756,7 @@ pub fn rows(
     seen: Option<&Seen>,
     now_ms: i64,
 ) -> Result<Vec<Row>, String> {
-    let defaults: Value =
-        serde_json::from_str(super::DEFAULT_PROFILES).map_err(|e| e.to_string())?;
-    rows_with_defaults(root, &defaults, agent, lineup, seen, now_ms)
-}
-
-/// [`rows`] over a given shipped table.
-///
-/// # Errors
-/// As [`rows`].
-pub fn rows_with_defaults(
-    root: &Value,
-    defaults: &Value,
-    agent: &str,
-    lineup: Option<&Lineup>,
-    seen: Option<&Seen>,
-    now_ms: i64,
-) -> Result<Vec<Row>, String> {
-    build(root, defaults, agent, lineup, seen, now_ms, None)
+    build(root, agent, lineup, seen, now_ms, None)
 }
 
 /// The one difficulty `difficulty` of [`rows`]; a person's row at another
@@ -765,23 +772,11 @@ pub fn row_at(
     seen: Option<&Seen>,
     now_ms: i64,
 ) -> Result<Option<Row>, String> {
-    let defaults: Value =
-        serde_json::from_str(super::DEFAULT_PROFILES).map_err(|e| e.to_string())?;
-    Ok(build(
-        root,
-        &defaults,
-        agent,
-        lineup,
-        seen,
-        now_ms,
-        Some(difficulty),
-    )?
-    .pop())
+    Ok(build(root, agent, lineup, seen, now_ms, Some(difficulty))?.pop())
 }
 
 fn build(
     root: &Value,
-    defaults: &Value,
     agent: &str,
     lineup: Option<&Lineup>,
     seen: Option<&Seen>,
@@ -792,13 +787,6 @@ fn build(
         .get(SMART_SETTINGS_KEY)
         .and_then(|smart| smart.get(PROFILES_SETTING))
         .and_then(|table| table.get(agent));
-    let read_shipped = |difficulty: &str| -> Result<Option<Written>, String> {
-        defaults
-            .get(agent)
-            .and_then(|rows| rows.get(difficulty))
-            .map(|row| serde_json::from_value::<Written>(row.clone()).map_err(|e| e.to_string()))
-            .transpose()
-    };
     let read_written = |difficulty: &str| -> Result<Option<Written>, String> {
         written
             .and_then(|rows| rows.get(difficulty))
@@ -822,63 +810,31 @@ fn build(
         if only.is_some_and(|only| only != difficulty) {
             continue;
         }
-        // The shipped row names a model only: no effort is ours to ship.
-        let shipped = read_shipped(difficulty)?.and_then(|row| {
-            Some(Profile {
-                model: row.model?,
-                effort: None,
-            })
-        });
-        // A saved row equal to the shipped one is the shipped one.
-        let person = read_written(difficulty)?
-            .filter(|row| !row.is_empty() && (row.whole().is_none() || row.whole() != shipped));
+        let person = read_written(difficulty)?.filter(|row| !row.is_empty());
         // What runs here when nobody wrote a row: the lineup's model for the
-        // rung, else the table's while it is live.
-        let auto = if let Some(pick) = lineup.and_then(|held| {
-            let rung = Rung::of(difficulty)?;
-            let by_rung = held
-                .models
-                .iter()
-                .filter(|model| !model.folded() && model.rungs.contains(&rung))
-                .min_by_key(|model| home.as_ref() != Some(&model.provider));
-            // No model for the rung: the table's model stands while it is
-            // live here; only a folded one gives way to what the lineup
-            // offers at this difficulty.
-            let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
-            by_rung.or_else(|| {
-                (!table_stands)
-                    .then(|| offered(held, difficulty).next())
-                    .flatten()
+        // rung, else what it offers at this difficulty — and nothing with no
+        // lineup read, for the agent's CLI to default.
+        let auto = lineup
+            .and_then(|held| {
+                let rung = Rung::of(difficulty)?;
+                held.models
+                    .iter()
+                    .filter(|model| !model.folded() && model.rungs.contains(&rung))
+                    .min_by_key(|model| home.as_ref() != Some(&model.provider))
+                    .or_else(|| offered(held, difficulty).next())
             })
-        }) {
-            Some(Picked {
-                model: pick.id.clone(),
+            .map(|pick| Picked {
+                model: Some(pick.id.clone()),
                 effort: None,
                 from: Source::Lineup,
                 effort_rule: EffortRule::CliDefault,
                 effort_clamped: None,
-            })
-        } else {
-            shipped
-                .clone()
-                .filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
-                .map(|table| Picked {
-                    model: table.model,
-                    effort: None,
-                    from: Source::Table,
-                    effort_rule: EffortRule::CliDefault,
-                    effort_clamped: None,
-                })
-        };
+                written_superseded: None,
+            });
         let picked = match person.as_ref() {
             Some(person) => {
                 super::written_launchable(agent, person)?;
-                match written_pick(person, auto.as_ref(), lineup) {
-                    Some(picked) => picked,
-                    // No model to run: an effort written alone with no
-                    // model here to ride.
-                    None => continue,
-                }
+                written_pick(person, auto.as_ref(), lineup)
             }
             None => match auto.clone() {
                 Some(auto) => auto,
@@ -891,10 +847,15 @@ fn build(
             from,
             effort_rule,
             effort_clamped,
+            written_superseded,
         } = picked;
         let candidates = lineup.map_or_else(Vec::new, |held| {
             offered(held, difficulty)
-                .filter(|candidate| candidate.id != held.canonical(&model))
+                .filter(|candidate| {
+                    model
+                        .as_deref()
+                        .is_none_or(|id| candidate.id != held.canonical(id))
+                })
                 .map(|candidate| Candidate {
                     model: candidate.id.clone(),
                     effort: None,
@@ -902,19 +863,22 @@ fn build(
                 })
                 .collect()
         });
-        let held = lineup.and_then(|held| held.find(&model));
+        let held = lineup.and_then(|held| held.find(model.as_deref()?));
         rows.push(Row {
             difficulty,
             band: held.and_then(|held| held.band),
             tier_from: held.and_then(|held| held.tier_from),
             tier_confidence_permille: held.and_then(|held| held.tier_confidence_permille),
-            standing: lineup.map(|held| held.standing(&model)),
-            launch: crate::orchestration::launch_words(agent, &model, effort.as_deref())
+            standing: lineup
+                .zip(model.as_deref())
+                .map(|(held, id)| held.standing(id)),
+            launch: crate::orchestration::tuning_words(agent, model.as_deref(), effort.as_deref())
                 .unwrap_or_default(),
-            auto_model: auto.as_ref().map(|auto| auto.model.clone()),
+            auto_model: auto.as_ref().and_then(|auto| auto.model.clone()),
             auto_effort: auto.and_then(|auto| auto.effort),
             written_model: person.as_ref().and_then(|person| person.model.clone()),
             written_effort: person.and_then(|person| person.effort),
+            written_superseded,
             model,
             effort,
             from,
@@ -926,37 +890,52 @@ fn build(
     Ok(rows)
 }
 
-/// The pair a person's row runs at: each field as written, the model the
-/// lineup's where none is written, and no effort where none is written — the
-/// agent's CLI runs its own default. `None` when there is no model: an
-/// effort written alone where no model runs here.
-fn written_pick(
-    person: &Written,
-    auto: Option<&Picked>,
-    lineup: Option<&Lineup>,
-) -> Option<Picked> {
+/// The model a person's written `model` runs as: itself, or — when the
+/// catalog has superseded that release and names a live release of its line
+/// in its place ([`Lineup::current_release`]) — that release (t-125871).
+/// Nothing is guessed: no lineup, no successor named, or one the lineup does
+/// not hold live, and the model runs as written.
+fn runs_as<'a>(model: &'a str, lineup: Option<&'a Lineup>) -> &'a str {
+    lineup
+        .and_then(|held| held.current_release(model))
+        .unwrap_or(model)
+}
+
+/// The pair a person's row runs at: each field as written — a superseded
+/// release as the live release that stands for it ([`runs_as`]) — the model
+/// the lineup's where none is written. The CLI fills either dial left open.
+fn written_pick(person: &Written, auto: Option<&Picked>, lineup: Option<&Lineup>) -> Picked {
     let (model, from) = match &person.model {
-        Some(model) => (model.clone(), Source::Person),
-        None => {
-            let auto = auto?;
+        Some(model) => (Some(runs_as(model, lineup).to_string()), Source::Person),
+        None => auto.map_or((None, Source::CliDefault), |auto| {
             (auto.model.clone(), auto.from)
-        }
+        }),
     };
+    let written_superseded = person
+        .model
+        .clone()
+        .filter(|written| Some(written) != model.as_ref());
     let Some(effort) = person.effort.clone() else {
-        return Some(Picked {
+        return Picked {
             model,
             effort: None,
             from,
             effort_rule: EffortRule::CliDefault,
             effort_clamped: None,
-        });
+            written_superseded,
+        };
     };
-    let (inside, clamped) = effort_on(lineup.and_then(|held| held.find(&model)), effort.clone());
-    Some(Picked {
-        // A person's model and effort stand as written; an effort written
-        // alone rides the lineup's model, inside that model's range: the
-        // model may move under it, a launch outside may not.
-        effort: Some(if person.model.is_none() {
+    let (inside, clamped) = effort_on(
+        lineup.and_then(|held| held.find(model.as_deref()?)),
+        effort.clone(),
+    );
+    Picked {
+        // A person's model and effort stand as written. An effort whose
+        // model moved under it — written alone, riding the lineup's model, or
+        // beside a release that runs as its successor — comes inside what
+        // the model that runs accepts: the model may move under it, a launch
+        // outside may not.
+        effort: Some(if person.model.is_none() || written_superseded.is_some() {
             inside
         } else {
             effort
@@ -965,7 +944,8 @@ fn written_pick(
         from,
         effort_rule: EffortRule::Person,
         effort_clamped: clamped,
-    })
+        written_superseded,
+    }
 }
 
 /// Why a row a person is about to save is refused.
@@ -1040,11 +1020,13 @@ pub fn check_written(
     if let Some(effort) = &written.effort
         && !unchanged
     {
-        // The model the effort rides: the one written, else what runs here
-        // when nobody wrote a model.
+        // The model the effort rides: the one written as it runs — the live
+        // release that stands for a superseded one, the one the screen lists
+        // the efforts of — else what runs here when nobody wrote a model.
         let model = written
             .model
-            .clone()
+            .as_deref()
+            .map(|model| runs_as(model, Some(held)).to_string())
             .or_else(|| before.as_ref().and_then(|row| row.auto_model.clone()));
         if let Some(model) = model
             && let Some(found) = held.find(&model)
@@ -1149,14 +1131,6 @@ mod tests {
         json!({crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: profiles}})
     }
 
-    fn shipped() -> Value {
-        json!({"claude": {
-            LOW: {"model": "model-old"},
-            MID: {"model": "model-alias"},
-            HIGH: {"model": "model-old"},
-        }})
-    }
-
     fn row<'a>(rows: &'a [Row], difficulty: &str) -> &'a Row {
         let found = rows.iter().find(|row| row.difficulty == difficulty);
         assert!(found.is_some(), "no {difficulty} row in {rows:?}");
@@ -1173,13 +1147,16 @@ mod tests {
     /// The difficulties `model` runs at or is offered at.
     fn reaches(rows: &[Row], model: &str) -> Vec<&'static str> {
         rows.iter()
-            .filter(|row| row.model == model || row.candidates.iter().any(|c| c.model == model))
+            .filter(|row| {
+                row.model.as_deref() == Some(model)
+                    || row.candidates.iter().any(|c| c.model == model)
+            })
             .map(|row| row.difficulty)
             .collect()
     }
 
     fn read(root: &Value, lineup: Option<&Lineup>, seen: Option<&Seen>) -> Vec<Row> {
-        rows_with_defaults(root, &shipped(), "claude", lineup, seen, NOW).unwrap()
+        rows(root, "claude", lineup, seen, NOW).unwrap()
     }
 
     #[test]
@@ -1220,24 +1197,22 @@ mod tests {
             "a custom model is not news"
         );
         assert!(Lineup::from_catalog_all(&json!({"models": []})).is_none());
-        let rows =
-            rows_with_defaults(&Value::Null, &json!({}), "zo", Some(&all), None, NOW).unwrap();
+        let read = rows(&Value::Null, "zo", Some(&all), None, NOW).unwrap();
         assert_eq!(
-            row(&rows, LOW).model,
-            "model-o",
+            row(&read, LOW).model.as_deref(),
+            Some("model-o"),
             "another provider's easy rung"
         );
         assert_eq!(
-            row(&rows, HIGH).model,
-            "model-a",
+            row(&read, HIGH).model.as_deref(),
+            Some("model-a"),
             "no settings: the lineup's order"
         );
         let runs_openai = json!({"model": "model-o"});
-        let rows =
-            rows_with_defaults(&runs_openai, &json!({}), "zo", Some(&all), None, NOW).unwrap();
+        let read = rows(&runs_openai, "zo", Some(&all), None, NOW).unwrap();
         assert_eq!(
-            row(&rows, HIGH).model,
-            "model-p",
+            row(&read, HIGH).model.as_deref(),
+            Some("model-p"),
             "the provider zo's own settings run comes first"
         );
         let across = Profile {
@@ -1271,16 +1246,24 @@ mod tests {
             "shipped is not new"
         );
         let rows = read(&Value::Null, Some(&today), Some(&seen));
-        assert_eq!(row(&rows, LOW).model, "model-b", "the easy rung runs low");
+        assert_eq!(
+            row(&rows, LOW).model.as_deref(),
+            Some("model-b"),
+            "the easy rung runs low"
+        );
         assert_eq!(row(&rows, LOW).from, Source::Lineup);
-        assert_eq!(row(&rows, MID).model, "model-b");
-        assert_eq!(row(&rows, HIGH).model, "model-a", "the hard rung runs high");
+        assert_eq!(row(&rows, MID).model.as_deref(), Some("model-b"));
+        assert_eq!(
+            row(&rows, HIGH).model.as_deref(),
+            Some("model-a"),
+            "the hard rung runs high"
+        );
         let mut top = today.clone();
         top.models.push(m("model-t", "top", &[]).into_live());
         let rows = read(&Value::Null, Some(&top), Some(&seen));
         assert_eq!(
-            row(&rows, HIGH).model,
-            "model-a",
+            row(&rows, HIGH).model.as_deref(),
+            Some("model-a"),
             "the top band plans, never the default"
         );
         assert_eq!(offered(&rows, "model-t"), [HIGH], "but is offered at high");
@@ -1307,11 +1290,9 @@ mod tests {
         let mut other = m("model-c", "rest", &[]);
         other.efforts = Some(&["high", "low"]);
         let today = lineup(&[easy, hard, other]);
-        // Every agent whose command line takes an effort, over the table
-        // this build ships as well as this test's (review P3-2): a row of
-        // any of them that nobody wrote carries no effort, whichever file a
-        // table would have been written in.
-        let shipped_here: Value = serde_json::from_str(super::super::DEFAULT_PROFILES).unwrap();
+        // Every agent whose command line takes an effort (review P3-2): a
+        // row of any of them that nobody wrote carries no effort — and with
+        // no lineup read there is no such row at all (t-125871).
         let agents: Vec<&str> = crate::agent::AGENT_SPECS
             .iter()
             .map(|spec| spec.id)
@@ -1319,19 +1300,14 @@ mod tests {
             .collect();
         assert!(agents.len() > 1, "{agents:?}");
         for agent in agents {
-            let bare = rows_with_defaults(&Value::Null, &json!({}), agent, Some(&today), None, NOW)
-                .unwrap();
-            let mut table = Vec::new();
-            for defaults in [shipped(), shipped_here.clone()] {
-                table.extend(
-                    rows_with_defaults(&Value::Null, &defaults, agent, Some(&today), None, NOW)
-                        .unwrap(),
-                );
-                table.extend(
-                    rows_with_defaults(&Value::Null, &defaults, agent, None, None, NOW).unwrap(),
-                );
-            }
-            for at in bare.iter().chain(&table) {
+            let bare = rows(&Value::Null, agent, Some(&today), None, NOW).unwrap();
+            assert!(
+                rows(&Value::Null, agent, None, None, NOW)
+                    .unwrap()
+                    .is_empty(),
+                "{agent}"
+            );
+            for at in &bare {
                 assert_eq!(
                     (
                         at.effort.as_deref(),
@@ -1351,11 +1327,11 @@ mod tests {
         }
         let rows = read(&Value::Null, Some(&today), None);
         assert_eq!(
-            row(&rows, HIGH).model,
-            "model-a",
+            row(&rows, HIGH).model.as_deref(),
+            Some("model-a"),
             "the difficulty still picks the model"
         );
-        assert_eq!(row(&rows, LOW).model, "model-b");
+        assert_eq!(row(&rows, LOW).model.as_deref(), Some("model-b"));
     }
 
     #[test]
@@ -1366,11 +1342,12 @@ mod tests {
         );
     }
 
+    /// A model the person wrote stays theirs when the list moves under it —
+    /// one the source left out runs as written — and a difficulty nobody
+    /// wrote follows the lineup.
     #[test]
-    fn a_row_the_person_wrote_never_moves() {
-        let mut person = shipped()["claude"].clone();
-        person[LOW] = json!({"model": "model-gone", "effort": "high"});
-        let root = settings(json!({"claude": person}));
+    fn a_row_the_person_wrote_stays_though_its_model_left_the_lineup() {
+        let root = settings(json!({"claude": {LOW: {"model": "model-gone", "effort": "high"}}}));
         let today = lineup(&[
             m("model-b", "rest", &["easy", "medium"]),
             m("model-a", "second", &["hard"]),
@@ -1379,15 +1356,14 @@ mod tests {
         let written = row(&rows, LOW);
         assert_eq!(written.from, Source::Person, "the person's row");
         assert_eq!(
-            written.model, "model-gone",
+            written.model.as_deref(),
+            Some("model-gone"),
             "kept though its model left the lineup"
         );
         assert_eq!(written.effort.as_deref(), Some("high"));
         assert_eq!(written.effort_rule, EffortRule::Person);
-        // A saved row equal to the shipped one is the shipped one: it follows
-        // the lineup like any default.
         assert_eq!(row(&rows, MID).from, Source::Lineup);
-        assert_eq!(row(&rows, MID).model, "model-b");
+        assert_eq!(row(&rows, MID).model.as_deref(), Some("model-b"));
     }
 
     #[test]
@@ -1445,6 +1421,174 @@ mod tests {
         }
     }
 
+    /// One catalog of a line whose `old` release the classifier superseded
+    /// by `new`, beside a model of the hard rung; `new_row` adds to the
+    /// newer release's row (an unlisting, its efforts).
+    fn superseded_line(old: &str, new: &str, new_row: Value) -> Lineup {
+        let mut successor =
+            json!({"provider": "claude", "id": new, "band": "rest", "rungs": ["easy", "medium"]});
+        for (key, value) in new_row.as_object().into_iter().flatten() {
+            successor[key.as_str()] = value.clone();
+        }
+        Lineup::from_catalog(
+            &json!({"models": [
+                {"provider": "claude", "id": old, "band": "superseded", "supersededBy": new,
+                 "efforts": ["low", "high", "max"]},
+                successor,
+                {"provider": "claude", "id": "example-hard", "band": "second", "rungs": ["hard"]},
+            ]}),
+            "claude",
+        )
+        .expect("a lineup")
+    }
+
+    /// t-125871: a row the person wrote names a release, and the screen
+    /// offers only live models — so a release folded since was the newest of
+    /// its line when it was picked. When the catalog names the newer live
+    /// release that stands for it, the row runs that one: the person, 11-22
+    /// 「sol도 6.2가 나옴.. 왜 6.1 을 소환함」. The setting stays as written.
+    /// Two spellings of one story: the rule reads the catalog's own facts,
+    /// so renaming every model moves only the names.
+    #[test]
+    fn a_release_the_person_wrote_runs_as_the_live_release_its_line_names() {
+        for (old, new) in [
+            ("example-family-a-max", "example-family-a2-max"),
+            ("sample-line-b-1", "sample-line-b-2"),
+        ] {
+            let today = superseded_line(old, new, json!({}));
+            let root = settings(json!({"claude": {HIGH: {"model": old}}}));
+            let rows = read(&root, Some(&today), None);
+            let high = row(&rows, HIGH);
+            assert_eq!(
+                (high.model.as_deref(), high.from),
+                (Some(new), Source::Person),
+                "{old}"
+            );
+            assert_eq!(high.written_model.as_deref(), Some(old), "as written");
+            assert_eq!(
+                high.written_superseded.as_deref(),
+                Some(old),
+                "the row says which release it was"
+            );
+            assert_eq!(high.launch, ["--model", new], "the next summons' words");
+            assert_eq!(high.standing, Some(Standing::Listed));
+        }
+    }
+
+    /// The same row runs as written whenever the catalog does not name a
+    /// live release in its place: no list read, a twin of the same release
+    /// (no successor named), a successor the source stopped listing, one the
+    /// list does not hold, and a release that is current. Nothing is
+    /// guessed, and nothing else is picked in silence.
+    #[test]
+    fn a_release_the_person_wrote_stays_as_written_unless_its_line_names_a_live_one() {
+        let (old, new) = ("example-family-a-max", "example-family-a2-max");
+        let root = settings(json!({"claude": {HIGH: {"model": old}}}));
+        let twin = Lineup::from_catalog(
+            &json!({"models": [
+                {"provider": "claude", "id": old, "band": "superseded"},
+                {"provider": "claude", "id": new, "band": "rest", "rungs": ["easy"]},
+            ]}),
+            "claude",
+        )
+        .expect("a lineup");
+        let unlisted = superseded_line(old, new, json!({"unlistedSince": 1}));
+        let missing = Lineup::from_catalog(
+            &json!({"models": [
+                {"provider": "claude", "id": old, "band": "superseded", "supersededBy": new},
+            ]}),
+            "claude",
+        )
+        .expect("a lineup");
+        let current = Lineup::from_catalog(
+            &json!({"models": [{"provider": "claude", "id": old, "band": "second", "rungs": ["hard"]}]}),
+            "claude",
+        )
+        .expect("a lineup");
+        for (why, today) in [
+            ("no list read", None),
+            ("a twin", Some(&twin)),
+            ("its successor unlisted", Some(&unlisted)),
+            ("its successor not held", Some(&missing)),
+            ("a current release", Some(&current)),
+        ] {
+            let rows = read(&root, today, None);
+            let high = row(&rows, HIGH);
+            assert_eq!(
+                (high.model.as_deref(), high.from),
+                (Some(old), Source::Person),
+                "{why}"
+            );
+            assert_eq!(high.launch, ["--model", old], "{why}");
+            assert_eq!(high.written_superseded, None, "{why}");
+        }
+    }
+
+    /// An effort the person wrote beside the release rides the release that
+    /// runs in its place, brought inside what that one takes — the model
+    /// moved under it, a launch outside may not — and the row says so.
+    #[test]
+    fn a_written_effort_comes_inside_the_release_that_runs_in_its_place() {
+        let (old, new) = ("example-family-a-max", "example-family-a2-max");
+        let today = superseded_line(old, new, json!({"efforts": ["low", "high"]}));
+        let root = settings(json!({"claude": {HIGH: {"model": old, "effort": "max"}}}));
+        let rows = read(&root, Some(&today), None);
+        let high = row(&rows, HIGH);
+        assert_eq!(
+            (high.model.as_deref(), high.effort.as_deref()),
+            (Some(new), Some("high"))
+        );
+        assert_eq!(
+            high.effort_clamped,
+            Some(Clamp {
+                from: "max".into(),
+                to: "high".into()
+            })
+        );
+        assert_eq!(high.effort_rule, EffortRule::Person);
+        assert_eq!(high.launch, ["--model", new, "--effort", "high"]);
+        assert_eq!(high.written_effort.as_deref(), Some("max"), "as written");
+        assert_eq!(high.written_superseded.as_deref(), Some(old));
+    }
+
+    /// t-125871 (contract): no model name ships in the code that builds a
+    /// summons' rows. Nothing read and nothing written leaves every agent
+    /// with no row at all — its CLI runs its own default — and with a list
+    /// read, every row names a model of that list: a name typed into the
+    /// code or a table beside it would show up here as one the list never
+    /// gave.
+    #[test]
+    fn no_row_names_a_model_the_list_or_the_person_did_not() {
+        let today = lineup(&[
+            m("example-easy-1", "rest", &["easy", "medium"]),
+            m("example-hard-1", "second", &["hard"]),
+            m("example-top-1", "top", &[]),
+        ]);
+        let agents: Vec<&str> = crate::agent::AGENT_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .filter(|agent| crate::orchestration::takes_effort(agent))
+            .collect();
+        assert!(agents.len() > 1, "{agents:?}");
+        for agent in agents {
+            let bare = rows(&Value::Null, agent, None, None, NOW).unwrap();
+            assert!(
+                bare.is_empty(),
+                "{agent} names a model nobody listed: {bare:?}"
+            );
+            for at in rows(&Value::Null, agent, Some(&today), None, NOW).unwrap() {
+                assert!(
+                    at.model
+                        .as_deref()
+                        .is_some_and(|model| today.find(model).is_some()),
+                    "{agent} {} runs {}, which the list does not hold",
+                    at.difficulty,
+                    at.model.as_deref().unwrap_or_default()
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_folded_model_leaves_the_default_row() {
         let mut old = m("model-old", "superseded", &[]);
@@ -1454,8 +1598,9 @@ mod tests {
         let today = lineup(&[old, gone]);
         let rows = read(&Value::Null, Some(&today), None);
         assert!(
-            rows.iter().all(|row| row.model != "model-old"),
-            "a superseded table model is nobody's default: {rows:?}"
+            rows.iter()
+                .all(|row| row.model.as_deref() != Some("model-old")),
+            "a superseded model is nobody's default: {rows:?}"
         );
         for row in &rows {
             assert!(
@@ -1465,10 +1610,9 @@ mod tests {
                 "folded models are nobody's choice: {row:?}"
             );
         }
-        // Without any lineup the table stands, and says so.
-        let rows = read(&Value::Null, None, None);
-        assert_eq!(row(&rows, LOW).model, "model-old");
-        assert_eq!(row(&rows, LOW).from, Source::Table);
+        // Without any lineup there is no row nobody wrote: no model of ours
+        // stands in for the list, and the agent's CLI runs its default.
+        assert!(read(&Value::Null, None, None).is_empty());
         let mut seen = Seen::default();
         let live = lineup(&[m("model-e", "rest", &["easy"])]);
         seen.observe("claude", &live, NOW);
@@ -1500,11 +1644,9 @@ mod tests {
         );
         // A person's effort beside their model stands; the row only says it
         // is outside.
-        let mut person = shipped()["claude"].clone();
-        person[HIGH] = json!({"model": "model-a", "effort": "max"});
         let mut capped = m("model-a", "second", &["hard"]);
         capped.efforts = Some(&["low", "medium", "high"]);
-        let root = settings(json!({"claude": person}));
+        let root = settings(json!({"claude": {HIGH: {"model": "model-a", "effort": "max"}}}));
         let rows = read(&root, Some(&lineup(&[capped])), None);
         assert_eq!(row(&rows, HIGH).effort.as_deref(), Some("max"));
         assert!(row(&rows, HIGH).effort_clamped.is_some());
@@ -1592,8 +1734,8 @@ mod tests {
         );
         let high = row(&rows, HIGH);
         assert_eq!(
-            (high.model.as_str(), high.effort.as_deref()),
-            ("model-a", Some("low"))
+            (high.model.as_deref(), high.effort.as_deref()),
+            (Some("model-a"), Some("low"))
         );
         assert_eq!(high.from, Source::Lineup, "the model is still the lineup's");
         assert_eq!(high.effort_rule, EffortRule::Person);
@@ -1603,8 +1745,8 @@ mod tests {
         assert_eq!(high.auto_effort, None, "「자동」 is the CLI's own default");
         let low = row(&rows, LOW);
         assert_eq!(
-            (low.model.as_str(), low.effort.as_deref(), low.effort_rule),
-            ("model-a", None, EffortRule::CliDefault),
+            (low.model.as_deref(), low.effort.as_deref(), low.effort_rule),
+            (Some("model-a"), None, EffortRule::CliDefault),
             "no effort of ours beside the person's model"
         );
         assert_eq!(low.from, Source::Person);

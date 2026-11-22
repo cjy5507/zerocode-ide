@@ -2280,6 +2280,23 @@ mod tests {
     }
 
     #[test]
+    fn unread_lineup_keeps_the_effort_only_row_in_settings() {
+        let document = serde_json::json!({"smart": {"summonProfiles": {
+            "codex": {"high": {"effort": "high"}}
+        }}});
+        let rows = summon_rows(&document, &crate::summon_lineup::Snapshot::default(), 0);
+        let codex = rows.get("codex").expect("show the written row");
+        assert_eq!(codex.len(), 1);
+        let shown = serde_json::to_value(&codex[0]).unwrap();
+        assert!(shown["model"].is_null(), "{shown}");
+        assert_eq!(shown["writtenEffort"], "high");
+        assert_eq!(
+            shown["launch"],
+            serde_json::json!(["-c", "model_reasoning_effort=high"])
+        );
+    }
+
+    #[test]
     fn a_summon_row_is_written_one_at_a_time_and_cleared_back_to_the_lineup() {
         use zerocode_core::summon_difficulty::{LADDER, PROFILES_SETTING, Written};
         let home = tempfile::tempdir().unwrap();

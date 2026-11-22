@@ -38,10 +38,13 @@ first-attempt success, and lower mean tokens and wall time. The minimum sample
 is the core outcome policy's `MIN_EXECUTIONS`; these observational comparisons
 are not a randomized causal estimate. Missing landing facts are not failures.
 
-The editable `smart.summonProfiles` table supplies omitted model/effort choices;
-its shipped defaults are `crates/zerocode-core/src/summon-profiles.json`.
-Explicit flags win. While recording or without an actionable answer, an omitted
-model uses the table's middle difficulty. The settings UI edits the same table.
+The person's `smart.summonProfiles` rows and today's model lineup supply
+omitted model/effort choices. No table of model names ships: with no lineup read
+and no row written, no model goes on the command line and the agent's CLI runs
+its own default; a release a row names that the catalog has superseded runs as
+the live release of its line (t-125871). Explicit flags win. While recording or
+without an actionable answer, an omitted model uses the row for unjudged work
+(`UNJUDGED_DIFFICULTY`). The settings UI edits the same rows.
 
 Run `python3 tools/tests/test_summon_difficulty_replay_seed.py` for extraction
 contracts, and the Rust `summon_` tests for execution attribution and promotion.
