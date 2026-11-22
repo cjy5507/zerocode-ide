@@ -20860,9 +20860,11 @@ details[open] > .helper-cap::after {
 .composer-menu {
   position: fixed;
   inset: auto;
-  min-width: min(16rem, calc(100vw - var(--space-4)));
-  max-width: calc(100vw - var(--space-4));
-  box-sizing: border-box;
+  /* Never wider than the window less its edges, its padding and the 1px edge
+   * the rule above draws (t-125261: a long model list at 320px) — and 16rem
+   * of content wherever the window has room, as it always stood. */
+  min-width: min(16rem, calc(100vw - var(--space-4) - 2 * (var(--space-1) + 1px)));
+  max-width: calc(100vw - var(--space-4) - 2 * (var(--space-1) + 1px));
 }
 
 .composer-menu-search {

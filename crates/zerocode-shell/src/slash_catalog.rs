@@ -1822,6 +1822,42 @@ mod tests {
         assert_eq!(list["otherLogins"].as_array().unwrap().len(), 2);
     }
 
+    /// What the chip and 「새 대화」 are told of a model in zo's catalog —
+    /// Claude's, Codex's, zo's and Antigravity's rows, Grok's and Kimi's other
+    /// logins — is the three things it always was: its id, the name it shows
+    /// and its provider. A window zo's catalog names does not ride along (its
+    /// numbers are zo's own caps), and a family rides only a CLI's own list
+    /// (t-125261).
+    #[test]
+    fn a_zo_catalog_row_reaches_the_chip_as_it_always_did() {
+        let catalog = serde_json::json!({
+            "models": [
+                {"id": "example-model-a", "provider": "claude", "displayName": "Example Model A", "band": "top"},
+                {"id": "example-model-b", "provider": "openai", "displayName": "Example Model B", "band": "top", "contextWindow": 400_000},
+                {"id": "example-model-c", "provider": "google", "displayName": "Example Model C", "band": "rest"},
+            ],
+            "otherLogins": [
+                {"id": "example-model-x", "provider": "xai", "displayName": "Example Model X"},
+                {"id": "example-model-k", "provider": "kimi", "displayName": "Example Model K"},
+            ],
+        });
+        for agent in ["claude", "codex", "zo", "antigravity", "grok", "kimi"] {
+            let rows = serde_json::to_value(agent_models_from(agent, &catalog)).expect("rows");
+            let rows = rows.as_array().expect("a list");
+            assert!(!rows.is_empty(), "{agent} lost its models");
+            for row in rows {
+                let mut keys: Vec<&str> = row
+                    .as_object()
+                    .expect("a row")
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["display_name", "id", "provider"], "{agent}: {row}");
+            }
+        }
+    }
+
     /// An own list reaches the chip in its shape — the name it shows, else
     /// its id, and its family — and is offered only by a row a pick reaches:
     /// Devin (its launch flag and `/model`) and Kiro (its launch flag), not
