@@ -362,10 +362,13 @@ fn the_document_road_branches_on_no_agents_name() {
         }
     }
     let pane = block_after(&terminal, "fn pane_log(");
+    let document = block_after(&terminal, "pub(crate) fn whole_document_log<");
     assert!(
         pane.contains("crate::pane_transcript::written_whole(&state, term, &path)")
-            && pane.contains("document_log(&path, read, whole.unwrap_or(false))"),
-        "the pane's door no longer picks its road by the shape of the file it named:\n{pane}"
+            && pane.contains("whole_document_log(")
+            && document.contains("document_read_within(path, read, whole, LONG_LINE_CAP)")
+            && document.contains("return document_log(path, read, whole);"),
+        "the pane's door no longer picks its road by the shape of the file it named:\n{pane}\n{document}"
     );
 }
 

@@ -378,9 +378,9 @@ impl LiveTurnBuffer {
             });
             if let Some(place) = prompt {
                 from = place + 1;
-            } else if !turn
+            } else if turn
                 .stopped
-                .is_some_and(|at_stop| at_stop != Some(read.stamp))
+                .is_none_or(|at_stop| at_stop == Some(read.stamp))
             {
                 break;
             }

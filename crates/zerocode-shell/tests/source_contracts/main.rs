@@ -38462,13 +38462,19 @@ mod tests {
         // A file its CLI writes as one document is read whole, by step, down
         // the document road — chosen by the shape of the store row that keeps
         // it (t-124593); every other file goes down the line road as before.
+        // The document road is one reader beside the turns the pane's hooks
+        // told (`whole_document_log`, t-125261): a read on from where the last
+        // ended or the newest, and every read back from a place as before.
         let pane = block_after(shipped, "fn pane_log(");
+        let document = block_after(shipped, "fn whole_document_log<");
         assert!(
             !pane.contains("path: String")
                 && pane.contains("pane_transcript::pane_transcript(&state, term)")
                 && pane.contains("let read = LogRead::asked(after, before)?;")
                 && pane.contains("crate::pane_transcript::written_whole(&state, term, &path)")
-                && pane.contains("document_log(&path, read, whole.unwrap_or(false))")
+                && pane.contains("whole_document_log(")
+                && document.contains("document_read_within(path, read, whole, LONG_LINE_CAP)")
+                && document.contains("return document_log(path, read, whole);")
                 && pane.contains(
                     "transcript_log_source(&path, read, whole.unwrap_or(false), archive)"
                 ),
