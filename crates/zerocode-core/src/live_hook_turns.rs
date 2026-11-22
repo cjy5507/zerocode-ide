@@ -13,8 +13,8 @@
 //! `tool_use_id`, `PostToolUse.tool_response` `{success, output, error}`,
 //! `Stop.last_assistant_message`, and on every one the turn's `prompt_id`.
 //! They are folded into the transcript's own turn shape through its own tool
-//! readers ([`tool_call_turn`], [`tool_result_turn`]), so a call's kind and
-//! file are read where every transcript's are.
+//! readers (`transcript::tool_call_turn`, `transcript::tool_result_turn`), so
+//! a call's kind and file are read where every transcript's are.
 //!
 //! The document wins. Once it holds the turn the buffer lets the turn go
 //! ([`LiveTurnBuffer::reconcile_turns`]), and a hook of a turn let go — one

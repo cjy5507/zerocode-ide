@@ -16072,10 +16072,10 @@ async function pollHelperPages() {
         const wireChanged = wireMoved.state || wireMoved.live;
         const dataMoved = Boolean(more?.turns?.length) || replaced || skippedNow || wireChanged ||
           usageMoved || aboutMoved || firstAnswer || liveMoved;
-        if (document.hidden || activeHelperPage() !== tab) {
-          if (dataMoved) held.dirtyPaint = true;
-          return;
-        }
+        // What a read nobody looks at brought is held and drawn by the next read
+        // of a page on screen (`dirtyPaint`), whatever that read brings itself.
+        if (dataMoved && (document.hidden || activeHelperPage() !== tab)) held.dirtyPaint = true;
+        if (document.hidden || activeHelperPage() !== tab) return;
         // The page on screen is drawn — by this answer's paint below, or already:
         // what stands above its newest turns is read once that frame is up.
         fillAboveOnce(tab.worker);
