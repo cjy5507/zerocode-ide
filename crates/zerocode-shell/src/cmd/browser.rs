@@ -3840,6 +3840,10 @@ pub(crate) async fn automate_diagnose(
             .as_ref()
             .and_then(|record| record.nav.standing_for(now))
             .map(|stood| stood.as_secs()),
+        engine_failure: record
+            .as_ref()
+            .and_then(|record| record.nav.engine_failure())
+            .map(str::to_string),
         document_status: status_of(&document),
         document_type: text(&document, "type"),
         user_agent: record

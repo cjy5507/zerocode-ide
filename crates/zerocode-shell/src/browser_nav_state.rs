@@ -7,6 +7,12 @@
 //! `diagnose`, and the window's own spinner (`browser:nav{state:"dead"}`) —
 //! and the one rule that closes the gap: a Started with no Finished after
 //! [`NAV_DEAD_AFTER_SECS`] is `dead`. The word says whose verdict it is.
+//!
+//! CEF does report a failed navigation, and then commits its own error
+//! document, whose load ends with no Started before it. That Finished is not
+//! the page's: a refusal the engine named is kept here until a new document
+//! starts, so `tabs` and `diagnose` say it (t-125617). The window's tab is
+//! still told every call as it comes, `finished` too (t-125903).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -112,7 +118,8 @@ pub(super) enum NavState {
     /// Started, not yet Finished, and not yet past the clock.
     Loading,
     Finished,
-    /// Started, no Finished, and the clock ran out — the clock's verdict.
+    /// Started, no Finished, and the clock ran out — the clock's verdict; or
+    /// the engine said the navigation failed (CEF).
     Dead,
 }
 
@@ -133,12 +140,15 @@ impl NavState {
 /// the first one's clock.
 /// `request` is the one known navigation a handoff waits for. Started,
 /// Finished and failure carry no request number, so they never touch it.
+/// `engine_failure` is the error the engine named for a failure the record
+/// keeps until the next Started (only CEF names one).
 #[derive(Debug, Clone)]
 pub(super) struct NavRecord {
     state: NavState,
     started_at: Option<Instant>,
     request: Option<Request>,
     generation: u64,
+    engine_failure: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +179,7 @@ impl NavRecord {
                 started_at: None,
                 request: None,
                 generation: 0,
+                engine_failure: None,
             }
         } else {
             NavRecord {
@@ -179,6 +190,7 @@ impl NavRecord {
                     stage: Stage::Sent,
                 }),
                 generation: 1,
+                engine_failure: None,
             }
         }
     }
@@ -189,6 +201,7 @@ impl NavRecord {
         self.state = NavState::Loading;
         self.started_at = Some(now);
         self.generation += 1;
+        self.engine_failure = None;
         self.generation
     }
 
@@ -285,7 +298,12 @@ impl NavRecord {
     }
 
     /// The main document's Finished — on the blank page, that is `blank`.
+    /// With a failure the record keeps and no Started since it, this load is
+    /// the engine's own error document, and the record stays dead.
     pub(super) fn finished(&mut self, blank: bool) {
+        if self.engine_failure.is_some() {
+            return;
+        }
         self.state = if blank {
             NavState::Blank
         } else {
@@ -294,9 +312,20 @@ impl NavRecord {
         self.started_at = None;
     }
 
+    /// The engine said the main document's navigation failed. `kept`: the
+    /// error's name, when the failure stands until a new document starts;
+    /// `None` leaves the error document's Finished to end it, and drops a
+    /// name an earlier failure left: the name is always the last error's
+    /// (t-125903).
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    pub(super) fn failed(&mut self) {
+    pub(super) fn failed(&mut self, kept: Option<&'static str>) {
         self.state = NavState::Dead;
+        self.engine_failure = kept;
+    }
+
+    /// The error the engine named for the failure the record keeps.
+    pub(super) fn engine_failure(&self) -> Option<&'static str> {
+        self.engine_failure
     }
 
     /// The state as a reader sees it NOW: a load past the clock reads dead

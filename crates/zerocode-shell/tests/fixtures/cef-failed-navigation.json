@@ -1,0 +1,313 @@
+{
+  "about": [
+    "What real CEF 152.0.5 told the window's load handler for one main-frame navigation per case, what the window then tells the tab, and what `tabs` and `diagnose` read (t-125617).",
+    "Measured 2026-11-22 off screen, with the installed window's own engine files and a loopback server, by a probe hosted like fixtures/chromium-popup/probe. Navigations were DevTools Page.navigate, as the window sends them.",
+    "`engine` lists the load handler's calls in the order CEF made them: `start` (on_load_start), `end` (on_load_end, with its HTTP status) and `error` (on_load_error, with its code). A call is for the main frame and for the address the tab was sent to unless it says otherwise.",
+    "`from` is the record the case began on: `open` (a pane just opened at the address), `page` (a page that loaded) or the case just before it.",
+    "A case is a navigation the window sent to its address, which the window records before sending, unless `by` names a step that sends no address: `back` and `forward` (the window's buttons, browser.go_back · go_forward) or `reload` (browser.reload). `EARLIER` is the page the history step returns to, `NEWER` a later navigation inside the case. The load handler drops a main-frame error for an address other than the one the pane records (on_load_error's address check) (t-125843).",
+    "The back, forward, same-address and reload cases (t-125843) were measured the same way with the pane born as the window bears it: on about:blank, in a request context of its own, with the window's disabled features; twice in each of two runs, all four alike.",
+    "`before` is what 1.1.172 told the tab (browser:nav) for the same calls, and what the window still tells it, word for word (t-125903). `tabs` is the word `zerocode-browser tabs` says after, `failure` the error `diagnose` names: only the pane's record keeps a refusal.",
+    "Read by crates/zerocode-shell/src/main_unit_tests.rs (cef_failed_navigation_tests), which replays `engine` through chromium_browser::heard."
+  ],
+  "cases": [
+    {
+      "case": "open-refused",
+      "from": "open",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later, with no new request from the window" }
+      ],
+      "tabs": "dead",
+      "failure": "ERR_CONNECTION_REFUSED",
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "refused-again",
+      "from": "open-refused",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "dead",
+      "failure": "ERR_CONNECTION_REFUSED",
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "late-up",
+      "from": "refused-again",
+      "note": "measured on another port than the refusal: the same address coming up is same-address-up",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "ok",
+      "from": "page",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "404",
+      "from": "page",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 404 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "500",
+      "from": "page",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 500 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "500-empty",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_HTTP_RESPONSE_CODE_FAILURE" },
+        { "call": "end", "status": 500 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "empty",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_EMPTY_RESPONSE" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "reset",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_RESET" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "204",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_ABORTED" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": []
+    },
+    {
+      "case": "aborted",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_ABORTED", "note": "a slow page, left by a newer navigation" },
+        { "call": "start", "url": "NEWER" },
+        { "call": "end", "url": "NEWER", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "subframe",
+      "from": "page",
+      "engine": [
+        { "call": "start" },
+        { "call": "error", "main": false, "url": "SUBFRAME", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "main": false, "url": "SUBFRAME", "status": 0 },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "refused-then-ok",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 },
+        { "call": "start", "url": "NEWER" },
+        { "call": "end", "url": "NEWER", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["dead", "finished", "started", "finished"]
+    },
+    {
+      "case": "refused-then-blank",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 },
+        { "call": "start", "url": "about:blank" },
+        { "call": "end", "url": "about:blank", "status": 0 }
+      ],
+      "tabs": "blank",
+      "failure": null,
+      "before": ["dead", "finished", "started", "finished"]
+    },
+    {
+      "case": "page-then-refused",
+      "from": "page",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "dead",
+      "failure": "ERR_CONNECTION_REFUSED",
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "back-after-refused",
+      "from": "page-then-refused",
+      "by": "back",
+      "engine": [
+        { "call": "start", "url": "EARLIER" },
+        { "call": "end", "url": "EARLIER", "status": 0, "note": "from the back-forward cache: no request reached the page's server" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "forward-to-refused",
+      "from": "back-after-refused",
+      "by": "forward",
+      "note": "the refusal goes unreported, as in 1.1.172: the pane records EARLIER when the error comes, so the handler drops it",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["finished"]
+    },
+    {
+      "case": "back-again",
+      "from": "forward-to-refused",
+      "by": "back",
+      "engine": [
+        { "call": "start", "url": "EARLIER" },
+        { "call": "end", "url": "EARLIER", "status": 0 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "refused-then-empty",
+      "from": "open-refused",
+      "note": "the refused address, sent again (an agent's goto, the person's Enter), finds a server that takes the request and answers nothing yet; the engine sent it four times. The last error named decides: the refusal is not kept past it (t-125903)",
+      "engine": [
+        { "call": "error", "code": "ERR_EMPTY_RESPONSE" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "empty-then-up",
+      "from": "refused-then-empty",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "refused-then-reset",
+      "from": "open-refused",
+      "note": "the refused address, sent again, finds a server that takes the request and resets it; the engine sent it four times. The last error named decides (t-125903)",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_RESET" },
+        { "call": "end", "status": 0 },
+        { "call": "error", "code": "ERR_ABORTED", "note": "about 1 s later" }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "reset-then-up",
+      "from": "refused-then-reset",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "same-address-up",
+      "from": "open-refused",
+      "note": "the server came up at the refused address itself, and the address was sent again",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    },
+    {
+      "case": "reload-still-refused",
+      "from": "open-refused",
+      "by": "reload",
+      "engine": [
+        { "call": "error", "code": "ERR_CONNECTION_REFUSED" },
+        { "call": "end", "status": 0 }
+      ],
+      "tabs": "dead",
+      "failure": "ERR_CONNECTION_REFUSED",
+      "before": ["dead", "finished"]
+    },
+    {
+      "case": "reload-up",
+      "from": "reload-still-refused",
+      "by": "reload",
+      "engine": [
+        { "call": "start" },
+        { "call": "end", "status": 200 }
+      ],
+      "tabs": "finished",
+      "failure": null,
+      "before": ["started", "finished"]
+    }
+  ]
+}

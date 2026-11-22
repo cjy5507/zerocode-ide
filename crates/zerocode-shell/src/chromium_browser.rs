@@ -1698,6 +1698,56 @@ fn cef_owned_string(value: CefStringUserfree) -> String {
     CefString::from(&value).to_string()
 }
 
+/// The errors whose failure a pane's record keeps until a new document starts,
+/// with the name `diagnose` says for each (t-125617): nobody answered at the
+/// address. Real CEF 152 commits its own error document after each, and that
+/// document's load end comes with no load start before it (measured off screen:
+/// tests/fixtures/cef-failed-navigation.json). Any other error reads as it did:
+/// the error document's load end ends the failure. Either way the tab hears the
+/// load end as `finished`, as 1.1.172 told it (t-125903).
+pub(crate) const KEPT_FAILURES: [(Errorcode, &str); 1] =
+    [(Errorcode::CONNECTION_REFUSED, "ERR_CONNECTION_REFUSED")];
+
+fn kept_failure(code: Errorcode) -> Option<&'static str> {
+    KEPT_FAILURES
+        .iter()
+        .find(|(kept, _)| *kept == code)
+        .map(|(_, name)| *name)
+}
+
+/// One main-frame call of CEF's load handler that reaches a pane's record. An
+/// aborted load and a sub-frame's call never do (`on_load_error`'s first line).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LoadCall {
+    Start,
+    End { blank: bool },
+    Failed(Errorcode),
+}
+
+/// The record's reading of one call: the word the pane's tab is told, and the
+/// generation a Start arms the dead clock with. The word is the call's own
+/// whatever the record keeps — the engine's error document after a refusal is
+/// `finished` to the tab, as 1.1.172 told it, while `tabs` and `diagnose` read
+/// the refusal (t-125903). The handler's one reading of CEF's order, so the
+/// order measured on real CEF replays against it.
+pub(crate) fn heard(
+    nav: &mut crate::NavRecord,
+    call: LoadCall,
+    now: std::time::Instant,
+) -> (&'static str, Option<u64>) {
+    match call {
+        LoadCall::Start => ("started", Some(nav.started(now))),
+        LoadCall::End { blank } => {
+            nav.finished(blank);
+            ("finished", None)
+        }
+        LoadCall::Failed(code) => {
+            nav.failed(kept_failure(code));
+            ("dead", None)
+        }
+    }
+}
+
 #[derive(Clone)]
 struct HandlerState {
     /// The tab that opened this pane, when CEF built it as a popup.
@@ -1764,16 +1814,18 @@ impl HandlerState {
         app_state
             .browser_urls()
             .insert(self.label.clone(), url.clone());
-        let generation = app_state
+        let call = if state == "started" {
+            LoadCall::Start
+        } else {
+            LoadCall::End {
+                blank: url == "about:blank",
+            }
+        };
+        let (state, generation) = app_state
             .browser_records()
             .get_mut(&self.label)
-            .and_then(|record| {
-                if state == "started" {
-                    Some(record.nav.started(std::time::Instant::now()))
-                } else {
-                    record.nav.finished(url == "about:blank");
-                    None
-                }
+            .map_or((state, None), |record| {
+                heard(&mut record.nav, call, std::time::Instant::now())
             });
         if let Some(generation) = generation {
             crate::cmd::browser::arm_dead_display(&self.app, &self.label, generation);
@@ -1950,7 +2002,7 @@ wrap_load_handler! {
                 return;
             }
             if let Some(record) = state.browser_records().get_mut(&self.inner.label) {
-                record.nav.failed();
+                heard(&mut record.nav, LoadCall::Failed(error_code), std::time::Instant::now());
             }
             let _ = self.inner.app.emit_to("main", "browser:nav", BrowserNav {
                 label: self.inner.label.clone(), url, state: "dead",
