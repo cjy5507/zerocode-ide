@@ -1347,10 +1347,37 @@ pub(super) fn bash_result_exited_nonzero(output: &str) -> bool {
 
 fn bash_result_completed(value: &serde_json::Value) -> bool {
     value.get("stdout").is_some_and(serde_json::Value::is_string)
+        && !crate::bash::has_held_background_output(value)
         && value.get("interrupted").and_then(serde_json::Value::as_bool) != Some(true)
         && value
             .get("backgroundTaskId")
             .is_none_or(serde_json::Value::is_null)
+}
+
+/// A shell can return zero for an asynchronous list as soon as it starts.
+/// Quoted ampersands, AND lists and redirections do not start a job.
+fn shell_has_background_list(command: &str) -> bool {
+    let mut bytes = command.bytes().enumerate().peekable();
+    let mut quote = None;
+    while let Some((index, byte)) = bytes.next() {
+        match (quote, byte) {
+            (None | Some(b'"'), b'\\') => { bytes.next(); }
+            (Some(delimiter), current) if delimiter == current => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'&') => match bytes.peek() {
+                Some((_, b'&')) => { bytes.next(); }
+                Some((_, b'>')) => {}
+                _ if index > 0 && matches!(command.as_bytes()[index - 1], b'>' | b'<') => {}
+                _ => return true,
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+pub(super) fn bash_command_is_foreground_check(command: &str) -> bool {
+    command_is_check_shaped(command) && !shell_has_background_list(command)
 }
 
 /// Check-shaped bash commands this attempt's EXEC leg ran to completion with
@@ -1540,7 +1567,7 @@ fn exec_green_checks(summary: &TurnSummary) -> Vec<String> {
             else {
                 continue;
             };
-            if !command_is_check_shaped(&command) {
+            if !bash_command_is_foreground_check(&command) {
                 continue;
             }
             let mut command = command;

@@ -214,6 +214,18 @@ pub struct TaskRegistry {
     /// completion only ([`TaskReach::Completion`]); clear — the default — while
     /// the task tools reach it.
     completion_only: Arc<AtomicBool>,
+    // The Bash drainer holds only receivers; it never keeps a session alive.
+    held_output_scope: tokio::sync::watch::Sender<bool>,
+}
+
+/// Closes held Bash pipes at session exit even when an explicit background
+/// task still owns a registry clone.
+pub struct HeldBashOutputGuard(tokio::sync::watch::Sender<bool>);
+
+impl Drop for HeldBashOutputGuard {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
 }
 
 /// How the model of the session a registry serves reaches a background task.
@@ -392,7 +404,18 @@ impl TaskRegistry {
             completion_callback: Arc::new(Mutex::new(None)),
             live_background_processes: Arc::default(),
             completion_only: Arc::default(),
+            held_output_scope: tokio::sync::watch::Sender::default(),
         }
+    }
+
+    pub(crate) fn held_output_scope(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.held_output_scope.subscribe()
+    }
+
+    /// Give the session host an owner for Bash's kept output pipes.
+    #[must_use]
+    pub fn held_bash_output_guard(&self) -> HeldBashOutputGuard {
+        HeldBashOutputGuard(self.held_output_scope.clone())
     }
 
     /// Say how the session's model reaches its background tasks. Set once,

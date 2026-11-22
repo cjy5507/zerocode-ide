@@ -111,6 +111,7 @@ fn blocked_output(violation: &WorkspaceScopeViolation) -> BashCommandOutput {
         interrupted: false,
         is_image: None,
         background_task_id: None,
+        background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
         dangerously_disable_sandbox: None,

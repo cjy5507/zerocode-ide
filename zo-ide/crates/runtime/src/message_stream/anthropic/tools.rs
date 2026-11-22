@@ -697,7 +697,7 @@ pub fn format_bash_result(value: &Value) -> BashResult {
         .and_then(Value::as_i64)
         .or_else(|| interpreted_exit_code(value))
         .unwrap_or(0) as i32;
-    let (stdout, stdout_truncated) = truncate(
+    let (mut stdout, stdout_truncated) = truncate(
         value
             .get("stdout")
             .and_then(Value::as_str)
@@ -705,11 +705,21 @@ pub fn format_bash_result(value: &Value) -> BashResult {
         TOOL_OUTPUT_DISPLAY_MAX_LINES,
         TOOL_OUTPUT_DISPLAY_MAX_CHARS,
     );
+    let stderr = value.get("stderr").and_then(Value::as_str).unwrap_or_default();
+    let stderr = if crate::bash::has_held_background_output(value) {
+        // Lead the preview with the notice, independently of either stream's
+        // size. Keep the original note in the model's result.
+        const NOTICE: &str = "Background process keeps running. Later output is not shown.";
+        if !stdout.is_empty() {
+            stdout.insert(0, '\n');
+        }
+        stdout.insert_str(0, NOTICE);
+        stderr.strip_suffix(crate::bash::KEPT_HELD_NOTE).unwrap_or(stderr)
+    } else {
+        stderr
+    };
     let (stderr, stderr_truncated) = truncate(
-        value
-            .get("stderr")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
+        stderr,
         TOOL_OUTPUT_DISPLAY_MAX_LINES,
         TOOL_OUTPUT_DISPLAY_MAX_CHARS,
     );
@@ -1364,6 +1374,22 @@ mod tests {
         assert_eq!(code(json!({ "stdout": "", "stderr": "", "interrupted": true, "returnCodeInterpretation": "timeout" })), 124);
         assert_eq!(code(json!({ "stdout": "", "stderr": "", "returnCodeInterpretation": "preflight_blocked:workspace_scope" })), 1);
         assert_eq!(code(json!({ "stdout": "", "stderr": "", "exit_code": 3, "returnCodeInterpretation": "exit_code:7" })), 3, "a named code stands");
+    }
+
+    #[test]
+    fn friction_kept_background_notice_survives_stderr_truncation() {
+        let stderr = format!("{}{}", "error from command\n".repeat(500), crate::bash::KEPT_HELD_NOTE);
+        for flag in [None, Some(true)] {
+            let shown = format_bash_result(&json!({
+                "stdout": "out from command\n".repeat(500),
+                "stderr": stderr,
+                "backgroundOutputHeld": flag,
+            }));
+            assert!(shown.truncated);
+            assert!(shown.stdout.starts_with("Background process keeps running."));
+            assert!(shown.stdout.contains("out from command"));
+            assert!(shown.stderr.contains("error from command"));
+        }
     }
 
     #[test]

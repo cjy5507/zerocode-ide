@@ -88,7 +88,7 @@ pub fn judge_in(shell: Shell, command: &str) -> Option<KillVerdict> {
         &shell.kill_calls(command),
         std::process::id(),
         |name| std::env::var(name).ok(),
-        || ProcessTable::read(TABLE_READ_TIME),
+        || ProcessTable::read_or_proc(TABLE_READ_TIME),
     )
 }
 

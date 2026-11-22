@@ -25,6 +25,7 @@ use super::script::{Command, Word};
 use crate::hook::PANE_KEY_ENV;
 
 mod environ;
+mod proc_table;
 
 /// The most of a call or a process's name a reason quotes: two 80-column
 /// lines, so the agent's screen shows the reason without the command
@@ -220,6 +221,32 @@ impl ProcessTable {
         }
     }
 
+    /// [`Self::read`], and where `ps` gives no table — a container that ships
+    /// no `ps` — the one `/proc` gives (t-125701), so a kill of a process the
+    /// session started is judged instead of asked of a person nobody is. The
+    /// rows are the ones `ps` lists; a host without `/proc` (every one but
+    /// Linux) keeps `ps`'s answer.
+    #[must_use]
+    pub fn read_or_proc(within: Duration) -> Self {
+        let started = std::time::Instant::now();
+        Self::read(within).or_else_read(|| {
+            match proc_table::read(within.saturating_sub(started.elapsed())) {
+                Ok(rows) => Self::new(rows).on_this_host(),
+                Err(why) => Self::unreadable(why),
+            }
+        })
+    }
+
+    /// This table, or — when it did not read — `other`'s, if that one reads;
+    /// a second table that does not read either leaves the first reason.
+    fn or_else_read(self, other: impl FnOnce() -> Self) -> Self {
+        if self.rows.is_ok() {
+            return self;
+        }
+        let other = other();
+        if other.rows.is_ok() { other } else { self }
+    }
+
     /// The table, its rows this host's processes read now.
     fn on_this_host(mut self) -> Self {
         self.on_this_host = true;
@@ -286,17 +313,19 @@ impl ProcessTable {
     }
 }
 
+#[cfg(unix)]
+/// The most a listing may print before it is called unreadable: about
+/// 120 times this machine's, measured 10-28 at 140,746 bytes for 793
+/// processes — room for a machine with ten times the processes and
+/// command lines ten times as long, never a host's whole memory.
+const LISTING_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 /// `ps`'s listing and its own pid.
 #[cfg(unix)]
 fn listing(within: Duration) -> Result<(String, u32), String> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
 
-    /// The most a listing may print before it is called unreadable: about
-    /// 120 times this machine's, measured 10-28 at 140,746 bytes for 793
-    /// processes — room for a machine with ten times the processes and
-    /// command lines ten times as long, never a host's whole memory.
-    const LISTING_MAX_BYTES: u64 = 16 * 1024 * 1024;
     /// How often a running listing is asked whether it has finished: a
     /// quarter of the 20 ms the listing took here (five runs, 10-28), so the
     /// wait past its end is at most 5 ms of the 800 ms wall.
@@ -319,7 +348,7 @@ fn listing(within: Duration) -> Result<(String, u32), String> {
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout
-            .take(LISTING_MAX_BYTES)
+            .take(LISTING_MAX_BYTES + 1)
             .read_to_end(&mut bytes)
             .map(|_| bytes)
     });
@@ -345,6 +374,9 @@ fn listing(within: Duration) -> Result<(String, u32), String> {
         .map_err(|error| format!("ps's output did not read: {error}"))?;
     if !status.success() {
         return Err(format!("ps ended with {status}"));
+    }
+    if bytes.len() as u64 > LISTING_MAX_BYTES {
+        return Err(format!("ps exceeded {LISTING_MAX_BYTES} bytes"));
     }
     Ok((String::from_utf8_lossy(&bytes).into_owned(), sampler))
 }

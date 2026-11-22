@@ -830,3 +830,32 @@ fn the_way_out_says_what_the_judgment_lets_the_caller_end() {
         }
     }
 }
+
+/// A table that read stands; one that did not gives way to a second reading
+/// that does — `ps` missing, `/proc` there (t-125701) — and a second that does
+/// not read either leaves the first reason, so a refusal still says why.
+#[test]
+fn a_table_that_did_not_read_gives_way_only_to_one_that_does() {
+    let row = |pid| ProcessRow {
+        pid,
+        ppid: 1,
+        pgid: pid,
+        command: "sleep 300".to_string(),
+    };
+    let read = ProcessTable::new(vec![row(10)]);
+    assert_eq!(
+        read.clone()
+            .or_else_read(|| ProcessTable::new(vec![row(20)])),
+        read
+    );
+    let proc_table = ProcessTable::new(vec![row(30)]);
+    assert_eq!(
+        ProcessTable::unreadable("ps did not start").or_else_read(|| proc_table.clone()),
+        proc_table
+    );
+    assert_eq!(
+        ProcessTable::unreadable("ps did not start")
+            .or_else_read(|| ProcessTable::unreadable("this host has no /proc")),
+        ProcessTable::unreadable("ps did not start")
+    );
+}

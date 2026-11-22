@@ -70,7 +70,7 @@
 //! ages even though the ledger behind it no longer does.
 
 use super::deep_gate::{
-    bash_result_exited_zero, command_is_check_shaped, tool_result_path, truncate_on_boundary,
+    bash_command_is_foreground_check, bash_result_exited_zero, tool_result_path, truncate_on_boundary,
     EXEC_CHECK_COMMAND_BYTES,
 };
 use super::{
@@ -93,7 +93,15 @@ pub(super) fn tool_verified_state_events(
     result_message: &ConversationMessage,
     tool_input: &str,
 ) -> Vec<VerifiedStateEvent> {
-    let mut events: Vec<VerifiedStateEvent> = Vec::new();
+    tool_verified_state_facts(result_message, tool_input).0
+}
+
+fn tool_verified_state_facts(
+    result_message: &ConversationMessage,
+    tool_input: &str,
+) -> (Vec<VerifiedStateEvent>, Option<String>) {
+    let mut events = Vec::new();
+    let mut green_bash = None;
     for block in &result_message.blocks {
         let ContentBlock::ToolResult {
             tool_name,
@@ -116,11 +124,17 @@ pub(super) fn tool_verified_state_events(
         if tool_name != "bash" || !bash_result_exited_zero(output) {
             continue;
         }
-        if let Some(command) = green_check_command(tool_input) {
-            events.push(VerifiedStateEvent::GreenCheck(command));
+        let Some(command) = bash_command(tool_input) else {
+            continue;
+        };
+        if bash_command_is_foreground_check(&command) {
+            let mut check = command.clone();
+            truncate_on_boundary(&mut check, EXEC_CHECK_COMMAND_BYTES);
+            events.push(VerifiedStateEvent::GreenCheck(check));
         }
+        green_bash = Some(command);
     }
-    events
+    (events, green_bash)
 }
 
 /// Whether one turn's messages, in order, earn the harness's receipt (r43):
@@ -163,20 +177,13 @@ pub(crate) fn receipt_in(turn: &[ConversationMessage]) -> bool {
     edited && green_since_edit
 }
 
-/// The check-shaped command inside a bash tool input, capped for storage.
-/// `None` for anything that is not a check (`ls -la` is green every time and
-/// proves nothing) or whose input did not parse.
-fn green_check_command(input: &str) -> Option<String> {
-    let mut command = serde_json::from_str::<serde_json::Value>(input)
+/// The `command` of a bash tool input, or `None` when the input does not parse.
+fn bash_command(input: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(input)
         .ok()?
         .get("command")
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)?;
-    if !command_is_check_shaped(&command) {
-        return None;
-    }
-    truncate_on_boundary(&mut command, EXEC_CHECK_COMMAND_BYTES);
-    Some(command)
+        .map(str::to_string)
 }
 
 /// Session checks reported to ONE VERIFY leg (newest kept). Mirrors
@@ -208,11 +215,17 @@ where
         result_message: &ConversationMessage,
         tool_input: &str,
     ) {
-        for event in tool_verified_state_events(result_message, tool_input) {
+        let (events, green_bash) = tool_verified_state_facts(result_message, tool_input);
+        for event in events {
             self.verified_state.record_event(&event);
             if let VerifiedStateEvent::GreenCheck(command) = &event {
                 self.dream_verified_gates(command);
             }
+        }
+        if let Some(command) = green_bash {
+            // Where bash ran it: the agent's own folder, else this process's.
+            let cwd = self.workspace_cwd.clone().or_else(|| std::env::current_dir().ok());
+            self.verified_state.note_named_run(&command, cwd.as_deref());
         }
     }
 
@@ -414,6 +427,73 @@ mod tests {
     /// not interrupted, not backgrounded.
     fn settle_green_bash(runtime: &mut TestRuntime, id: &str, command: &str) {
         settle_bash(runtime, id, command, r#"{"stdout":"ok"}"#);
+    }
+
+    #[test]
+    fn friction_named_evidence_requires_the_edited_file_and_its_own_success() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let cwd = directory.path();
+        std::fs::create_dir(cwd.join("sub")).unwrap();
+        let edited = cwd.join("x.py");
+        std::fs::write(&edited, "print(1)").unwrap();
+        std::fs::write(cwd.join("sub/x.py"), "print(2)").unwrap();
+
+        let mut false_evidence = Vec::new();
+        for command in [
+            "python3 x.py > x.py",
+            "/usr/bin/sed -i s/a/b/ x.py",
+            "cat x.py | tee x.py",
+            "python3 x.py | true",
+            "python3 x.py; true",
+            "cd sub && cat x.py",
+            "printf x.py",
+            "python3 - <<'PY'\nopen('x.py', 'w').write('')\nPY",
+            "python3 - <<'PY'\nif False:\n    print(open('x.py').read())\nPY",
+        ] {
+            let mut runtime = static_runtime();
+            runtime.workspace_cwd = Some(cwd.to_path_buf());
+            let path = edited.to_str().unwrap();
+            settle_edit(&mut runtime, "edit", path, false);
+            settle_green_bash(&mut runtime, "read", command);
+            if runtime.verified_state.unverified_edits_this_turn() != vec![path] {
+                false_evidence.push(command);
+            }
+        }
+        assert!(false_evidence.is_empty(), "false evidence: {false_evidence:?}");
+
+        let mut runtime = static_runtime();
+        runtime.workspace_cwd = Some(cwd.to_path_buf());
+        settle_edit(&mut runtime, "edit", edited.to_str().unwrap(), false);
+        settle_bash(&mut runtime, "failed", "python3 ./x.py",
+            r#"{"stdout":"","returnCodeInterpretation":"exit_code:1"}"#);
+        assert_eq!(runtime.verified_state.unverified_edits_this_turn(), vec![edited.to_str().unwrap()]);
+        settle_green_bash(&mut runtime, "read", "python3 - <<'PY'\nimport re\npattern = open('sub/../x.py').read().strip()\nprint(pattern)\nPY");
+        assert!(runtime.verified_state.unverified_edits_this_turn().is_empty());
+    }
+
+    #[test]
+    fn friction_a_running_background_check_does_not_verify_an_edit() {
+        let mut runtime = static_runtime();
+        settle_edit(&mut runtime, "edit", "/repo/check.py", false);
+        settle_bash(
+            &mut runtime,
+            "check",
+            "python3 /repo/check.py",
+            r#"{"stdout":"","backgroundOutputHeld":true}"#,
+        );
+        assert_eq!(runtime.verified_state.unverified_edits_this_turn(), vec!["/repo/check.py"]);
+        settle_bash(
+            &mut runtime,
+            "test",
+            "cargo test &",
+            r#"{"stdout":"","backgroundOutputHeld":true}"#,
+        );
+        settle_green_bash(&mut runtime, "redirected", "cargo test >/dev/null 2>&1 &");
+        assert!(runtime.verified_state.receipt_checks_this_turn().is_empty());
+        assert!(runtime.verified_state.green_check_commands().is_empty());
+
+        settle_green_bash(&mut runtime, "completed", "cargo test 2>&1");
+        assert_eq!(runtime.verified_state.receipt_checks_this_turn(), vec!["cargo test 2>&1"]);
     }
 
     fn settle_edit(runtime: &mut TestRuntime, id: &str, path: &str, is_error: bool) {

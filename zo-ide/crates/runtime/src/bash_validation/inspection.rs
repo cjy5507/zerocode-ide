@@ -41,7 +41,7 @@ const GIT_READ_OPTIONS: &[&str] = &[
 ];
 const GIT_READ_SHORT_OPTIONS: &[&str] = &["-s", "-b", "-sb", "-bs", "-z", "-p", "-u", "-n", "-w", "-M", "-C", "-R", "-r", "-m", "-c"];
 
-fn git_read_options(args: &[String]) -> bool {
+pub(crate) fn git_read_options(args: &[String]) -> bool {
     let mut paths = false;
     args.iter().all(|arg| {
         if arg == "--" { paths = true; }

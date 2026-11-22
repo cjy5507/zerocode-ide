@@ -145,6 +145,12 @@ pub struct VerifiedStateLedger {
     /// that dies mid-turn simply never closes that turn — the facts it recorded
     /// are already on disk, which is the half that matters.
     dirty_since_boundary: bool,
+    /// Edits of the open turn a later run that exited 0 named, with the
+    /// ledger's sequence when it ran ([`Self::note_named_run`]). Only the
+    /// turn-end gate reads it, and it is NOT persisted: the
+    /// gate asks about the turn in flight, and the sidecar, the observation
+    /// and the receipt stay what they were.
+    named_runs: Vec<EditRecord>,
 }
 
 impl VerifiedStateLedger {
@@ -248,6 +254,7 @@ impl VerifiedStateLedger {
     /// path for events the seam already recorded, and the same check would land
     /// twice.
     pub fn note_turn_boundary(&mut self) {
+        self.named_runs.clear();
         if !self.dirty_since_boundary {
             return;
         }
@@ -382,7 +389,8 @@ impl VerifiedStateLedger {
 
     /// Paths edited in the open turn that no green check has followed — the
     /// receipt's "unverified" half. Empty when nothing was edited this turn or
-    /// a check ran green after the last edit.
+    /// a check ran green after the last edit. An edit a later green run named
+    /// ([`Self::note_named_run`]) is not among them.
     #[must_use]
     pub fn unverified_edits_this_turn(&self) -> Vec<&str> {
         let newest_check = self.state.checks.last().map_or(0, |check| check.seq);
@@ -391,8 +399,36 @@ impl VerifiedStateLedger {
             .edits
             .iter()
             .filter(|edit| edit.turn == open_turn && edit.seq > newest_check)
+            .filter(|edit| {
+                !self
+                    .named_runs
+                    .iter()
+                    .any(|named| named.path == edit.path && named.seq >= edit.seq)
+            })
             .map(|edit| edit.path.as_str())
             .collect()
+    }
+
+    /// Record the files a completed, successful Bash command reads or runs.
+    /// This is turn-end evidence only. The receipt and saved checks still
+    /// use the check classifier.
+    pub fn note_named_run(&mut self, command: &str, cwd: Option<&Path>) {
+        let open_turn = self.open_turn();
+        if !self.state.edits.iter().any(|edit| edit.turn == open_turn) {
+            return;
+        }
+        let paths: Vec<_> = named_paths(command).iter()
+            .filter_map(|path| absolute_path(path, cwd))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let seq = self.state.seq;
+        let named = self.state.edits.iter()
+            .filter(|edit| edit.turn == open_turn)
+            .filter(|edit| absolute_path(&edit.path, cwd).is_some_and(|path| paths.contains(&path)))
+            .map(|edit| EditRecord { path: edit.path.clone(), seq, turn: open_turn });
+        self.named_runs.extend(named);
     }
 
     /// Checks that ran green in the open turn AFTER its last edit — the
@@ -439,6 +475,108 @@ impl VerifiedStateLedger {
     pub fn is_empty(&self) -> bool {
         self.state.checks.is_empty() && self.state.edits.is_empty()
     }
+}
+
+fn absolute_path(word: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let path = Path::new(word);
+    let path = if path.is_relative() { cwd?.join(path) } else { path.to_path_buf() };
+    fs::canonicalize(&path).or_else(|_| std::path::absolute(path)).ok()
+}
+
+/// Identify operands of one command whose own exit the executor observed.
+/// A pipeline or shell list can return zero without its reader succeeding.
+/// Recognize a literal Python heredoc as one invocation, not a shell list.
+fn named_paths(command: &str) -> Vec<String> {
+    use crate::bash_validation::inspection::{git_read_options, literal_argv};
+
+    let command = command.trim();
+    if let Some((header, body)) = command.split_once('\n') {
+        return python_heredoc_read(header, body).into_iter().map(str::to_owned).collect();
+    }
+    if command.contains(['*', '?', '[', ']', '~']) {
+        return Vec::new();
+    }
+    let Some(words) = literal_argv(command) else {
+        return Vec::new();
+    };
+    let Some((program, args)) = words.split_first() else {
+        return Vec::new();
+    };
+    let executable = Path::new(program);
+    if executable.is_relative() && executable.components().count() > 1 {
+        return vec![program.clone()];
+    }
+    let name = executable.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or_default();
+    let operands = |args: &[String]| match args {
+        [separator, rest @ ..] if separator == "--" => rest.to_vec(),
+        _ if args.iter().all(|arg| !arg.starts_with('-')) => args.to_vec(),
+        _ => Vec::new(),
+    };
+    let paths = match (name, args) {
+        ("head" | "tail", [flag, count, rest @ ..])
+            if flag == "-n" && count.parse::<u64>().is_ok() => operands(rest),
+        ("cat" | "wc" | "cmp" | "diff" | "head" | "tail", _) => operands(args),
+        ("git", [verb, diff @ ..]) if verb == "diff" && git_read_options(diff) => diff
+            .iter()
+            .position(|arg| arg == "--")
+            .map_or_else(Vec::new, |at| diff[at + 1..].to_vec()),
+        (program, [script, ..]) if (is_python(program)
+            || matches!(program, "bash" | "sh" | "node" | "perl" | "ruby"))
+            && !script.starts_with('-') => vec![script.clone()],
+        _ => Vec::new(),
+    };
+    if executable.is_absolute() {
+        paths.into_iter().chain(std::iter::once(program.clone())).collect()
+    } else {
+        paths
+    }
+}
+
+fn is_python(program: &str) -> bool {
+    matches!(program, "python" | "python3")
+        || program.strip_prefix("python3.").is_some_and(|minor| minor.parse::<u32>().is_ok())
+}
+
+/// The first action in a literal interpreter script can read a file before
+/// the script checks it. Require an immediate read with a literal path and
+/// a read mode. Indented, conditional, computed and write-mode opens provide
+/// no evidence from the shell exit alone.
+fn python_heredoc_read<'a>(header: &str, body: &'a str) -> Option<&'a str> {
+    use crate::bash_validation::inspection::literal_argv;
+    use std::sync::OnceLock;
+
+    static READ: OnceLock<regex::Regex> = OnceLock::new();
+
+    let (invocation, delimiter) = header.split_once("<<")?;
+    let args = literal_argv(invocation)?;
+    let [program, stdin] = args.as_slice() else { return None; };
+    let name = Path::new(program).file_name()?.to_str()?;
+    if !is_python(name) || stdin != "-" {
+        return None;
+    }
+    let delimiter = delimiter.trim();
+    let delimiter = delimiter.strip_prefix('\'')?.strip_suffix('\'')?;
+    if delimiter.is_empty() || !delimiter.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    let (script, closing) = body.rsplit_once('\n')?;
+    if closing != delimiter || script.lines().any(|line| line == delimiter) {
+        return None;
+    }
+    let first_action = script.lines().find(|line| {
+        !line.trim().is_empty() && !line.trim_start().starts_with('#')
+            && !line.starts_with("import ") && !line.starts_with("from ")
+    })?;
+
+    let read = READ.get_or_init(|| regex::Regex::new(
+        r#"^(?:[a-zA-Z_]\w*\s*=\s*|print\()?open\(\s*(?:"([^"\\]+)"|'([^'\\]+)')(?:\s*,\s*['"]r[bt]?['"])?\s*\)\.read\("#,
+    ).expect("literal Python read pattern"));
+    let captures = read.captures(first_action)?;
+    let path = captures.get(1).or_else(|| captures.get(2))?.as_str();
+    // An import can precede the read, but cannot hide another statement on the
+    // same line. Reject those instead of inferring which cwd or open ran.
+    (!script.lines().take_while(|line| *line != first_action).any(|line| line.contains(';')))
+        .then_some(path)
 }
 
 /// One display line for a possibly multi-line command (heredoc check scripts are
@@ -525,6 +663,53 @@ mod tests {
         assert!(ledger.unverified_edits_this_turn().is_empty(), "a closed turn is not this turn");
         ledger.record_event(&VerifiedStateEvent::GreenCheck("just gate".into()));
         assert!(ledger.receipt_checks_this_turn().is_empty(), "a check with no edit this turn receipts nothing");
+    }
+
+    /// A green run that names an edit is evidence about it for the gate
+    /// (t-125701): the heredoc that prints its verdict (`regex-log`) and the
+    /// `git diff` against the restored commit (`fix-git`), whole or relative
+    /// to the folder bash ran in. Only that edit leaves the unverified half, an
+    /// edit after the run is unverified again, and the receipt, the check list
+    /// and the sidecar do not hear of it.
+    #[test]
+    fn a_green_run_naming_an_edit_takes_only_that_edit_off_the_unverified_half() {
+        let site = PathBuf::from("/app/personal-site");
+        let dir = temp_dir("named-runs");
+        let sidecar = dir.join("s.verified-state.json");
+        let mut ledger = VerifiedStateLedger::new();
+        ledger.rebind_sidecar(Some(sidecar.clone()));
+        ledger.record_event(&edit("/app/regex.txt"));
+        ledger.record_event(&edit("/app/personal-site/_includes/about.md"));
+        ledger.record_event(&edit("/app/notes.txt"));
+
+        ledger.note_named_run(
+            "python3 - <<'PY'\nimport re\npattern = open('/app/regex.txt').read().strip()\nprint('ALL OK')\nPY",
+            Some(&site),
+        );
+        ledger.note_named_run("git add _includes/about.md && git commit -qm restore", Some(&site));
+        assert!(
+            ledger.unverified_edits_this_turn().contains(&"/app/personal-site/_includes/about.md"),
+            "staging the file says nothing of whether it works"
+        );
+        ledger.note_named_run("git diff c499730 HEAD -- _includes/about.md", Some(&site));
+        ledger.note_named_run("cat /app/old_notes.txt; ls /other/app/notes.txt", Some(&site));
+        assert_eq!(ledger.unverified_edits_this_turn(), vec!["/app/notes.txt"], "a longer name is another file");
+        assert!(ledger.receipt_checks_this_turn().is_empty(), "a named run is not a check");
+        assert!(ledger.green_check_commands().is_empty(), "nor is it in the check list");
+
+        ledger.record_event(&edit("/app/regex.txt"));
+        assert_eq!(
+            ledger.unverified_edits_this_turn(),
+            vec!["/app/notes.txt", "/app/regex.txt"],
+            "an edit after the run is unverified again"
+        );
+
+        ledger.note_turn_boundary();
+        let written = std::fs::read_to_string(&sidecar).expect("the sidecar is written");
+        assert!(written.contains("/app/regex.txt"), "the edits are on disk: {written}");
+        assert!(!written.contains("named"), "named runs stay in memory: {written}");
+        assert!(ledger.unverified_edits_this_turn().is_empty(), "a closed turn is not this turn");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash",
-            description: "Run a shell command in the workspace. Prefer file tools; batch independent calls. Use run_in_background for long commands, waits and servers; a `&` process holding the output is stopped. If denied, change approach.",
+            description: "Run a shell command in the workspace. Prefer file tools; batch independent calls. Use run_in_background for long commands, waits and servers. If denied, change approach.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -803,6 +803,7 @@ fn backgrounded_command_output(
         interrupted: false,
         is_image: None,
         background_task_id: Some(task_id),
+        background_output_held: None,
         backgrounded_by_user: Some(true),
         assistant_auto_backgrounded: Some(false),
         dangerously_disable_sandbox: None,
@@ -826,6 +827,7 @@ fn completed_command_output(output: &Output, sandbox_status: SandboxStatus) -> B
         interrupted: false,
         is_image: None,
         background_task_id: None,
+        background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
         dangerously_disable_sandbox: None,
@@ -856,6 +858,7 @@ fn timed_out_command_output(
         interrupted: true,
         is_image: None,
         background_task_id: None,
+        background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
         dangerously_disable_sandbox: None,
@@ -992,20 +995,15 @@ mod tests {
         std::thread::current().name().unwrap_or("test").replace("::", "-")
     }
 
-    /// The shell's description tells a model, before its first try, what the
-    /// run does with a server started with `&`: a process that still holds
-    /// the command's output is stopped, so servers start with
-    /// `run_in_background`. Without it the model learned that only from the
-    /// end of a cut run (t-120813).
+    /// The shell's description steers servers, waits and long commands to
+    /// `run_in_background`, and says nothing of stopping a `&` process: a run
+    /// keeps one that still holds its output after the shell exits (t-125701),
+    /// so words about stopping it would be false.
     #[test]
-    fn the_shell_says_a_background_process_holding_its_output_is_stopped_and_servers_run_in_the_background() {
+    fn the_shell_steers_servers_to_the_background_and_says_nothing_of_stopping_a_held_process() {
         let bash = tool_specs().into_iter().find(|spec| spec.name == "bash").expect("the bash spec");
-        assert!(
-            bash.description.contains("`&` process holding the output is stopped"),
-            "{}",
-            bash.description
-        );
         assert!(bash.description.contains("run_in_background for long commands, waits and servers"), "{}", bash.description);
+        assert!(!bash.description.contains("stopped"), "{}", bash.description);
     }
 
     #[test]

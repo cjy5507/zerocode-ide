@@ -105,6 +105,9 @@ pub struct BashCommandOutput {
     pub is_image: Option<bool>,
     #[serde(rename = "backgroundTaskId")]
     pub background_task_id: Option<String>,
+    /// The shell exited but the background writer still had its pipes open.
+    #[serde(rename = "backgroundOutputHeld", default, skip_serializing_if = "Option::is_none")]
+    pub background_output_held: Option<bool>,
     #[serde(rename = "backgroundedByUser")]
     pub backgrounded_by_user: Option<bool>,
     #[serde(rename = "assistantAutoBackgrounded")]
@@ -485,23 +488,6 @@ fn kept_in_background(background: Option<TaskReach>) -> &'static str {
         Some(TaskReach::Completion) => "it then keeps running and its output comes back to you when it exits.",
         None => "it then keeps running, but its output is not captured.",
     }
-}
-
-/// What a run says when its shell exited while a process it left running in
-/// the background (`&`, `nohup`) still held its output: the run ended it the
-/// way a timeout does, [`BACKGROUND_DRAIN_GRACE`] after the shell, instead of
-/// waiting out the timeout. A process started with `run_in_background` writes
-/// its output to the session, which stops reading it when it ends, so one that
-/// must outlive the session writes to a file.
-fn held_output_stderr(background: Option<TaskReach>) -> String {
-    format!(
-        "The command's shell finished, but a process it left running in the background still \
-         held the command's output, so that process was ended after {} s. Start what must keep \
-         running (a server, a watcher) with `run_in_background: true` — {} If it must keep \
-         running after this session ends, send its output to a file (`> log 2>&1`).",
-        BACKGROUND_DRAIN_GRACE.as_secs(),
-        kept_in_background(background),
-    )
 }
 
 /// Polling slice for the background-task watcher: how quickly a `TaskStop`
@@ -974,6 +960,7 @@ pub fn execute_bash_with_tasks(
                 interrupted: false,
                 is_image: None,
                 background_task_id: Some(task.task_id),
+                background_output_held: None,
                 backgrounded_by_user: Some(false),
                 assistant_auto_backgrounded: Some(false),
                 dangerously_disable_sandbox: input.dangerously_disable_sandbox,
@@ -1003,6 +990,7 @@ pub fn execute_bash_with_tasks(
             interrupted: false,
             is_image: None,
             background_task_id: Some(child.id().to_string()),
+            background_output_held: None,
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: input.dangerously_disable_sandbox,
@@ -1033,6 +1021,7 @@ pub fn execute_bash_with_tasks(
     // `interrupt_foreground_bash`). Owned because the async body outlives the
     // borrow across the `std::thread::spawn` fallback below.
     let owner_session = session_id.map(ToOwned::to_owned);
+    let held_output_scope = tasks.map(TaskRegistry::held_output_scope);
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         // Already inside a tokio runtime — use `block_in_place` which lets
@@ -1055,6 +1044,7 @@ pub fn execute_bash_with_tasks(
                     live_writer,
                     background,
                     owner_session,
+                    held_output_scope,
                 ));
                 end_call_runtime(runtime);
                 result
@@ -1070,6 +1060,7 @@ pub fn execute_bash_with_tasks(
                     live_writer,
                     background,
                     owner_session,
+                    held_output_scope,
                 ))
             })
         };
@@ -1084,6 +1075,7 @@ pub fn execute_bash_with_tasks(
         live_writer,
         background,
         owner_session,
+        held_output_scope,
     ));
     end_call_runtime(runtime);
     result.map(|output| attach_disk_warning(output, low_disk))
@@ -1108,6 +1100,11 @@ fn end_call_runtime(runtime: tokio::runtime::Runtime) {
 /// reaches its tasks. It changes no execution, only what the timeout reply may
 /// promise: without a registry a re-run with `run_in_background` detaches and
 /// discards its output, so naming `TaskOutput` there would be false.
+///
+/// If the shell exited and a background writer still has the pipes at the
+/// end of the grace, return the shell's output and exit and keep the writer.
+// The run reads as one unit (spawn → read → reap → three endings).
+#[allow(clippy::too_many_lines)]
 async fn execute_bash_async(
     input: BashCommandInput,
     sandbox_status: SandboxStatus,
@@ -1115,6 +1112,7 @@ async fn execute_bash_async(
     live_output: crate::live_output::LiveOutputWriter,
     background: Option<TaskReach>,
     owner_session: Option<String>,
+    held_output_scope: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> io::Result<BashCommandOutput> {
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true)?;
 
@@ -1145,14 +1143,18 @@ async fn execute_bash_async(
     #[cfg(not(unix))]
     let _ = &owner_session;
 
-    let stdout_reader = child
+    let mut stdout_reader = child
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("child stdout pipe missing"))?;
-    let stderr_reader = child
+    let mut stderr_reader = child
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("child stderr pipe missing"))?;
+    // What each stream has delivered, kept outside the read so a run that
+    // returns while a process still holds its pipes keeps what was read.
+    let mut stdout_cap = CappedStream::new(MAX_OUTPUT_BYTES, TAIL_OUTPUT_BYTES);
+    let mut stderr_cap = CappedStream::new(MAX_OUTPUT_BYTES, TAIL_OUTPUT_BYTES);
     // Box::pin the join future: it nests three sub-futures plus their
     // buffers (~16 KB on the stack). Heap-allocating it once keeps this large
     // frame off the caller's stack and avoids repeated moves while `timeout`
@@ -1164,18 +1166,16 @@ async fn execute_bash_async(
         let streams = async {
             tokio::join!(
                 read_capped(
-                    stdout_reader,
-                    MAX_OUTPUT_BYTES,
-                    TAIL_OUTPUT_BYTES,
+                    &mut stdout_reader,
+                    &mut stdout_cap,
                     live_output.clone(),
                     crate::live_output::LiveOutputWriter::append_stdout,
                     &spill,
                     SpillStream::Stdout,
                 ),
                 read_capped(
-                    stderr_reader,
-                    MAX_OUTPUT_BYTES,
-                    TAIL_OUTPUT_BYTES,
+                    &mut stderr_reader,
+                    &mut stderr_cap,
                     live_output,
                     crate::live_output::LiveOutputWriter::append_stderr,
                     &spill,
@@ -1185,15 +1185,17 @@ async fn execute_bash_async(
         };
         // Both streams to their end — unless the leader has exited and a
         // process it left running still holds them past the grace
-        // (`held_after_its_leader`): `None`, and the run is cut below the way
-        // its deadline cuts it, with the leader still unreaped.
+        // (`held_after_its_leader`): `None`, and the run keeps that process
+        // below (`drain_held_pipes`).
         let (out, err) = tokio::select! {
             biased;
             streams = streams => streams,
             () = held_after_its_leader(child_pid) => return Ok::<_, io::Error>(None),
         };
         let status = reap_run_leader(&mut child, child_pid).await;
-        Ok::<_, io::Error>(Some((out?, err?, status?)))
+        out?;
+        err?;
+        status.map(Some)
     });
 
     // The deadline is unconditional: a model-supplied `timeout` (ms) stays
@@ -1204,42 +1206,67 @@ async fn execute_bash_async(
     // can wedge the run. `run_in_background` commands early-return above and
     // stay exempt.
     let effective_timeout_ms = resolve_bash_timeout_ms(input.timeout);
-    let output_result = match timeout(Duration::from_millis(effective_timeout_ms), collect_all).await {
-        Ok(Ok(Some((stdout_cap, stderr_cap, status)))) => (stdout_cap, stderr_cap, status, false),
+    // Ended before it is read, so the read's borrows of the child, its pipes
+    // and what they delivered are given back.
+    let ended = timeout(Duration::from_millis(effective_timeout_ms), collect_all).await;
+    let ((status, cancelled), held_output) = match ended {
+        Ok(Ok(Some(status))) => (status, false),
         Ok(Err(error)) => return Err(error),
-        // The run is cut: its deadline passed (`Err`), or its leader exited
-        // while a process it left running still held its output (`Ok(None)`).
-        // Either way its group is ended (`end_cut_run`), then the run returns.
-        cut => {
+        // Its leader exited while a process it left running still held its
+        // output (`Ok(None)`): that process keeps running.
+        Ok(Ok(None)) => {
+            let status = reap_run_leader(&mut child, child_pid).await?;
+            let held_output = !status.1;
+            #[cfg(unix)]
+            if held_output {
+                drain_held_pipes(
+                    stdout_reader.into_owned_fd()?,
+                    stderr_reader.into_owned_fd()?,
+                    held_output_scope,
+                )?;
+            }
+            #[cfg(not(unix))]
+            let _ = held_output_scope;
+            (status, held_output)
+        }
+        // Its deadline passed: its group is ended (`end_cut_run`), then the
+        // run returns.
+        Err(_) => {
             end_cut_run(child_pid, &spill).await;
-            let stderr = cut_stderr(cut.is_ok(), effective_timeout_ms, background);
+            let stderr = timeout_stderr_with_background_advice(effective_timeout_ms, background);
             return Ok(cut_output(&input, stderr, sandbox_status));
         }
     };
 
-    let (stdout_cap, stderr_cap, status, interrupted) = output_result;
-    let (stdout_head, stdout_tail, stdout_total) = stdout_cap;
-    let (stderr_head, stderr_tail, stderr_total) = stderr_cap;
     let raw_output_path = spill_path(spill);
-    let stdout = render_capped(&stdout_head, &stdout_tail, stdout_total, raw_output_path.as_deref());
-    let stderr = render_capped(&stderr_head, &stderr_tail, stderr_total, raw_output_path.as_deref());
+    let stdout = stdout_cap.render(raw_output_path.as_deref());
+    let mut stderr = stderr_cap.render(raw_output_path.as_deref());
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = match status.code() {
-        Some(0) => None,
-        Some(code) => Some(CommandEnding::exit_word(code)),
-        // `ExitStatus::code()` is absent when the shell is terminated by a
-        // signal. `None` is otherwise reserved for a clean exit, so preserve a
-        // non-success interpretation instead of reporting SIGKILL/OOM as green.
-        None => Some(String::from("signal")),
+    if held_output {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(KEPT_HELD_NOTE);
+    }
+    let return_code_interpretation = if cancelled {
+        Some(String::from("cancelled"))
+    } else {
+        match status.code() {
+            Some(0) => None,
+            Some(code) => Some(CommandEnding::exit_word(code)),
+            // A signal is a failure even though ExitStatus has no numeric code.
+            None => Some(String::from("signal")),
+        }
     };
 
     Ok(BashCommandOutput {
         stdout,
         stderr,
         raw_output_path,
-        interrupted,
+        interrupted: cancelled,
         is_image: None,
         background_task_id: None,
+        background_output_held: held_output.then_some(true),
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
         dangerously_disable_sandbox: input.dangerously_disable_sandbox,
@@ -1251,6 +1278,66 @@ async fn execute_bash_async(
         sandbox_status: Some(sandbox_status),
         safety_warning: None,
     })
+}
+
+/// The shell's output stops here, but the process holding the pipes lives on.
+pub(crate) const KEPT_HELD_NOTE: &str = "The shell exited; a process it left running in the background still holds this command's output, so it keeps running and what it writes from now on is not shown.";
+
+/// Older stored results carried the notice without the structured field.
+pub(crate) fn has_held_background_output(value: &serde_json::Value) -> bool {
+    value.get("backgroundOutputHeld").and_then(serde_json::Value::as_bool) == Some(true)
+        || value.get("stderr").and_then(serde_json::Value::as_str)
+            .and_then(|stderr| stderr.lines().last()) == Some(KEPT_HELD_NOTE)
+}
+
+/// One IO worker for all held runs. Each pipe is dropped at EOF or when its
+/// session closes. Closing a live pipe earlier could send SIGPIPE
+/// to a background process on its next write.
+#[cfg(unix)]
+fn drain_held_pipes(
+    stdout: std::os::fd::OwnedFd,
+    stderr: std::os::fd::OwnedFd,
+    mut scope: Option<tokio::sync::watch::Receiver<bool>>,
+) -> io::Result<()> {
+    use tokio::net::unix::pipe::Receiver;
+
+    async fn discard(mut pipe: Receiver) {
+        let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
+    }
+
+    let runtime = held_pipe_runtime()?;
+    let (stdout, stderr) = {
+        let _entered = runtime.enter();
+        (Receiver::from_owned_fd(stdout)?, Receiver::from_owned_fd(stderr)?)
+    };
+    runtime.spawn(async move {
+        tokio::select! {
+            biased;
+            () = async {
+                if let Some(scope) = &mut scope {
+                    let _ = scope.wait_for(|closed| *closed).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {},
+            () = async { tokio::join!(discard(stdout), discard(stderr)); } => {},
+        }
+    });
+    Ok(())
+}
+
+#[cfg(unix)]
+fn held_pipe_runtime() -> io::Result<&'static tokio::runtime::Runtime> {
+    static DRAINER: OnceLock<io::Result<tokio::runtime::Runtime>> = OnceLock::new();
+    DRAINER.get_or_init(|| {
+        Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("zo-bash-held-output")
+            .enable_io()
+            .build()
+    })
+    .as_ref()
+    .map_err(|error| io::Error::new(error.kind(), error.to_string()))
 }
 
 /// Ends the group of a cut run while its leader is still registered, so the
@@ -1265,20 +1352,8 @@ async fn end_cut_run(child_pid: Option<u32>, spill: &Mutex<RawSpill>) {
     spill.lock().unwrap_or_else(PoisonError::into_inner).give_up();
 }
 
-/// Why a cut run was cut and what to do instead: its exited leader left a
-/// process holding its output (`held`), or its deadline passed.
-fn cut_stderr(held: bool, effective_timeout_ms: u64, background: Option<TaskReach>) -> String {
-    if held {
-        held_output_stderr(background)
-    } else {
-        timeout_stderr_with_background_advice(effective_timeout_ms, background)
-    }
-}
-
-/// The result of a run that was cut — by its deadline, or because a process
-/// its exited leader left running still held its output: no streams, `stderr`
-/// saying why and what to do instead, and `interrupted` so the caller knows
-/// nothing finished.
+/// The result of a run its deadline cut: no streams, `stderr` saying why and
+/// what to do instead, and `interrupted` so the caller knows nothing finished.
 fn cut_output(
     input: &BashCommandInput,
     stderr: String,
@@ -1526,9 +1601,17 @@ fn prepare_tokio_command(
 /// command running concurrently in the same process (background agent workers
 /// outlive the turn that spawned them). `None` is its own key, not a wildcard.
 ///
-/// `(owning session id, process-group leader pid)`.
+/// `(owning session id, process-group leader pid, termination state)`.
 #[cfg(unix)]
-type ForegroundBashGroups = Mutex<Vec<(Option<String>, u32)>>;
+type ForegroundBashGroups = Mutex<Vec<(Option<String>, u32, GroupTermination)>>;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupTermination {
+    Running,
+    Terminating,
+    Cancelled,
+}
 
 #[cfg(unix)]
 static FOREGROUND_BASH_GROUPS: OnceLock<ForegroundBashGroups> = OnceLock::new();
@@ -1556,7 +1639,7 @@ impl ForegroundBashGroup {
             foreground_bash_groups()
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((owner.map(ToOwned::to_owned), pid));
+                .push((owner.map(ToOwned::to_owned), pid, GroupTermination::Running));
         }
         Self { pid }
     }
@@ -1571,7 +1654,7 @@ impl Drop for ForegroundBashGroup {
         let mut groups = foreground_bash_groups()
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(idx) = groups.iter().position(|(_, live)| *live == pid) {
+        if let Some(idx) = groups.iter().position(|(_, live, _)| *live == pid) {
             groups.swap_remove(idx);
         }
     }
@@ -1600,8 +1683,8 @@ pub fn interrupt_foreground_bash(session_id: Option<&str>) -> usize {
             .unwrap_or_else(PoisonError::into_inner);
         groups
             .iter()
-            .filter(|(owner, _)| owner.as_deref() == session_id)
-            .map(|(_, pid)| *pid)
+            .filter(|(owner, _, _)| owner.as_deref() == session_id)
+            .map(|(_, pid, _)| *pid)
             .collect()
     };
     for pid in &owned {
@@ -1731,17 +1814,13 @@ impl LeaderWatch {
     }
 }
 
-/// Reaps a run's leader once its output pipes have closed (t-19897). On Unix the
-/// registry lock is held while the leader is tried, and the run's registration is
-/// taken out in the same breath as the reap, so a cancel can only ever name a pid
-/// that is still unreaped. The leader is not reaped while its pipes are open: a
-/// backgrounded job's output stays in the result, and its group is ended only by
-/// a timeout, a cancel, or its output still held past the grace after the leader
-/// exited ([`held_after_its_leader`]).
+/// Reap after the streams close or outlast the hold grace. The registry lock
+/// keeps the leader's PID reserved through both cancellation signals. The
+/// second return value tells the caller whether cancellation won.
 async fn reap_run_leader(
     child: &mut tokio::process::Child,
     pid: Option<u32>,
-) -> io::Result<std::process::ExitStatus> {
+) -> io::Result<(std::process::ExitStatus, bool)> {
     #[cfg(unix)]
     {
         if let Some(pid) = pid {
@@ -1750,49 +1829,59 @@ async fn reap_run_leader(
                     let mut groups = foreground_bash_groups()
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner);
-                    if let Some(status) = child.try_wait()? {
-                        groups.retain(|(_, live)| *live != pid);
-                        note_reaped(pid);
-                        return Ok(status);
+                    let index = groups.iter().position(|(_, live, _)| *live == pid);
+                    let termination = index.map_or(GroupTermination::Running, |i| groups[i].2);
+                    if termination != GroupTermination::Terminating {
+                        if let Some(status) = child.try_wait()? {
+                            if let Some(index) = index {
+                                groups.swap_remove(index);
+                            }
+                            note_reaped(pid);
+                            return Ok((status, termination == GroupTermination::Cancelled));
+                        }
                     }
                 }
                 tokio::time::sleep(BASH_REAP_LOOK_EVERY).await;
             }
         }
     }
-    wait_child(child, pid).await
+    wait_child(child, pid).await.map(|status| (status, false))
 }
 
-/// SIGTERM to the group of a registered run, sent under the registry lock. A
-/// registered pid is unreaped, so it still names its group. `None` once the run
-/// is no longer registered, which means its leader has been reaped.
+/// Send SIGTERM while the leader still names its group. Once the grace starts,
+/// the reaper must leave the registration in place for the second signal.
 #[cfg(unix)]
 fn terminate_registered(pid: u32) -> Option<GroupEnd> {
-    let groups = foreground_bash_groups()
+    let mut groups = foreground_bash_groups()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if !groups.iter().any(|(_, live)| *live == pid) {
+    let (_, _, termination) = groups.iter_mut().find(|(_, live, _)| *live == pid)?;
+    if *termination != GroupTermination::Running {
         return None;
     }
     let end = GroupEnd::begin(pid, Group::Terminate { grace: BASH_GROUP_GRACE })?;
-    matches!(end.first(), Ok(Some(_))).then_some(end)
+    if !matches!(end.first(), Ok(Some(_))) {
+        return None;
+    }
+    *termination = GroupTermination::Terminating;
+    Some(end)
 }
 
-/// SIGKILL to the group of a run that `terminate_registered` signalled. Sent under
-/// the registry lock, and only while the pid is still registered, so unreaped.
+/// Send SIGKILL under the registry lock, then allow the leader to be reaped.
 #[cfg(unix)]
 fn finish_registered(pid: u32, end: &GroupEnd) {
-    let groups = foreground_bash_groups()
+    let mut groups = foreground_bash_groups()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if groups.iter().any(|(_, live)| *live == pid) {
+    if let Some((_, _, termination)) = groups.iter_mut()
+        .find(|(_, live, state)| *live == pid && *state == GroupTermination::Terminating)
+    {
         let _ = end.finish();
+        *termination = GroupTermination::Cancelled;
     }
 }
 
-/// The timeout's end of a registered run's group: SIGTERM, the grace outside the
-/// registry lock, then SIGKILL (t-19897). A backgrounded grandchild that holds the
-/// output pipes is reaped with the group.
+/// A deadline must also wait for a concurrent Esc to finish signalling.
 #[cfg(unix)]
 async fn end_registered_group(pid: Option<u32>) {
     let Some(pid) = pid else {
@@ -1801,6 +1890,15 @@ async fn end_registered_group(pid: Option<u32>) {
     if let Some(end) = terminate_registered(pid) {
         tokio::time::sleep(BASH_GROUP_GRACE).await;
         finish_registered(pid, &end);
+    } else {
+        while foreground_bash_groups()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|(_, live, state)| *live == pid && *state == GroupTermination::Terminating)
+        {
+            tokio::time::sleep(BASH_REAP_LOOK_EVERY).await;
+        }
     }
 }
 
@@ -2031,7 +2129,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .any(|(owner, _)| owner.as_deref() == Some(OWNER));
+                .any(|(owner, _, _)| owner.as_deref() == Some(OWNER));
             live.then_some(())
         });
         assert_eq!(
@@ -2052,7 +2150,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .all(|(owner, _)| owner.as_deref() != Some(OWNER)),
+                .all(|(owner, _, _)| owner.as_deref() != Some(OWNER)),
             "the registration bracket must unpublish the group on every exit path"
         );
     }
@@ -2213,48 +2311,75 @@ mod tests {
         assert_group_empty(leader);
     }
 
+    /// The pids a held-output test's command wrote: its shell (the run's
+    /// leader, whose pid names the group) and the job it left running.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    fn leader_and_job(pidfile: &std::path::Path) -> (i32, nix::unistd::Pid) {
+        let text = std::fs::read_to_string(pidfile).expect("pidfile written");
+        let _ = std::fs::remove_file(pidfile);
+        let mut pids = text.split_whitespace().map(|word| word.parse::<i32>().expect("valid pid"));
+        let leader = pids.next().expect("leader pid");
+        (leader, nix::unistd::Pid::from_raw(pids.next().expect("background pid")))
+    }
+
     /// A process the command left running in the background that still holds
     /// its output once the shell has exited — `cd dir && server … &` keeps the
-    /// pipes in the subshell bash forks for the list — ends the run
-    /// `BACKGROUND_DRAIN_GRACE` after the shell instead of at the timeout. It is
-    /// the timeout's own ending, reached early: interrupted, no streams, the
-    /// group ended before its leader is reaped (t-19897), with words that say
-    /// what held the run and what to start instead (t-120813).
+    /// pipes in the subshell bash forks for the list — no longer ends the run
+    /// the way its deadline would (t-125701): the run returns what was read and
+    /// the shell's own exit, not interrupted, `BACKGROUND_DRAIN_GRACE` after the
+    /// shell, and that process keeps running, as in a terminal. Ending it made
+    /// the model start the server again.
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
-    fn a_background_process_holding_the_output_ends_the_run_after_the_grace_not_the_timeout() {
+    fn a_process_holding_the_output_keeps_running_and_the_run_returns_its_output() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let pidfile = std::env::temp_dir().join(format!("zo-held-output-{}-{unique}.pid", std::process::id()));
-        let command = format!("cd / && sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
+        let pidfile = std::env::temp_dir().join(format!("zo-kept-output-{}-{unique}.pid", std::process::id()));
+        let command = format!("cd / && sleep 30 & echo $$ $! > {}; echo started; exit 3", pidfile.display());
 
-        let mark = plugins::bounded_child::trace::mark();
         let started = Instant::now();
         let output = execute_bash(unsandboxed(&command, 15_000)).expect("bash command should execute");
         let took = started.elapsed();
-        let text = std::fs::read_to_string(&pidfile).expect("pidfile written");
-        let _ = std::fs::remove_file(&pidfile);
-        let mut pids = text.split_whitespace().map(|word| word.parse::<u32>().expect("valid pid"));
-        let leader = pids.next().expect("leader pid");
-        let held_by = nix::unistd::Pid::from_raw(i32::try_from(pids.next().expect("background pid")).expect("pid fits"));
+        let (leader, job) = leader_and_job(&pidfile);
+        let kept = nix::sys::signal::kill(job, None).is_ok();
+        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(leader), nix::sys::signal::Signal::SIGKILL);
 
         assert!(took < Duration::from_secs(10), "the run waited out its timeout: {took:?}");
         assert!(took >= super::BACKGROUND_DRAIN_GRACE, "output may trail its shell by the grace: {took:?}");
-        assert!(output.interrupted, "nothing finished, as at the timeout");
-        assert!(output.stdout.is_empty(), "no stream comes back, as at the timeout: {:?}", output.stdout);
+        assert!(kept, "the process that held the output was ended");
+        assert!(!output.interrupted, "the shell finished: {output:?}");
+        assert_eq!(output.stdout, "started\n", "what the shell printed comes back");
+        assert_eq!(output.return_code_interpretation, Some(super::CommandEnding::exit_word(3)), "the shell's own exit");
         assert!(
-            output.stderr.contains("still held the command's output") && output.stderr.contains("`run_in_background: true`"),
-            "the run says what held it and what to start instead: {}",
+            output.stderr.contains("keeps running") && !output.stderr.contains("was ended"),
+            "the run says the process lives on: {}",
             output.stderr
         );
-        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
-        let until = Instant::now() + Duration::from_secs(5);
-        while nix::sys::signal::kill(held_by, None).is_ok() {
-            assert!(Instant::now() < until, "the process that held the output outlived its group");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_group_empty(i32::try_from(leader).expect("leader pid fits"));
+    }
+
+    /// A kept process that writes after its run returned is not ended by the
+    /// pipe it writes to: the shared reader keeps both streams open until EOF.
+    /// The marker proves the process executed after writing to both pipes.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn a_kept_process_that_writes_after_the_run_returned_keeps_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = dir.path().join("start");
+        let done = dir.path().join("done");
+        let command = format!(
+            "(i=0; while [ \"$i\" -lt 200 ]; do \
+             if [ -f '{start}' ]; then echo late; echo late >&2; touch '{done}'; exit; fi; \
+             sleep 0.05; i=$((i+1)); done) &",
+            start = start.display(), done = done.display(),
+        );
+        let output = execute_bash(unsandboxed(&command, 15_000)).expect("bash command should execute");
+        assert!(!output.interrupted, "the shell finished: {output:?}");
+        assert_eq!(output.background_output_held, Some(true));
+        assert!(output.stdout.is_empty(), "the late line came after the run returned: {:?}", output.stdout);
+
+        std::fs::write(start, "").unwrap();
+        wait_for(Duration::from_secs(3), || done.is_file().then_some(()));
     }
 
     /// A run whose leader exits first while a grandchild still holds the output
@@ -2314,7 +2439,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .any(|(owner, _)| owner.as_deref() == Some(OWNER));
+                .any(|(owner, _, _)| owner.as_deref() == Some(OWNER));
             let text = std::fs::read_to_string(&pidfile).ok()?;
             (registered && text.ends_with('\n')).then_some(text)
         });
@@ -2335,6 +2460,93 @@ mod tests {
         let _ = std::fs::remove_file(&pidfile);
         plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
         assert_group_empty(i32::try_from(leader).expect("leader pid fits"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn friction_cancel_wins_when_the_output_grace_ends_between_signals() {
+        const OWNER: &str = "held-output-cancel-race";
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let ready = dir.path().join("ready");
+        let command = format!(
+            "(trap '' TERM; touch '{ready}'; exec sleep 20) & \
+             while [ ! -f '{ready}' ]; do sleep 0.01; done; echo $$ $! > '{pidfile}'; exit",
+            ready = ready.display(), pidfile = pidfile.display(),
+        );
+        let input = unsandboxed(&command, 15_000);
+        let mark = plugins::bounded_child::trace::mark();
+        let runner = std::thread::spawn(move || super::execute_bash_with_tasks(input, None, Some(OWNER)));
+        wait_for(Duration::from_secs(3), || {
+            std::fs::read_to_string(&pidfile).ok().filter(|text| text.ends_with('\n'))
+        });
+        let (leader, _) = leader_and_job(&pidfile);
+        let pid = u32::try_from(leader).unwrap();
+        assert_eq!(
+            plugins::bounded_child::observe_exit(pid, Some(Instant::now() + Duration::from_secs(3))),
+            Some(true)
+        );
+
+        let ending = super::terminate_registered(pid).expect("cancel started");
+        // Force the normal hold path to observe its grace before cancellation finishes.
+        std::thread::sleep(super::BACKGROUND_DRAIN_GRACE + Duration::from_secs(1));
+        super::finish_registered(pid, &ending);
+        let output = runner.join().unwrap().unwrap();
+        if !output.interrupted {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(leader),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, pid);
+        assert!(output.interrupted);
+        assert_group_empty(leader);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn friction_repeated_held_pipes_release_their_descriptors_on_eof() {
+        let scope = tokio::sync::watch::Sender::default();
+        for _ in 0..8 {
+            let (stdout_reader, stdout_writer) = std::io::pipe().unwrap();
+            let (stderr_reader, stderr_writer) = std::io::pipe().unwrap();
+            super::drain_held_pipes(stdout_reader.into(), stderr_reader.into(), Some(scope.subscribe())).unwrap();
+            drop((stdout_writer, stderr_writer));
+        }
+        wait_for(Duration::from_secs(3), || (scope.receiver_count() == 0).then_some(()));
+        // The test's watch receivers fall out of scope only after both pipes
+        // reach EOF. No completed run remains attached to the shared worker.
+        assert_eq!(scope.receiver_count(), 0);
+        assert_eq!(super::held_pipe_runtime().unwrap().metrics().num_workers(), 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn friction_session_close_releases_held_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let begin = dir.path().join("begin");
+        let result = dir.path().join("result");
+        let command = format!(
+            "(trap '' PIPE; while [ ! -f '{begin}' ]; do sleep 0.05; done; \
+             for n in 1 2 3 4 5 6 7 8 9 10; do \
+                 if ! (echo late) 2>/dev/null; then echo closed > '{result}'; exit; fi; sleep 0.05; \
+             done; echo open > '{result}') &",
+            begin = begin.display(), result = result.display(),
+        );
+        let registry = super::TaskRegistry::default();
+        let scope = registry.held_bash_output_guard();
+        let output = super::execute_bash_with_tasks(
+            unsandboxed(&command, 10_000), Some(&registry), Some("held-pipes-close"),
+        ).unwrap();
+        assert!(output.stderr.contains("keeps running"));
+        drop(scope);
+        assert!(*registry.held_output_scope().borrow());
+        std::fs::write(&begin, "").unwrap();
+        let status = wait_for(Duration::from_secs(3), || {
+            std::fs::read_to_string(&result).ok()
+                .filter(|text| text == "closed\n" || text == "open\n")
+        });
+        assert_eq!(status, "closed\n");
     }
 
     /// 유예가 만료되는 경로의 계약: 파이프가 아직 열려 있어 기다림이 끝나지
@@ -3419,29 +3631,57 @@ fn prune_raw_spills(dir: &std::path::Path) {
     }
 }
 
-/// Read at most `cap` bytes from `reader` into a `Vec<u8>`; any further
-/// bytes are read and discarded so the child process can finish writing
-/// (a full pipe would otherwise block the producer forever).
+/// What one stream of a foreground run has delivered: the first `cap` bytes in
+/// full, a trailing ring, and how many bytes came in all ([`read_capped`]).
+/// The run owns it, not the read, so a run that returns while a process still
+/// holds the pipe keeps what was read (`drain_held_pipes`).
+#[derive(Debug)]
+struct CappedStream {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    total: usize,
+    cap: usize,
+    tail_cap: usize,
+}
+
+impl CappedStream {
+    /// An empty stream that keeps at most `cap` bytes of head and `tail_cap`
+    /// of tail.
+    fn new(cap: usize, tail_cap: usize) -> Self {
+        Self {
+            head: Vec::with_capacity(cap.min(8192)),
+            tail: Vec::new(),
+            total: 0,
+            cap,
+            tail_cap,
+        }
+    }
+
+    /// The stream as the result shows it ([`render_capped`]).
+    fn render(&self, whole: Option<&str>) -> String {
+        render_capped(&self.head, &self.tail, self.total, whole)
+    }
+}
+
+/// Read `reader` to its end into `into`, keeping at most its `cap` bytes of
+/// head; any further bytes are read and discarded so the child process can
+/// finish writing (a full pipe would otherwise block the producer forever).
 ///
 /// Trade-off: we still pay the kernel-side I/O of reading every byte, but
 /// the heap footprint stays bounded at `cap`. For a `find /` style output
 /// this turns a multi-GB resident-set spike into ~16 KiB.
 async fn read_capped<R>(
-    mut reader: R,
-    cap: usize,
-    tail_cap: usize,
+    reader: &mut R,
+    into: &mut CappedStream,
     live_output: crate::live_output::LiveOutputWriter,
     append_live: fn(&crate::live_output::LiveOutputWriter, &[u8]),
     spill: &Mutex<RawSpill>,
     stream: SpillStream,
-) -> io::Result<(Vec<u8>, Vec<u8>, usize)>
+) -> io::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
-    let mut head: Vec<u8> = Vec::with_capacity(cap.min(8192));
-    let mut tail: Vec<u8> = Vec::new();
-    let mut total: usize = 0;
     let mut scratch = [0u8; 8192];
     loop {
         let n = reader.read(&mut scratch).await?;
@@ -3454,14 +3694,14 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record(stream, chunk);
-        if head.len() < cap {
-            let room = cap - head.len();
-            head.extend_from_slice(&chunk[..room.min(n)]);
+        if into.head.len() < into.cap {
+            let room = into.cap - into.head.len();
+            into.head.extend_from_slice(&chunk[..room.min(n)]);
         }
-        retain_tail(&mut tail, chunk, tail_cap);
-        total = total.saturating_add(n);
+        retain_tail(&mut into.tail, chunk, into.tail_cap);
+        into.total = into.total.saturating_add(n);
     }
-    Ok((head, tail, total))
+    Ok(())
 }
 
 /// Keep at most `tail_cap` trailing bytes of a stream in `tail`, chunk-wise so a

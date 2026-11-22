@@ -156,6 +156,8 @@ pub enum RewindTurn {
 }
 
 pub struct PlainSession {
+    // Drop before the runtime's shutdown and keep across model rebuilds.
+    _held_bash_output: runtime::task_registry::HeldBashOutputGuard,
     pub(crate) invocation: crate::automation::Invocation,
     selection_origins: (&'static str, &'static str),
     model_selection: super::plan_execution::ModelSelection,
@@ -1051,6 +1053,7 @@ impl PlainSession {
             autonomy.limits.idle_dream_delay_secs.saturating_mul(1000),
         );
         let session = Self {
+            _held_bash_output: tasks.held_bash_output_guard(),
             invocation: crate::automation::Invocation::default(),
             selection_origins,
             model_selection,
