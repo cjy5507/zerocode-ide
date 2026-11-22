@@ -64,6 +64,7 @@ function windowAnswering(...functions) {
   vm.runInContext(
     `const paneAgents = paneLifecycle.map("paneAgents");
      const paneSessions = paneLifecycle.map("paneSessions");
+     const paneChats = paneLifecycle.map("paneChats");
      const paneSubagents = paneLifecycle.map("paneSubagents");
      const paneActivities = paneLifecycle.map("paneActivities", {
        owns: (term, card) => card === "term:" + term || card.startsWith("sub:" + term + ":"),
@@ -185,7 +186,7 @@ test("the activities the backend lists are written for the panes that stand — 
 });
 
 test("the conversations the backend lists are written for the panes that stand", async () => {
-  const w = windowAnswering("seedPaneSessions");
+  const w = windowAnswering("seedPaneSessions", "syncPaneChatSession");
   const seeding = w.context.seedPaneSessions();
   w.ends(7);
   w.answer("pane_sessions", [

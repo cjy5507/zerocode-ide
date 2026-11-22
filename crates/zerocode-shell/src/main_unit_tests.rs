@@ -10055,13 +10055,11 @@ fn an_agent_that_left_its_shell_behind_stops_being_drawn_as_running() {
             && publishing.contains("ring_for_pane(app, &worktree, &held);"),
         "the all-clear replay fell out of the publish door:\n{publishing}"
     );
-    assert_eq!(
-        shipped
-            .matches("pending_done()\n                .insert(")
-            .count(),
-        1,
-        "the parked all-clear grew a second writer"
-    );
+    let parked_writers = shipped
+        .match_indices(concat!("pending_", "done()"))
+        .filter(|(at, call)| shipped[*at + call.len()..].trim_start().starts_with(".insert("))
+        .count();
+    assert_eq!(parked_writers, 1, "the parked all-clear must have one writer");
     // 인터럽트는 게이트보다 **먼저** 선언된다. 뒤에서 선언하면 그 게이트가
     // 방금 선언된 깃발을 아직 false 로 읽는다 — 원본의 순서도 선언
     // (`:2962`) 다음 해결(`:3126`)이다.
