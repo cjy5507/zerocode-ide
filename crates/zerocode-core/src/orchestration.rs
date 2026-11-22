@@ -58,7 +58,7 @@ pub mod task_cost;
 pub mod text_file;
 
 pub use marked::{Marked, MarkedExport, RunShare, Share};
-pub use progress::{NextStep, WorkProgress, WorkStage};
+pub use progress::{LiveStage, NextStep, WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
 pub use session_history::{
     CONVERSATION_HELD_ELSEWHERE, CONVERSATION_PICKED_UNASKED, SessionHistory,

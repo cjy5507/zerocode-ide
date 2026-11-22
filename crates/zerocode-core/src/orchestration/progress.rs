@@ -197,6 +197,96 @@ impl NextStep {
     ];
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveStage {
+    Dispatched,
+    Reported,
+    ClaimedVerified,
+    ClaimedMerged,
+    ClaimedDeployed,
+    Stale,
+    Superseded,
+    Failed,
+    Stopped,
+    Unreviewable,
+    Waived,
+    Verified,
+    NothingToLand,
+    Merged,
+    Deployed,
+    Closed,
+    Unknown,
+}
+
+impl LiveStage {
+    pub const ALL: [Self; 17] = [
+        Self::Dispatched,
+        Self::Reported,
+        Self::ClaimedVerified,
+        Self::ClaimedMerged,
+        Self::ClaimedDeployed,
+        Self::Stale,
+        Self::Superseded,
+        Self::Failed,
+        Self::Stopped,
+        Self::Unreviewable,
+        Self::Waived,
+        Self::Verified,
+        Self::NothingToLand,
+        Self::Merged,
+        Self::Deployed,
+        Self::Closed,
+        Self::Unknown,
+    ];
+
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Dispatched => "dispatched",
+            Self::Reported => "reported",
+            Self::ClaimedVerified => "claimed-verified",
+            Self::ClaimedMerged => "claimed-merged",
+            Self::ClaimedDeployed => "claimed-deployed",
+            Self::Stale => "stale",
+            Self::Superseded => "superseded",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+            Self::Unreviewable => "unreviewable",
+            Self::Waived => "waived",
+            Self::Verified => "verified",
+            Self::NothingToLand => "nothing-to-land",
+            Self::Merged => "merged",
+            Self::Deployed => "deployed",
+            Self::Closed => "closed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn from_progress(stage: WorkStage, claimed: Option<WorkStage>) -> Self {
+        match (stage, claimed) {
+            (WorkStage::Working, _) => Self::Dispatched,
+            (WorkStage::ReportOnly, Some(WorkStage::Deployed)) => Self::ClaimedDeployed,
+            (WorkStage::ReportOnly, Some(WorkStage::Merged)) => Self::ClaimedMerged,
+            (WorkStage::ReportOnly, Some(WorkStage::Verified)) => Self::ClaimedVerified,
+            (WorkStage::ReportOnly, _) => Self::Reported,
+            (WorkStage::Stale, _) => Self::Stale,
+            (WorkStage::Superseded, _) => Self::Superseded,
+            (WorkStage::Failed, _) => Self::Failed,
+            (WorkStage::Stopped, _) => Self::Stopped,
+            (WorkStage::Unreviewable, _) => Self::Unreviewable,
+            (WorkStage::Waived, _) => Self::Waived,
+            (WorkStage::Verified, _) => Self::Verified,
+            (WorkStage::NothingToLand, _) => Self::NothingToLand,
+            (WorkStage::Merged, _) => Self::Merged,
+            (WorkStage::Deployed, _) => Self::Deployed,
+            (WorkStage::Closed, _) => Self::Closed,
+            (WorkStage::Unknown, _) => Self::Unknown,
+        }
+    }
+}
+
 /// A [`WorkStage`] with the ids it stands on.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WorkProgress {
@@ -205,6 +295,7 @@ pub struct WorkProgress {
     /// on [`WorkStage::ReportOnly`] only. A claim, never the fact.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claimed: Option<WorkStage>,
+    pub live_stage: LiveStage,
     /// The attempt the stage is about: the one the review named for reviewed
     /// work, the one asked about otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -270,6 +361,7 @@ impl Run {
         WorkProgress {
             stage,
             claimed,
+            live_stage: LiveStage::from_progress(stage, claimed),
             next: self.next_step(task, stage, attempt, newest, review),
             attempt: attempt_id,
             source,
@@ -477,5 +569,41 @@ mod tests {
             check,
             "zerocode-orc land-check --task t-1 --head abcdef1234567890 --retry-request land-check-t-1-abcdef123456"
         );
+    }
+
+    #[test]
+    fn live_stage_covers_every_work_stage_and_claim_and_serializes_to_word() {
+        for live in LiveStage::ALL {
+            let encoded = serde_json::to_string(&live).expect("live stage serializes");
+            assert_eq!(encoded, format!("\"{}\"", live.word()));
+        }
+        assert_eq!(
+            LiveStage::from_progress(WorkStage::Working, None),
+            LiveStage::Dispatched
+        );
+        assert_eq!(
+            LiveStage::from_progress(WorkStage::ReportOnly, None),
+            LiveStage::Reported
+        );
+        assert_eq!(
+            LiveStage::from_progress(WorkStage::ReportOnly, Some(WorkStage::Verified)),
+            LiveStage::ClaimedVerified
+        );
+        assert_eq!(
+            LiveStage::from_progress(WorkStage::ReportOnly, Some(WorkStage::Merged)),
+            LiveStage::ClaimedMerged
+        );
+        assert_eq!(
+            LiveStage::from_progress(WorkStage::ReportOnly, Some(WorkStage::Deployed)),
+            LiveStage::ClaimedDeployed
+        );
+        assert_eq!(
+            LiveStage::from_progress(WorkStage::NothingToLand, None),
+            LiveStage::NothingToLand
+        );
+        for stage in WorkStage::ALL {
+            let live = LiveStage::from_progress(stage, None);
+            assert!(LiveStage::ALL.contains(&live));
+        }
     }
 }

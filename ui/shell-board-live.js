@@ -866,7 +866,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
 ]);
 
 function ledgerReviewStage(row) {
-  return ledgerWork(row)?.live ?? "dispatched";
+  return row?.progress?.live_stage ?? ledgerWork(row)?.live ?? "dispatched";
 }
 
 /* 한 결과 단계가 적은 사실이 이 행에 **지금도** 서 있는가. 단계가 앞으로 가도 옛

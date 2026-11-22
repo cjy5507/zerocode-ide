@@ -41353,3 +41353,55 @@ fn worker_open_shim_rides_only_worker_pane_path_and_mirror_on_macos() {
         "serve_worker_open must decide purely on argv without mirror_dir and strip guard env:\n{handler}"
     );
 }
+
+#[test]
+fn boundary_activity_and_live_stage_tables_agree_with_core() {
+    use zerocode_core::activity_state::SurfaceClass;
+    use zerocode_core::hook::HookState;
+    use zerocode_core::orchestration::LiveStage;
+
+    let term = include_str!("../../../../ui/shell-term.js");
+    let hook_map = support::block_after(term, "const HOOK_STATE_CLASS = {");
+    for state in HookState::ALL {
+        let key = if state.word().contains('-') {
+            format!("\"{}\"", state.word())
+        } else {
+            state.word().to_string()
+        };
+        let entry = format!("{key}: \"{}\"", state.surface_class().word());
+        assert!(
+            hook_map.contains(&entry),
+            "HOOK_STATE_CLASS drifted from zerocode_core::activity_state for `{entry}`:\n{hook_map}"
+        );
+    }
+    let rank_map = support::block_after(term, "const WORKTREE_STATE_RANK = {");
+    let ind_map = support::block_after(term, "const WORKTREE_INDICATOR = {");
+    for class in SurfaceClass::ALL {
+        let rank_entry = format!("{}: {}", class.word(), class.rank());
+        assert!(
+            rank_map.contains(&rank_entry),
+            "WORKTREE_STATE_RANK drifted from zerocode_core::activity_state for `{rank_entry}`:\n{rank_map}"
+        );
+        let ind_entry = format!("{}: \"{}\"", class.word(), class.indicator().word());
+        assert!(
+            ind_map.contains(&ind_entry),
+            "WORKTREE_INDICATOR drifted from zerocode_core::activity_state for `{ind_entry}`:\n{ind_map}"
+        );
+    }
+
+    let shell = include_str!("../../../../ui/shell.js");
+    let live_js = include_str!("../../../../ui/shell-board-live.js");
+    assert!(
+        live_js.contains("row?.progress?.live_stage ?? ledgerWork(row)?.live"),
+        "ledgerReviewStage no longer reads Rust's canonical WorkProgress::live_stage first"
+    );
+    let stages_block = support::block_after(shell, "const WORK_STAGES = Object.freeze({");
+    let claims_block = support::block_after(shell, "const WORK_CLAIMS = Object.freeze({");
+    for live in LiveStage::ALL {
+        let needle = format!("live: \"{}\"", live.word());
+        assert!(
+            stages_block.contains(&needle) || claims_block.contains(&needle),
+            "WORK_STAGES/WORK_CLAIMS missing canonical LiveStage `{needle}`"
+        );
+    }
+}

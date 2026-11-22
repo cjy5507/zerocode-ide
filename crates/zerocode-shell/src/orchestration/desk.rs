@@ -3536,6 +3536,7 @@ mod tests {
         let progress = |stage: WorkStage| WorkProgress {
             stage,
             claimed: None,
+            live_stage: zerocode_core::orchestration::LiveStage::from_progress(stage, None),
             attempt: None,
             source: None,
             merge_head: None,
