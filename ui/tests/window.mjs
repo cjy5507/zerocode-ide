@@ -56935,7 +56935,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // hooks told (`live_turns`) and lets those rows go in the paint that
       // brings the document's rows for them; its foot line names the call still
       // out and its clock ticks; a turn that ended while another tab was in
-      // front is read when the tab comes back. Its chip lists the CLI's own
+      // front is read when the tab comes back, and one that ended while the
+      // window was hidden is drawn when it is shown. Its chip lists the CLI's own
       // models — a long list in families, so behind a search field — and a pick
       // types `/model <id>` down the road every CLI's pick takes; a model new
       // to the list stands in the menu, and one gone from it leaves, with no
@@ -57005,7 +57006,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
             next: 6,
             start: args.after ? 3 : 0,
             model: "example-family-a-max",
-            turns: [
+            turns: (args.after ?? 0) >= 6 ? [] : [
               { role: "user", text: "turn 2 live" },
               { role: "tool", text: "exec ls", tool: { kind: "bash", name: "exec", call_id: "c-live-1", input: "ls", result: "", is_error: false } },
               { role: "tool_result", text: "a.rs", tool: { kind: "bash", name: "exec", call_id: "c-live-1", input: "", result: "a.rs", is_error: false } },
@@ -57016,14 +57017,27 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
             live_turns: [],
           };
         }
+        if (devinPhase === "turn3") {
+          return {
+            found: true,
+            next: 8,
+            start: 6,
+            model: "example-family-a-max",
+            turns: (args.after ?? 0) >= 8 ? [] : [
+              { role: "user", text: "turn 3 background" },
+              { role: "assistant", text: "answer 3" },
+            ],
+            live_turns: [],
+          };
+        }
         return {
           found: true,
-          next: 8,
-          start: 6,
+          next: 10,
+          start: 8,
           model: "example-family-a-max",
-          turns: [
-            { role: "user", text: "turn 3 background" },
-            { role: "assistant", text: "answer 3" },
+          turns: (args.after ?? 0) >= 10 ? [] : [
+            { role: "user", text: "turn 4 hidden" },
+            { role: "assistant", text: "answer 4" },
           ],
           live_turns: [],
         };
@@ -57110,16 +57124,50 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const turn2Occurrences = [...devinChat.querySelectorAll(".helper-turn.is-user")].filter((n) => n.textContent.includes("turn 2 live")).length;
       const answerOccurrences = [...devinChat.querySelectorAll(".helper-turn.is-assistant")].filter((n) => n.textContent.includes("answer 2")).length;
       seen.devinSettledZeroDupes = turn2Occurrences === 1 && answerOccurrences === 1 && devinChat.querySelectorAll(".is-provisional").length === 0;
-      // Turn 3 ends while another tab is in front; the tab coming back reads it.
+      // Turn 3 runs and ends while another tab is in front, for longer than the
+      // page's own follow-up read after a turn (160 ms): nothing has read the
+      // page when the tab comes back — a page at rest is not followed
+      // (`helperPageFollowed`) — and the tab coming back reads it.
       const otherTab = tabOfTerm(term);
       setActiveTab(otherTab.id);
+      await settle(400);
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
       await settle(40);
       devinPhase = "turn3";
       tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
-      await settle(40);
+      await settle(400);
+      const readWhileAway = devinChat?.textContent.includes("answer 3");
       setActiveTab(devinTab.id);
-      await until(() => devinChat?.textContent.includes("answer 3"));
-      seen.devinInactiveTabTurn3 = devinChat?.textContent.includes("turn 3 background") && devinChat?.textContent.includes("answer 3");
+      await until(() => devinChat?.textContent.includes("answer 3"), 3000);
+      seen.devinAwayTabTurn3 = !readWhileAway &&
+        devinChat?.textContent.includes("turn 3 background") && devinChat?.textContent.includes("answer 3");
+      // Turn 4 runs and ends while the window is hidden: the hook's read holds
+      // its turns and draws nothing, nobody looking; the window shown again
+      // draws them at once.
+      const lookAway = (away) => {
+        for (const [key, value] of [["hidden", away], ["visibilityState", away ? "hidden" : "visible"]]) {
+          if (away) Object.defineProperty(document, key, { configurable: true, get: () => value });
+          else delete document[key];
+        }
+        document.dispatchEvent(new Event("visibilitychange"));
+      };
+      lookAway(true);
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      await settle(40);
+      devinPhase = "turn4";
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      await settle(400);
+      const drawnWhileHidden = devinChat?.textContent.includes("answer 4");
+      lookAway(false);
+      await until(() => devinChat?.textContent.includes("answer 4"), 3000);
+      seen.devinHiddenTurn4 = !drawnWhileHidden &&
+        devinChat?.textContent.includes("turn 4 hidden") && devinChat?.textContent.includes("answer 4");
+      // Every finished turn stands, in order, once.
+      const userWords = [...devinChat.querySelectorAll(".helper-turn.is-user")].map((node) => node.textContent);
+      const userAt = ["turn 1", "turn 2 live", "turn 3 background", "turn 4 hidden"]
+        .map((said) => userWords.filter((words) => words.includes(said)).length === 1 ? userWords.findIndex((words) => words.includes(said)) : -1);
+      seen.devinTurnsInOrderOnce = userAt.every((at, i) => at >= 0 && (i === 0 || at > userAt[i - 1]));
+      seen.devinUserWords = userWords;
       window.__ANSWER__.list_agents = baseListAgents;
       if (prevPaneEffort) window.__ANSWER__.pane_effort = prevPaneEffort; else delete window.__ANSWER__.pane_effort;
       agentModelLists.delete(settlingCli);
@@ -57132,19 +57180,27 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "a pane of a CLI that writes its session once a turn has ended (Devin's shape, t-125261) draws the running turn from its hooks, its foot line naming the call still out and its clock ticking, lets those rows go when the document's come — turn 2 once — reads a turn that ended while another tab was in front when the tab comes back, and its chip lists the CLI's own models behind a search field, types `/model <id>` down every CLI's road, and follows the list: a new model stands, a gone one leaves",
+      "a pane of a CLI that writes its session once a turn has ended (Devin's shape, t-125261) draws the running turn from its hooks, its foot line naming the call still out and its clock ticking, lets those rows go when the document's come — turn 2 once — and its chip lists the CLI's own models behind a search field, types `/model <id>` down every CLI's road, and follows the list: a new model stands, a gone one leaves",
       seen.devinMidProvisional === 3 && seen.devinFootActivity.includes("git status") &&
         seen.devinFootClockTicked && seen.devinHasSearch &&
         seen.devinChipNamed === " · Example Family A Max" &&
         seen.devinModelSent === seen.wantDevinModelSent && seen.devinModelRoads === JSON.stringify(["model", null]) &&
         seen.devinListHeldFirst && seen.devinListNewStands && seen.devinListGoneLeaves &&
-        seen.devinSettledZeroDupes && seen.devinInactiveTabTurn3,
+        seen.devinSettledZeroDupes,
       JSON.stringify({
         mid: seen.devinMidProvisional, foot: seen.devinFootActivity, tick: seen.devinFootClockTicked,
         search: seen.devinHasSearch, named: seen.devinChipNamed,
         sent: seen.devinModelSent, roads: seen.devinModelRoads,
         held: seen.devinListHeldFirst, stands: seen.devinListNewStands, leaves: seen.devinListGoneLeaves,
-        zeroDupes: seen.devinSettledZeroDupes, turn3: seen.devinInactiveTabTurn3,
+        zeroDupes: seen.devinSettledZeroDupes,
+      }),
+    );
+    ok(
+      "a pane's finished turns all stand, in order and once (t-125261): one that ran and ended while another tab was in front, for longer than the page's own follow-up read, stands when the tab comes back, and one that ran and ended while the window was hidden stands when it is shown again",
+      seen.devinAwayTabTurn3 && seen.devinHiddenTurn4 && seen.devinTurnsInOrderOnce,
+      JSON.stringify({
+        awayTab: seen.devinAwayTabTurn3, hidden: seen.devinHiddenTurn4,
+        inOrderOnce: seen.devinTurnsInOrderOnce, users: seen.devinUserWords,
       }),
     );
     ok(
