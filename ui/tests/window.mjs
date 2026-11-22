@@ -57194,14 +57194,22 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await settle(40);
       tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
       await until(() => devinChat?.textContent.includes("answer 5"), 3000);
+      // Past the page's own follow-up read after a turn (160 ms): a page at
+      // rest reads nothing by itself, so only the backend's word brings the
+      // late result.
+      await settle(400);
       const lateCall = () => [...devinChat.querySelectorAll(".is-provisional.is-tool")].find((row) => row.textContent.includes("cargo test"));
       const outAtStop = Boolean(lateCall()) && !lateCall().classList.contains("is-done");
       devinPhase = "turn5-late";
+      const pollsBeforeLate = devinPolls;
+      await settle(400);
+      const quietUntilTold = devinPolls === pollsBeforeLate && lateCall()?.classList.contains("is-done") !== true;
       tell("pane:live-turns", { term: devinTerm });
       await until(() => lateCall()?.classList.contains("is-done"), 3000);
       const footLine = devinChat?.querySelector(".helper-status");
       seen.devinLateResult = {
         outAtStop,
+        quietUntilTold,
         joined: lateCall()?.classList.contains("is-done") === true,
         stillDone: hookStates.get(devinTerm) === "done",
         footDown: !footLine || footLine.hidden,
@@ -57244,8 +57252,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       }),
     );
     ok(
-      "a turn whose Stop came before its call's result stays done when the result comes after it (t-125261): the result joins its call on the page, read on the backend's word to the page alone, and the pane's state, spinner and foot line stay as the Stop left them",
-      seen.devinLateResult?.outAtStop && seen.devinLateResult?.joined &&
+      "a turn whose Stop came before its call's result stays done when the result comes after it (t-125261): the result joins its call on the page, read on the backend's word to the page alone — the page at rest reads nothing by itself — and the pane's state, spinner and foot line stay as the Stop left them",
+      seen.devinLateResult?.outAtStop && seen.devinLateResult?.quietUntilTold && seen.devinLateResult?.joined &&
         seen.devinLateResult?.stillDone && seen.devinLateResult?.footDown,
       JSON.stringify(seen.devinLateResult ?? null),
     );
