@@ -197,8 +197,8 @@ impl LiveTurn {
 /// hooks told them — and the document as the page last read it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveTurnBuffer {
-    /// The session these turns are of; a hook or a read of another starts
-    /// afresh.
+    /// The session these turns are of: a hook of another starts afresh, and a
+    /// read of another leaves them be ([`Self::reconcile`]).
     session_id: Option<String>,
     /// The turns remembered, oldest first, at most [`TURNS_KEPT`].
     turns: Vec<LiveTurn>,
