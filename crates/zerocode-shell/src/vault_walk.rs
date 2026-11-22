@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use zerocode_core::usage_stats::WorktreeRef;
 use zerocode_core::vault::{
-    self, ChildTranscript, Home, Limits, ScanCount, ScanIssue, VaultSession,
+    self, AgentSource, ChildTranscript, Home, Limits, ScanCount, ScanIssue, VaultSession,
 };
 use zerocode_core::vault_index::Index;
 
@@ -96,6 +96,8 @@ pub struct Walk {
 /// The sessions no file gives, and what reading them could not do.
 pub type Rows = (Vec<VaultSession>, Vec<ScanIssue>);
 
+type HomeLookup = Box<dyn Fn(&AgentSource) -> Option<PathBuf> + Send>;
+
 /// What a walk needs of the window, owned: the walk runs on its own thread,
 /// and neither the pane roster nor the project catalog crosses one.
 pub struct Sources {
@@ -103,6 +105,8 @@ pub struct Sources {
     pub home: PathBuf,
     /// The window's config root: [`APP_STORE_AGENT`]'s store.
     pub app_home: PathBuf,
+    /// The full sessions directory named by an agent's environment, if any.
+    pub override_home: HomeLookup,
     /// [`kept_file`] of this window's data.
     pub kept_at: PathBuf,
     /// The helpers live panes say they started, read when the ask was made.
@@ -251,6 +255,7 @@ impl Store {
         let Sources {
             home,
             app_home,
+            override_home,
             kept_at,
             roster,
             rows,
@@ -276,7 +281,7 @@ impl Store {
                 },
             ],
             limit,
-            &vault::env_home,
+            override_home.as_ref(),
             &mut reading.index,
         );
         let mut issues = found.issues;
@@ -389,6 +394,7 @@ mod tests {
         Sources {
             home: dir.join("home"),
             app_home: dir.join("app"),
+            override_home: Box::new(|_| None),
             kept_at: kept_file(&dir.join("data")),
             roster: Vec::new(),
             rows: Box::new(|_| {
@@ -416,6 +422,33 @@ mod tests {
 
     fn counter() -> &'static AtomicUsize {
         Box::leak(Box::new(AtomicUsize::new(0)))
+    }
+
+    #[test]
+    fn a_walk_reads_the_session_directory_from_sources() {
+        let dir = tempfile::tempdir().expect("temp");
+        let sessions = dir.path().join("override/sessions");
+        let rollouts = sessions.join("2026/05/31");
+        std::fs::create_dir_all(&rollouts).expect("mkdir");
+        std::fs::write(
+            rollouts.join("rollout-1.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"from-sources","cwd":"/w/fixture","timestamp":"2026-05-31T00:00:00Z"}}"#,
+        )
+        .expect("write");
+
+        let mut sources = sources(dir.path(), counter());
+        sources.override_home =
+            Box::new(move |source| (source.slug == "codex").then(|| sessions.clone()));
+        let store = store();
+        store.answer(false, Some(sources), BUILD);
+        let answer = settled(store);
+        let ids: Vec<_> = answer
+            .walk
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["from-sources"]);
     }
 
     /// The first ask of a run answers at once with nothing and says a walk is

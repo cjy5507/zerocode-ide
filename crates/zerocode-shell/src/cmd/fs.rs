@@ -876,6 +876,7 @@ pub(crate) async fn vault_sessions(
         Some(vault_walk::Sources {
             home,
             app_home: config_root.clone(),
+            override_home: Box::new(zerocode_core::vault::env_home),
             kept_at: vault_walk::kept_file(state.local_data_root()),
             roster: vault_roster_snapshot(&state),
             // OpenCode keeps its sessions in a database rather than in files,
