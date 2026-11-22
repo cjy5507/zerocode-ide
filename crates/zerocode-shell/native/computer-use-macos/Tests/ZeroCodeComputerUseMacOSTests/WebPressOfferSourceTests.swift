@@ -67,7 +67,7 @@ final class WebPressOfferSourceTests: XCTestCase {
 
     func testTheBackgroundConfirmationReadsThePressOfferedByNowAndStillRefusesWithoutOne() throws {
         let source = try helperSource()
-        let confirm = try XCTUnwrap(source.range(of: "func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {"))
+        let confirm = try XCTUnwrap(source.range(of: "func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot, shortcut: (Snapshot) throws -> ShortcutPress?) throws -> String? {"))
         let label = source[confirm.upperBound...].prefix(1_400)
         XCTAssertTrue(label.contains("guard let record = record.map({ offeringItsPress($0, pid: snapshot.app.pid) }),"), String(label))
         XCTAssertTrue(label.contains("ConfirmationTarget.backgroundLabel(role: record.role, actions: record.actions,"), String(label))

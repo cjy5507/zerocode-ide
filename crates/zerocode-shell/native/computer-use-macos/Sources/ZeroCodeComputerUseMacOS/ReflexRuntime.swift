@@ -133,15 +133,21 @@ protocol ReflexRunSource: ReflexFrameSource {
     func end()
 }
 
-/// When a process started (its BSD info), or nil when none runs under that
+/// When a process started, in microseconds, or nil when none runs under that
 /// pid — a zombie included: a pid names one process only while its start
 /// stands.
 enum ProcessStart {
     static func of(_ pid: pid_t) -> UInt64? {
-        var info = proc_bsdinfo()
-        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status != UInt32(SZOMB) else { return nil }
-        return info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec
+        guard pid > 0 else { return nil }
+        var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        let recordSize = MemoryLayout<kinfo_proc>.size
+        var size = recordSize
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0,
+              size == recordSize, info.kp_proc.p_pid == pid, Int32(info.kp_proc.p_stat) != SZOMB else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        guard start.tv_sec > 0, (0..<1_000_000).contains(start.tv_usec) else { return nil }
+        return UInt64(start.tv_sec) &* 1_000_000 &+ UInt64(start.tv_usec)
     }
 }
 

@@ -177,6 +177,18 @@ window-scoped events need a handoff to the person. Do not change the person's
 input setting or substitute a shared-input shell command: only the person can
 enable shared desktop input, in Computer Use settings.
 
+Three more background roads take nothing of the person's. A click on a list's
+row chooses it through the list (with `--modifiers cmd` it is added or taken
+away, with `shift` the run from the one chosen row). `perform-secondary-action`
+goes behind the person too (cancel, confirm, increment…), but not a window's
+raise. Nothing there opens a menu over the person's app: a show menu, and a
+click or press on a pop-up or menu button or on an item with a submenu, answer
+`requires_foreground`. A Command shortcut that is one of the app's own menu items
+presses that item: never the system's or the app menu's (cmd+Q and cmd+H stay
+keys), and two items with one shortcut, or one found in menus too large or
+unreadable to read whole, answer `ambiguous_target`. A menu is read and pressed
+without opening it (`observation.md`, Menus and sheets).
+
 The looks a walk and every other action rely on (the bounds on unchanged looks, `--no-screenshot`, OCR) are in `observation.md`. A walk's answer is read like this:
 
 Use the returned state to plan the next stage; a refused

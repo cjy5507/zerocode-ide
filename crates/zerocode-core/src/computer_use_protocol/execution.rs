@@ -206,6 +206,7 @@ pub const METHODS: &[&str] = &[
     "findElements",
     "waitFor",
     "click",
+    "performSecondaryAction",
     "setValue",
     "scroll",
     "typeText",
@@ -440,6 +441,46 @@ mod tests {
         assert!(asked.params.get(MAY_BORROW_DESKTOP).is_none());
     }
 
+    /// An app's own action on one of its controls — closing the menu it
+    /// opened, confirming a field, stepping a value — takes nothing of the
+    /// person's: it goes to its window under either policy, and the helper
+    /// refuses the actions that raise a window or open a menu (t-125705).
+    #[test]
+    fn an_apps_own_action_on_its_control_stays_in_its_window_under_either_policy() {
+        let words = [
+            "perform-secondary-action",
+            "--app",
+            "Fixture",
+            "--element-index",
+            "1",
+            "--action",
+            "cancel",
+        ];
+        let mut background = command(&words);
+        InputPolicy::Background.prepare(&mut background).unwrap();
+        assert_eq!(background.params[BACKGROUND], true);
+        let mut shared = command(&words);
+        prepare_shared(&mut shared, true).unwrap();
+        assert_eq!(shared.params[BACKGROUND], true);
+        assert!(shared.params.get(MAY_BORROW_DESKTOP).is_none());
+        // Asked of the desktop, it goes there as it did.
+        let mut said = command(&[&words[..], &["--foreground"]].concat());
+        let before = said.params.clone();
+        prepare_shared(&mut said, true).unwrap();
+        assert_eq!(said.params, before);
+        assert!(said.params.get(BACKGROUND).is_none());
+        // It names its app, as every act in one app's window does.
+        assert!(
+            crate::computer_use::parse_command(
+                &[words[0], words[3], words[4], words[5], words[6]]
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn nothing_takes_the_desktop_unless_the_call_says_so() {
         for words in [
@@ -454,15 +495,6 @@ mod tests {
             vec!["activate", "--app", "Fixture"],
             vec!["hold-key", "--key", "shift", "--ms", "10"],
             vec!["clipboard-write", "--text", "x"],
-            vec![
-                "perform-secondary-action",
-                "--app",
-                "Fixture",
-                "--element-index",
-                "1",
-                "--action",
-                "AXRaise",
-            ],
         ] {
             let error = prepare_shared(&mut command(&words), true).unwrap_err();
             assert_eq!(error.code, REQUIRES_FOREGROUND, "{words:?}");

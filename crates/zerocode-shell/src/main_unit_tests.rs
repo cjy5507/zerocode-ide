@@ -24325,6 +24325,76 @@ pub(crate) mod computer_desktop_wait {
         );
     }
 
+    /// t-125705 R1: the retry carries the helper's opaque binding. The
+    /// person sees the menu title and never sees the binding.
+    #[test]
+    fn an_allowed_press_goes_again_with_the_target_the_person_was_asked_about() {
+        use crate::agent_tools_runtime::call_with_confirmation_asker;
+        use crate::computer_use::confirm::{self, Asking, Decision};
+        use zerocode_core::computer_use_protocol::error_code;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        confirm::set_policy(confirm::Policy::default());
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        let shortcut = zerocode_core::computer_use::parse_command(&words(&[
+            "hotkey",
+            "--app",
+            "Finder",
+            "--key",
+            "cmd+shift+t",
+        ]))
+        .expect("a shortcut");
+        let mut sent: Vec<serde_json::Value> = Vec::new();
+        let mut asked: Vec<String> = Vec::new();
+        let answered = call_with_confirmation_asker(
+            &shortcut,
+            Asking::Person,
+            &mut |_, params| {
+                sent.push(params);
+                if sent.len() == 1 {
+                    let refusal = crate::computer_use::ComputerUseError::new(
+                        error_code::CONFIRMATION_REQUIRED,
+                        "delete: Empty Trash",
+                    );
+                    #[cfg(target_os = "macos")]
+                    let refusal = {
+                        let mut refusal = refusal;
+                        refusal.confirmation_token = Some("test-binding".to_string());
+                        refusal
+                    };
+                    Err(refusal)
+                } else {
+                    Ok(serde_json::json!({}))
+                }
+            },
+            &mut |_, label, _| {
+                asked.push(label.to_string());
+                Decision::Allowed
+            },
+        );
+        assert!(answered.is_ok(), "{answered:?}");
+        assert_eq!(asked, ["Empty Trash"]);
+        assert_eq!(sent.len(), 2, "asked once, sent again once");
+        assert!(
+            sent[0].get("confirmedTarget").is_none(),
+            "nothing is allowed before the person is asked"
+        );
+        assert!(sent[0].get("pressApproval").is_none());
+        assert_eq!(sent[1]["confirmed"], true);
+        #[cfg(target_os = "macos")]
+        assert_eq!(sent[1]["pressApproval"], "test-binding");
+        assert_eq!(
+            sent[1]["confirmedTarget"], "Empty Trash",
+            "the press goes again bound to what the person allowed"
+        );
+        assert!(sent[1].get("confirmGuard").is_none());
+    }
+
     /// t-37883: a click by the words a mirrored phone shows reads the app's
     /// window once, presses the chosen line's centre (nudged) as a click at a
     /// point, and declares a payment its words name — handed back unpressed

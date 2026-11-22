@@ -238,19 +238,22 @@ impl Wire {
             return Ok(response.get_mut("result").map_or(Value::Null, Value::take));
         }
         let error = response.get("error").unwrap_or(&Value::Null);
-        Err(SessionFailure::Provider(
-            ComputerUseError::new(
-                error
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .unwrap_or(error_code::ACCESSIBILITY_ERROR),
-                error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Computer Use helper refused the request"),
-            )
-            .with_delivery(error.get("delivery").and_then(Value::as_str)),
-        ))
+        let mut refusal = ComputerUseError::new(
+            error
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or(error_code::ACCESSIBILITY_ERROR),
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Computer Use helper refused the request"),
+        )
+        .with_delivery(error.get("delivery").and_then(Value::as_str));
+        refusal.confirmation_token = error
+            .get("confirmationToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Err(SessionFailure::Provider(refusal))
     }
 }
 

@@ -32,6 +32,7 @@ public final class ElementIdentityBook<Element> {
     private struct Entry {
         let element: Element
         let number: Int
+        let surfaceWindow: Element?
         var root: String
         var lastSeenWalk: UInt64
     }
@@ -67,22 +68,30 @@ public final class ElementIdentityBook<Element> {
 
     /// The element's number, given a new one when the book has not met it.
     /// `root` names the window or surface being walked.
-    public func number(for element: Element, root: String) -> Int {
+    public func number(for element: Element, root: String, surfaceWindow: Element? = nil) -> Int {
         let key = hash(element)
-        if let at = buckets[key]?.firstIndex(where: { equal($0.element, element) }) {
+        if let at = buckets[key]?.firstIndex(where: { entry in
+            guard equal(entry.element, element) else { return false }
+            switch (entry.surfaceWindow, surfaceWindow) {
+            case (nil, nil): return true
+            case let (old?, new?): return equal(old, new)
+            default: return false
+            }
+        }) {
             buckets[key]?[at].root = root
             buckets[key]?[at].lastSeenWalk = walk
             return buckets[key]?[at].number ?? 0
         }
         let number = numbers.take()
-        buckets[key, default: []].append(Entry(element: element, number: number, root: root, lastSeenWalk: walk))
+        buckets[key, default: []].append(Entry(element: element, number: number, surfaceWindow: surfaceWindow, root: root, lastSeenWalk: walk))
         count += 1
         return number
     }
 
     /// The number the book already gave `element`, without giving a new one.
     public func existingNumber(for element: Element) -> Int? {
-        buckets[hash(element)]?.first(where: { equal($0.element, element) })?.number
+        let matches = buckets[hash(element)]?.filter { equal($0.element, element) } ?? []
+        return matches.first(where: { $0.surfaceWindow == nil })?.number ?? (matches.count == 1 ? matches.first?.number : nil)
     }
 
     /// End a complete walk of `root`: its elements this walk did not see are

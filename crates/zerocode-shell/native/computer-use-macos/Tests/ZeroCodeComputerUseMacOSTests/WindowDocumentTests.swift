@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import XCTest
 @testable import ZeroCodeComputerUseMacOS
 
@@ -30,6 +31,7 @@ final class WindowDocumentTests: XCTestCase {
             id: "fixture-\(id)",
             app: AppDescriptor(name: "Fixture", bundleId: "dev.zerocode.fixture", pid: getpid(), app: .current),
             windowTitle: title,
+            axWindow: AXUIElementCreateApplication(getpid()),
             windowBounds: CGRect(x: 40, y: 60, width: 800, height: 600),
             windowId: id,
             windowLayer: 0,

@@ -7992,10 +7992,17 @@ pub(super) fn call_with_confirmation_asker(
         Err(error)
             if error.code == error_code::CONFIRMATION_REQUIRED && asking == Asking::Person =>
         {
-            let (kind, label) = parse_confirmation_required(&error.message).ok_or(error)?;
+            let Some((kind, label)) = parse_confirmation_required(&error.message) else {
+                return Err(error);
+            };
             match ask(kind, &label, verb.verb_name()) {
                 Decision::Allowed => {
                     params["confirmed"] = serde_json::Value::Bool(true);
+                    params["confirmedTarget"] = serde_json::Value::String(label);
+                    #[cfg(target_os = "macos")]
+                    if let Some(token) = error.confirmation_token {
+                        params["pressApproval"] = serde_json::Value::String(token);
+                    }
                     if let Some(object) = params.as_object_mut() {
                         object.remove("confirmGuard");
                     }

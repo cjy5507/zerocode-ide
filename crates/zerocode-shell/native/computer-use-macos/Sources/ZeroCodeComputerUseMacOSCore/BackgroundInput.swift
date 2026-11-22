@@ -17,9 +17,34 @@ public enum BackgroundInput {
     }
 
     public static let methods: Set<String> = [
-        "getAppState", "readText", "findElements", "waitFor", "click", "setValue", "scroll",
+        "getAppState", "readText", "findElements", "waitFor", "click", "performSecondaryAction", "setValue", "scroll",
         "typeText", "pressKey", "hotkey", "pasteText", "launchApp", "openTarget",
     ]
+
+    /// Why a copy, cut or paste chord is refused behind the person: the
+    /// clipboard is theirs. A window key and a shortcut's menu item alike
+    /// (t-125705 R5).
+    public static let clipboardWords = "background keys never use the shared clipboard; pass text directly instead"
+
+    /// The app's own actions that still take the person's screen: a window
+    /// raised over theirs, a menu opened over their app — which takes their
+    /// keyboard focus while it is open.
+    public static let deskActions: Set<String> = ["AXRaise", "AXShowMenu"]
+
+    /// Whether an app's own action on one of its controls goes behind the
+    /// person: any it offers but the ones that take their screen.
+    public static func secondaryActionStaysInItsWindow(_ action: String) -> Bool {
+        !deskActions.contains(action)
+    }
+
+    /// The advertised action a caller names, by its raw name or the name a
+    /// look shows for it; nil when the control offers no such action.
+    public static func secondaryAction(_ requested: String, among actions: [String]) -> String? {
+        actions.first {
+            SnapshotRenderHeuristics.prettyAction($0).caseInsensitiveCompare(requested) == .orderedSame
+                || $0.caseInsensitiveCompare(requested) == .orderedSame
+        }
+    }
 
     public enum Refusal: String, Error {
         case requiresForeground = "requires_foreground"

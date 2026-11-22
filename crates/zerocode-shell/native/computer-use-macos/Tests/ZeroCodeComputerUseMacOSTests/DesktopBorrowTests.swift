@@ -421,13 +421,17 @@ final class DesktopBorrowTests: XCTestCase {
 
     /// The person is asked at the last moment nothing has gone yet, whichever road
     /// goes first and after any window a verb raises on its way there: everything
-    /// that says a request sent something says so right after asking.
+    /// that says a request sent something asks first. The AX roads may then
+    /// recheck the target and the foreground immediately before sending.
     func testEverythingThatMarksARequestSentAsksThePersonFirst() throws {
         let lines = try helperSource().components(separatedBy: .newlines)
         var marks = 0
         for (at, line) in lines.enumerated() where line.contains(".sent = true") {
             marks += 1
-            XCTAssertTrue(lines[at - 1].contains("askThePersonIfFirst()"), "line \(at + 1) of main.swift: \(line)")
+            let previous = lines[at - 1].trimmingCharacters(in: .whitespaces)
+            let finalAXCheck = previous == "try beforeSend()" || previous == "try requireSameRow()"
+            let ask = lines[at - (finalAXCheck ? 2 : 1)]
+            XCTAssertTrue(ask.contains("askThePersonIfFirst()"), "line \(at + 1) of main.swift: \(line)")
         }
         XCTAssertGreaterThanOrEqual(marks, 5)
     }

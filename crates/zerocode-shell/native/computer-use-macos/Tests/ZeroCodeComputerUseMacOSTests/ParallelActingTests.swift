@@ -324,10 +324,13 @@ final class ActionDeliveryTests: XCTestCase {
         let main = here.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/ZeroCodeComputerUseMacOS/main.swift")
         let source = try String(contentsOf: main, encoding: .utf8)
-        XCTAssertEqual(source.components(separatedBy: "try inView(").count - 1, 4)
-        let road = try XCTUnwrap(source.range(of: "private func inView(_ record: ElementRecord, in snapshot: Snapshot) throws -> ElementRecord {"))
+        XCTAssertEqual(
+            source.components(separatedBy: "try inView(").count - 1, 5,
+            "a click in front and behind, a written value, and an app's own action in front and behind (t-125705)"
+        )
+        let road = try XCTUnwrap(source.range(of: "private func inView(_ record: ElementRecord, in snapshot: Snapshot, beforeSend: () throws -> Void"))
         let body = source[road.upperBound...].prefix(2400)
-        XCTAssertTrue(body.contains("guard try performActionChecked(record.element, Self.scrollToVisibleAction) else {"))
+        XCTAssertTrue(body.contains("guard try performActionChecked(record.element, Self.scrollToVisibleAction, beforeSend: beforeSend) else {"))
         // One that offered the scroll and did not take it is refused, never pressed where it is.
         XCTAssertTrue(body.contains("did not scroll into view when asked; nothing was pressed"))
         XCTAssertTrue(body.contains("try OperatorHandHost.sleep("))

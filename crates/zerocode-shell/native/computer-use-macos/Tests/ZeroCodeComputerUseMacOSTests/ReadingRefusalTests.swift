@@ -200,7 +200,7 @@ final class ReadingRefusalSourceTests: XCTestCase {
 
     func testTheBackgroundConfirmationSaysWhereToLookAndStillRefuses() throws {
         let source = try helperSource()
-        let confirm = try XCTUnwrap(source.range(of: "func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {"))
+        let confirm = try XCTUnwrap(source.range(of: "func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot, shortcut: (Snapshot) throws -> ShortcutPress?) throws -> String? {"))
         let label = source[confirm.upperBound...].prefix(1_400)
         XCTAssertTrue(label.contains("let why = record == nil ? unreadablePoint(point, in: snapshot) : .notAControl"), String(label))
         XCTAssertTrue(label.contains("throw ProviderError.coded(\"element_not_found\", ReadingRefusal.backgroundTarget(why))"), String(label))

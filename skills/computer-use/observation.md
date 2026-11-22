@@ -105,6 +105,14 @@ still need the normal screenshot-analysis fallback; do not guess a target.
   `--surface menu` the open menu or context menu, `--surface sheet` a sheet. Press
   their items by number: an item's action needs no pointer. `surfaces` in an act's
   answer names a menu or dialog that opened, which a look at the window would not.
+  Behind the person a menu is read without opening it: after `--surface menubar`,
+  `--root <a menu's number>` reads that menu's items closed (an item with a
+  submenu the same way), and an item is pressed by its number. Pressing the menu
+  bar item itself is refused there, as the menu would open over the person's app
+  and take their keyboard; so is an item macOS keeps disabled while the app is
+  behind (`requires_foreground`), and one the app would send to another of its
+  windows (`focus_changed`). Close an open menu with `perform-secondary-action
+  --action cancel` on it.
 - **Marks — point by number** (`observe --marks`): the look numbers the
   controls of one window on its picture (the named app's window, or the
   frontmost document window that is not ZeroCode's) and answers `marks:

@@ -86,9 +86,24 @@ pub const TRANSFER_WORDS: &[&str] = &[
     "depositar",
 ];
 
-/// Words a control carries when pressing it makes something vanish.
+/// Words a control carries when pressing it makes something vanish — the
+/// Trash's too (t-125705 R8: Finder's "Empty Trash" pressed behind the person
+/// asked nobody), so a move to the Trash, which can be undone, asks as well.
 pub const DELETE_WORDS: &[&str] = &[
-    "삭제", "제거", "delete", "remove", "erase", "削除", "删除", "eliminar", "borrar",
+    "삭제",
+    "제거",
+    "휴지통",
+    "delete",
+    "remove",
+    "erase",
+    "trash",
+    "削除",
+    "ゴミ箱",
+    "删除",
+    "废纸篓",
+    "eliminar",
+    "borrar",
+    "papelera",
 ];
 
 /// Words a control carries when pressing it sends, submits or settles

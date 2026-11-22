@@ -328,6 +328,10 @@ pub struct ProviderError {
     /// not repeat an act that may have landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<String>,
+    /// The macOS helper's single-use binding for an automatic approval retry.
+    #[cfg(target_os = "macos")]
+    #[serde(skip)]
+    pub confirmation_token: Option<String>,
 }
 
 impl ProviderError {
@@ -336,6 +340,8 @@ impl ProviderError {
             code: code.into(),
             message: message.into(),
             delivery: None,
+            #[cfg(target_os = "macos")]
+            confirmation_token: None,
         }
     }
 

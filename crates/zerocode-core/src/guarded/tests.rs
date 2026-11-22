@@ -42,6 +42,27 @@ fn a_control_that_pays_deletes_or_sends_is_destructive_and_the_rest_is_plain() {
     );
 }
 
+/// t-125705 R8: emptying the Trash — Finder's menu item, in the five
+/// languages the window speaks — is a delete the person is asked about, a
+/// press behind them too; a move to the Trash asks as well, though it can be
+/// undone.
+#[test]
+fn emptying_the_trash_is_a_delete_in_every_language_the_window_speaks() {
+    for label in [
+        "휴지통 비우기",
+        "Empty Trash",
+        "ゴミ箱を空にする",
+        "清倒废纸篓",
+        "Vaciar la papelera",
+        "휴지통으로 이동",
+        "Move to Trash",
+    ] {
+        assert_eq!(confirm_kind_of(label), Some(ConfirmKind::Delete), "{label}");
+        assert_eq!(kind_of(label), ControlKind::Destructive, "{label}");
+    }
+    assert_eq!(confirm_kind_of("Put Back"), None);
+}
+
 /// One table: every word the confirmation gate asks a person about is a
 /// destructive control to a walk, and the commit row the walk adds never
 /// makes the gate ask — a send or a submit asks nobody today, as before.

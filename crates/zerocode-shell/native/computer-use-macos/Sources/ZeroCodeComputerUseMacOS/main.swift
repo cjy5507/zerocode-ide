@@ -63,17 +63,31 @@ enum JSONValue: Decodable {
 
 enum ProviderError: Error {
     case coded(String, String)
+    case confirmation(String, token: String)
+    case backgroundRefusal(String, String)
+
+    var mayBorrowDesktop: Bool {
+        if case .coded = self { return true }
+        return false
+    }
 
     var code: String {
         switch self {
-        case let .coded(code, _):
+        case let .coded(code, _), let .backgroundRefusal(code, _):
             return code
+        case .confirmation:
+            return "confirmation_required"
         }
+    }
+
+    var confirmationToken: String? {
+        if case let .confirmation(_, token) = self { return token }
+        return nil
     }
 
     var message: String {
         switch self {
-        case let .coded(_, message):
+        case let .coded(_, message), let .confirmation(message, _), let .backgroundRefusal(_, message):
             return message
         }
     }
@@ -85,6 +99,8 @@ enum ProviderError: Error {
 final class RequestContext {
     /// Whether anything reached the app. A refusal after this may have landed.
     var sent = false
+    var checkedPress: PressCertainty.Target<AXUIElement>?
+    var checkedSecondaryAction: String?
     /// The agent the window says this request is for: whose pointer it draws.
     var agent: String?
     /// Whether the person's setting lets this request borrow the shared desktop
@@ -133,6 +149,26 @@ final class RequestContext {
     }
 }
 
+protocol PressApplicationFacts {
+    var processIdentifier: pid_t { get }
+    var isTerminated: Bool { get }
+    var bundleURL: URL? { get }
+    var executableURL: URL? { get }
+}
+
+extension NSRunningApplication: PressApplicationFacts {}
+
+func pressApplicationInstance(
+    _ app: some PressApplicationFacts, started: (pid_t) -> UInt64? = ProcessStart.of
+) -> PressCertainty.ApplicationInstance? {
+    let pid = app.processIdentifier
+    // LaunchServices has no launch date for some apps. Read the same kernel
+    // clock for every app, each time the approval target is checked.
+    guard pid > 0, let location = app.bundleURL ?? app.executableURL,
+          let start = started(pid), start > 0, !app.isTerminated else { return nil }
+    return PressCertainty.ApplicationInstance(pid: pid, started: start, location: location)
+}
+
 struct AppDescriptor {
     let name: String
     let bundleId: String?
@@ -147,6 +183,14 @@ struct AppDescriptor {
             info: app.bundleURL.flatMap { Bundle(url: $0) }?.infoDictionary,
             executableURL: app.executableURL
         )
+    }
+
+    func pressTarget(
+        window: AXUIElement, item: AXUIElement, defaultButton: AXUIElement?, label: String
+    ) -> PressCertainty.Target<AXUIElement>? {
+        guard let application = pressApplicationInstance(app), application.pid == pid else { return nil }
+        return PressCertainty.Target(application: application, window: window, item: item,
+                                     defaultButton: defaultButton, label: label)
     }
 
     var needsManualAccessibilityMode: Bool {
@@ -221,6 +265,8 @@ final class ElementRecord {
     /// Whether it lives on a menu or the menu bar, which no window holds: nothing
     /// is on top of it, and it is pressed only by its accessibility action.
     let onSurface: Bool
+    /// The AX window selected when this element was read.
+    let observedWindow: AXUIElement?
 
     init(
         index: Int,
@@ -240,7 +286,8 @@ final class ElementRecord {
         title: String? = nil,
         label: String? = nil,
         value: String? = nil,
-        onSurface: Bool = false
+        onSurface: Bool = false,
+        observedWindow: AXUIElement? = nil
     ) {
         self.index = index
         self.element = element
@@ -260,6 +307,7 @@ final class ElementRecord {
         self.label = label
         self.value = value
         self.onSurface = onSurface
+        self.observedWindow = observedWindow
     }
 
     /// The words a mark's pin holds to: the name, else the placeholder.
@@ -272,7 +320,7 @@ final class ElementRecord {
             index: index, element: element, localFrame: frame ?? localFrame, actions: actions, signature: signature,
             role: role, name: name, placeholder: placeholder, plainInput: plainInput, traits: traits,
             visible: moved ? frame : visible, context: context, contextOwner: contextOwner, line: line,
-            title: title, label: label, value: value, onSurface: onSurface
+            title: title, label: label, value: value, onSurface: onSurface, observedWindow: observedWindow
         )
     }
 }
@@ -281,6 +329,7 @@ struct Snapshot {
     let id: String
     let app: AppDescriptor
     let windowTitle: String
+    let axWindow: AXUIElement
     let windowBounds: CGRect
     let windowId: CGWindowID
     let windowLayer: Int
@@ -311,6 +360,7 @@ struct Snapshot {
             id: id,
             app: app,
             windowTitle: windowTitle,
+            axWindow: axWindow,
             windowBounds: windowBounds,
             windowId: windowId,
             windowLayer: windowLayer,
@@ -337,6 +387,7 @@ struct Snapshot {
             id: id,
             app: app,
             windowTitle: windowTitle,
+            axWindow: axWindow,
             windowBounds: bounds,
             windowId: windowId,
             windowLayer: windowLayer,
@@ -436,6 +487,15 @@ private struct CachedSnapshotEntry {
 }
 
 final class Provider {
+    private struct PressApproval {
+        let token: String
+        let target: PressCertainty.Target<AXUIElement>
+        let method: String
+        let agent: String?
+        let createdAt: Date
+    }
+
+    private var pressApprovals: [PressApproval] = []
     private var snapshots: [String: Snapshot] = [:]
     private var snapshotEntries: [CachedSnapshotEntry] = []
     /// Guards everything here that lanes share. Held only to read or write the
@@ -567,7 +627,7 @@ final class Provider {
         do {
             return try act(method: method, params: params, scoped: background)
         } catch let error as ProviderError where background && RequestContext.current.mayBorrowDesktop
-            && !RequestContext.current.sent && BackgroundInput.foregroundMayTakeOver(method: method, refusal: error.code) {
+            && error.mayBorrowDesktop && !RequestContext.current.sent && BackgroundInput.foregroundMayTakeOver(method: method, refusal: error.code) {
             // The background road cannot do this one. The person's setting lets
             // the agent borrow the pointer and the keyboard, so it does, and
             // gives them back when it is done.
@@ -726,18 +786,46 @@ final class Provider {
         var dispatchSnapshot: Snapshot?
         func snapshotForDispatch() throws -> Snapshot {
             if let snapshot = dispatchSnapshot { return snapshot }
-            let snapshot = try currentSnapshot(params: params)
+            let snapshot = try method == "hotkey" ? currentKeyboardSnapshot(params: params) : currentSnapshot(params: params)
             dispatchSnapshot = snapshot
             return snapshot
         }
-        // The last step (§1.5): a press that lands on a payment, transfer or
-        // delete control is held for the person unless the window already
-        // carries their answer.
-        if params["confirmed"]?.bool != true,
-           let words = confirmGuardWords(params["confirmGuard"]),
-           let target = try confirmTarget(method: method, params: params, snapshot: snapshotForDispatch),
-           let kind = confirmKind(of: target, words: words) {
-            throw ProviderError.coded("confirmation_required", "\(kind): \(target)")
+        // The guard and the action use the same menu item and observation.
+        var dispatchShortcut: (found: Bool, item: ShortcutPress?) = (false, nil)
+        func shortcutForDispatch(_ snapshot: Snapshot) throws -> ShortcutPress? {
+            if dispatchShortcut.found { return dispatchShortcut.item }
+            let item = try menuShortcutItem(params, snapshot: snapshot)
+            dispatchShortcut = (true, item)
+            return item
+        }
+        let context = RequestContext.current
+        if let token = params["pressApproval"]?.string {
+            try validatePressApproval(token, method: method, params: params, snapshot: snapshotForDispatch, shortcut: shortcutForDispatch)
+        } else if params["confirmed"]?.bool == true, params["confirmedTarget"]?.string != nil,
+                  params["background"]?.bool == true,
+                  method == "click" || method == "performSecondaryAction"
+                      || (method == "hotkey" && params["key"]?.string.flatMap({ menuShortcut($0) }) != nil) {
+            // An automatic approval without an identity cannot be redeemed.
+            throw pressRefusal(.targetChanged, title: params["confirmedTarget"]?.string)
+        } else if params["confirmed"]?.bool != true,
+                  let words = confirmGuardWords(params["confirmGuard"]),
+                  let target = try confirmTarget(method: method, params: params, snapshot: snapshotForDispatch, shortcut: shortcutForDispatch),
+                  let kind = confirmKind(of: target, words: words) {
+            let message = "\(kind): \(target)"
+            if let checked = context.checkedPress {
+                let approval = PressApproval(token: UUID().uuidString, target: checked,
+                                             method: method, agent: context.agent, createdAt: Date())
+                cacheLock.lock()
+                while let oldest = pressApprovals.first,
+                      ComputerSnapshotCachePolicy.shouldPrune(entryCount: pressApprovals.count + 1,
+                                                              createdAt: oldest.createdAt, now: approval.createdAt) {
+                    pressApprovals.removeFirst()
+                }
+                pressApprovals.append(approval)
+                cacheLock.unlock()
+                throw ProviderError.confirmation(message, token: approval.token)
+            }
+            throw ProviderError.coded("confirmation_required", message)
         }
         try ShareControlPanel.refuseInput(method: method, params: params)
         if params["allowSelf"]?.bool != true {
@@ -824,7 +912,7 @@ final class Provider {
         case "pressKey":
             return try actionResult(params: params) { try pressKey(params: params) }
         case "hotkey":
-            return try actionResult(params: params) { try hotkey(params: params) }
+            return try actionResult(params: params) { try hotkey(params: params, shortcut: shortcutForDispatch, snapshot: snapshotForDispatch) }
         case "pasteText":
             return try actionResult(params: params) { try pasteText(params: params) }
         case "scroll":
@@ -1034,7 +1122,10 @@ final class Provider {
         if params["background"]?.bool == true, let before { showPointerForKeys(params: params, look: before) }
         func settleDelivery(effectSeen: Bool) {
             let verified = (action["verification"] as? [String: Any])?["state"] as? String == "verified"
-            let delivery = ActionDelivery.finished(readBackVerified: verified, effectSeen: effectSeen)
+            let name = action["actionName"] as? String
+            let delivery = ActionDelivery.finished(
+                readBackVerified: verified, effectSeen: effectSeen, requiresReadBack: name == "AXSelectedRows" || name == "AXSelected"
+            )
             action["delivery"] = delivery.rawValue
             action["retry"] = delivery.retry
         }
@@ -1381,6 +1472,9 @@ final class Provider {
               !cached.app.app.isTerminated,
               let record = cached.elements[index] ?? knownRecord(pid: cached.app.pid, index: index)
         else { return }
+        // Menu commands have no actionable wait. The same eligibility
+        // check runs with or without a cached window before dispatch can ask.
+        if params["background"]?.bool == true, MenuBarCommand.menuOwnerRoles.contains(record.role) { return }
         if method == "click" { waitForWebPress(record, pid: cached.app.pid) }
         let waitMs = min(try optionalInteger(params, "timeoutMs") ?? Actionability.defaultWaitMs, Actionability.longestWaitMs)
         let giveUp = Date().addingTimeInterval(TimeInterval(waitMs) / 1_000)
@@ -1971,21 +2065,32 @@ final class Provider {
         let book = book(for: app.pid)
         let startsAt: AXUIElement
         let rootKey: String
+        // What a look below a surface reads stands on that surface too: a
+        // menu bar item's menu is no part of the window (t-125705).
+        let onSurface: Bool
         if let surface = shape.surface {
             guard let root = surfaceRoot(surface, appElement: appElement, window: window) else {
                 throw ProviderError.coded("surface_not_open", "\(app.name) has no open \(surface); open it, then look again")
             }
             startsAt = root
-            rootKey = "surface:\(surface)"
+            rootKey = LookRoot.surface(surface, window: capture.windowId)
+            onSurface = true
         } else if let rootIndex = shape.root {
             guard let record = knownRecord(pid: app.pid, index: rootIndex) else {
                 throw ProviderError.coded("element_not_found", "element \(rootIndex) is gone; look at the window again")
             }
+            if record.onSurface, record.observedWindow.map({ CFEqual($0, window) }) != true {
+                throw pressRefusal(.observedWindowChanged, app: app.name, title: record.title)
+            }
             startsAt = record.element
-            rootKey = "window:\(capture.windowId)"
+            // A menu read closed is filed under its own root: a later look at
+            // the whole window never meets it, and must not forget its numbers.
+            rootKey = LookRoot.below(rootIndex, onSurface: record.onSurface, window: capture.windowId)
+            onSurface = record.onSurface
         } else {
             startsAt = window
-            rootKey = "window:\(capture.windowId)"
+            rootKey = LookRoot.window(capture.windowId)
+            onSurface = false
         }
         // A web tree switched on moments ago may not stand yet: the whole
         // window's look reads again while it shows only its frame.
@@ -2003,7 +2108,8 @@ final class Provider {
                     compactBrowserTabs: app.isKnownBrowser,
                     book: book,
                     rootKey: rootKey,
-                    onSurface: shape.surface != nil,
+                    onSurface: onSurface,
+                    observedWindow: window,
                     maxDepth: shape.maxDepth,
                     deadline: Date().addingTimeInterval(LookShape.walkBudgetSeconds)
                 )
@@ -2017,7 +2123,9 @@ final class Provider {
             stopped: { OperatorGuardHost.isStopped() }
         )
         let renderer = settled.look
-        let treeLines = settled.building ? renderer.lines + ["", WebTreeSettling.buildingLine(app: app.name)] : renderer.lines
+        let walked = settled.building ? renderer.lines + ["", WebTreeSettling.buildingLine(app: app.name)] : renderer.lines
+        // A look at the menu bar says how its menus are read without opening them.
+        let treeLines = shape.surface == "menubar" ? walked + ["", MenuBarCommand.readingLine(app: app.name)] : walked
         // What tells this window from another of its title (t-69973): its
         // own document — the one read a look adds — else the page its first
         // web area showed the walk above.
@@ -2041,6 +2149,7 @@ final class Provider {
             id: UUID().uuidString,
             app: app,
             windowTitle: title,
+            axWindow: window,
             windowBounds: capture.bounds,
             windowId: capture.windowId,
             windowLayer: capture.layer,
@@ -2162,7 +2271,8 @@ final class Provider {
         let modifiers = try KeyMap.parseModifiers(params["modifiers"]?.string)
         if params["background"]?.bool == true {
             // In front of the person only the app's own press goes: decided below, once the control is known.
-            let inFront = try backgroundTargetIsInFront(snapshot)
+            let person = try personBeforeBackgroundPress()
+            let inFront = person.foreground == snapshot.app.pid
             let plainLeftClick = modifiers.isEmpty && count == 1 && button == .left
             if let requested = params["ocrPin"] {
                 try validatePixelTarget(requested, snapshot: snapshot)
@@ -2177,29 +2287,28 @@ final class Provider {
             let found = try (index.map { try element(snapshot, $0) }
                 ?? requestedPoint.flatMap { backgroundClickRecord(at: $0, in: snapshot) })
                 .map { offeringItsPress($0, pid: snapshot.app.pid) }
+            try requireCheckedPressElement(found?.element, in: snapshot)
+            if let found { try requireMenuEnabled(found.element, role: found.role, action: "AXPress", app: snapshot.app.name) }
             if inFront {
                 let textEntry = found.map { MarkPin.textEntryRoles.contains($0.role) } ?? false
                 let own = found.flatMap { BackgroundInput.clickAction(actions: $0.actions, textEntry: textEntry, plainLeftClick: plainLeftClick) }
                 guard BackgroundInput.pressesInFront(action: own, textEntry: textEntry) else { throw backgroundTargetInUse() }
                 try standBackInTheirApp()
             }
-            let record = try found.map { try inView($0, in: snapshot) }
+            let record = try found.map { found in
+                try inView(found, in: snapshot) {
+                    try requireBackgroundPress("AXPress", on: found.element, expectedRole: found.role,
+                                               readFor: found.observedWindow, onSurface: found.onSurface,
+                                               in: snapshot, person: person)
+                }
+            }
             if let record,
                let action = BackgroundInput.clickAction(
                    actions: record.actions,
                    textEntry: MarkPin.textEntryRoles.contains(record.role),
                    plainLeftClick: plainLeftClick
                ) {
-                try requireReachable(record, in: snapshot, at: requestedPoint)
-                var shown: PointerArrival?
-                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
-                    shown = try travel(to: point, in: snapshot)
-                }
-                guard try performActionChecked(record.element, action) else {
-                    throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
-                }
-                BackgroundPointerOverlay.pressed(shown, agent: RequestContext.current.agent)
-                return actionMetadata(path: "accessibility", actionName: action)
+                return try backgroundAppAction(action, on: record, in: snapshot, person: person, at: requestedPoint)
             }
             // Pressing a field is asking for its focus, and a web view ignores events
             // sent to a window that is not key.
@@ -2215,6 +2324,17 @@ final class Provider {
                 BackgroundPointerOverlay.pressed(shownAtField, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: "AXFocused")
             }
+            // A row a click chooses is chosen through its list (t-125705).
+            if let record, let chosen = try backgroundSelection(record, modifiers: modifiers, count: count, button: button, in: snapshot, person: person, at: requestedPoint) {
+                return chosen
+            }
+            // A window click opens a menu from such a control all the same (t-125705 R3).
+            if let record {
+                try requireClosedCommand("AXPress", on: record.element, role: record.role, app: snapshot.app.name, index: record.index)
+                if record.onSurface || record.role == kAXMenuItemRole as String {
+                    throw ProviderError.coded("not_actionable", "element \(record.index) requires its own accessibility action; nothing was sent")
+                }
+            }
             let point: CGPoint
             if let requestedPoint {
                 point = requestedPoint
@@ -2229,7 +2349,10 @@ final class Provider {
             let shown = try travel(to: point, in: snapshot)
             try Input.windowClick(at: point, button: button, count: count, modifiers: modifiers, snapshot: snapshot) {
                 try self.requireBackgroundWindow(snapshot, at: point)
-                if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
+                if let record {
+                    try self.requireOnTop(record, in: snapshot, background: true, at: point)
+                    try self.requireClosedCommand("AXPress", on: record.element, role: record.role, app: snapshot.app.name, index: record.index)
+                }
             }
             BackgroundPointerOverlay.pressed(shown, agent: RequestContext.current.agent)
             return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
@@ -2387,7 +2510,10 @@ final class Provider {
     /// person would scroll to it; its own action needs no pointer, so it asks the
     /// list to bring it into view and presses it either way. A control under a
     /// dialog or a menu is refused, as it would be for a person.
-    private func requireReachable(_ record: ElementRecord, in snapshot: Snapshot, at requestedPoint: CGPoint? = nil) throws {
+    private func requireReachable(
+        _ record: ElementRecord, in snapshot: Snapshot, at requestedPoint: CGPoint? = nil,
+        beforeScroll: (() throws -> Void)? = nil
+    ) throws {
         if record.onSurface { return }
         do {
             try requireOnTop(record, in: snapshot, background: true, at: requestedPoint)
@@ -2395,7 +2521,9 @@ final class Provider {
         } catch let covered as ProviderError {
             guard requestedPoint == nil, let list = scrollAreaHiding(record, in: snapshot) else { throw covered }
             if record.actions.contains("AXScrollToVisible") {
-                if RequestContext.current.inTheirApp {
+                if let beforeScroll {
+                    guard try performActionChecked(record.element, "AXScrollToVisible", beforeSend: beforeScroll) else { throw covered }
+                } else if RequestContext.current.inTheirApp {
                     // In the app the person has in front this scroll moves what
                     // they are reading: an act of its own, asked about and
                     // counted as sent, so nothing is said to be undone after it.
@@ -2427,7 +2555,7 @@ final class Provider {
     /// rest — two reads alike, so a smooth scroll is not pressed part way. One
     /// that does not is refused, saying the page was scrolled. Any other
     /// control comes back as it is.
-    private func inView(_ record: ElementRecord, in snapshot: Snapshot) throws -> ElementRecord {
+    private func inView(_ record: ElementRecord, in snapshot: Snapshot, beforeSend: () throws -> Void = {}) throws -> ElementRecord {
         // The look this press was dispatched on is fresh: a control it gave a
         // size is not read again.
         guard !record.onSurface, !Actionability.hasSize(record.localFrame),
@@ -2436,7 +2564,7 @@ final class Provider {
         else { return record }
         // It offered to be scrolled back and did not take it: it stays out of
         // view, and a person could not press it there.
-        guard try performActionChecked(record.element, Self.scrollToVisibleAction) else {
+        guard try performActionChecked(record.element, Self.scrollToVisibleAction, beforeSend: beforeSend) else {
             throw ProviderError.coded("not_actionable", "element \(record.index) is scrolled out of view and did not scroll into view when asked; nothing was pressed. Look again")
         }
         let giveUp = Date().addingTimeInterval(TimeInterval(Actionability.intoViewWaitMs) / 1_000)
@@ -2578,16 +2706,394 @@ final class Provider {
     }
 
     private func performSecondaryAction(params: [String: JSONValue], snapshot: Snapshot) throws -> [String: Any] {
-        let record = try inView(try element(snapshot, try requiredInteger(params, "elementIndex")), in: snapshot)
+        let found = try element(snapshot, try requiredInteger(params, "elementIndex"))
         let requested = try requiredString(params, "action")
-        let action = record.actions.first { SnapshotRenderHeuristics.prettyAction($0).caseInsensitiveCompare(requested) == .orderedSame || $0.caseInsensitiveCompare(requested) == .orderedSame }
-        guard let action else {
-            throw ProviderError.coded("action_not_supported", "'\(requested)' is not a valid secondary action for element \(record.index)")
+        let offered = BackgroundInput.secondaryAction(requested, among: found.actions)
+        if params["background"]?.bool == true {
+            try requireMenuEnabled(found.element, role: found.role, action: offered ?? requested, app: snapshot.app.name)
         }
+        guard let action = offered else {
+            throw ProviderError.coded("action_not_supported", "'\(requested)' is not a valid secondary action for element \(found.index)")
+        }
+        if params["background"]?.bool == true {
+            return try backgroundSecondaryAction(action, on: found, in: snapshot)
+        }
+        let record = try inView(found, in: snapshot)
         guard try performActionChecked(record.element, action) else {
             throw ProviderError.coded("accessibility_error", "AXUIElementPerformAction(\(action)) failed")
         }
         return actionMetadata(path: "accessibility", actionName: action)
+    }
+
+    /// An app's own action on one of its controls, behind the person — closing
+    /// a menu it opened, confirming a field, stepping a value — takes no
+    /// pointer, key, front app or clipboard of theirs (t-125705). One that
+    /// raises a window or opens a menu over their app is refused before
+    /// anything moves; in the app they have in front it goes as a press goes
+    /// there, once they pause.
+    private func backgroundSecondaryAction(_ action: String, on found: ElementRecord, in snapshot: Snapshot) throws -> [String: Any] {
+        guard BackgroundInput.secondaryActionStaysInItsWindow(action) else {
+            throw ProviderError.coded("requires_foreground", "'\(SnapshotRenderHeuristics.prettyAction(action))' raises a window or opens a menu over the person's app; nothing was done. Hand it to them, or add --foreground only if they asked for this on their desktop")
+        }
+        let person = try personBeforeBackgroundPress()
+        try requireCheckedPressElement(found.element, in: snapshot)
+        if person.foreground == snapshot.app.pid {
+            guard BackgroundInput.pressesInFront(action: action, textEntry: MarkPin.textEntryRoles.contains(found.role)) else { throw backgroundTargetInUse() }
+            try standBackInTheirApp()
+        }
+        let record = try inView(found, in: snapshot) {
+            try requireBackgroundPress(action, on: found.element, expectedRole: found.role,
+                                       readFor: found.observedWindow, onSurface: found.onSurface,
+                                       in: snapshot, person: person)
+        }
+        return try backgroundAppAction(action, on: record, in: snapshot, person: person)
+    }
+
+    private func backgroundAppAction(
+        _ action: String, on record: ElementRecord, in snapshot: Snapshot, person: PressCertainty.Person, at requestedPoint: CGPoint? = nil
+    ) throws -> [String: Any] {
+        func requireCertainPress() throws {
+            try requireBackgroundPress(action, on: record.element, expectedRole: record.role,
+                                       readFor: record.observedWindow, onSurface: record.onSurface,
+                                       in: snapshot, person: person, index: record.index)
+        }
+        try requireClosedCommand(action, on: record.element, role: record.role, app: snapshot.app.name, index: record.index)
+        let barItem = MenuBarCommand.menuOwnerRoles.contains(record.role) ? menuBarItem(above: record.element) : nil
+        let closed = barItem.map { boolAttribute($0, kAXSelectedAttribute as String) != true } ?? false
+        try requireReachable(record, in: snapshot, at: requestedPoint, beforeScroll: requireCertainPress)
+        var shown: PointerArrival?
+        // Closed menu commands have no screen position that can be pressed.
+        if !closed, let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+            shown = try travel(to: point, in: snapshot)
+        }
+        guard try performActionChecked(record.element, action, beforeSend: requireCertainPress) else {
+            throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
+        }
+        BackgroundPointerOverlay.pressed(shown, agent: RequestContext.current.agent)
+        return actionMetadata(path: "accessibility", actionName: action)
+    }
+
+    private func pressRefusal(
+        _ refusal: PressCertainty.Refusal, app: String = "the app", title: String? = nil,
+        index: Int? = nil, role: String = ""
+    ) -> ProviderError {
+        switch refusal {
+        case .targetChanged:
+            return .backgroundRefusal("element_not_found", "the press target could not be matched to the one checked; nothing was sent. Look again before pressing")
+        case .searchUnfinished:
+            return .backgroundRefusal("ambiguous_target", "\(app)'s menus could not be read to the end; nothing was sent")
+        case .disabled:
+            let words = role == kAXMenuItemRole as String
+                ? MenuBarCommand.disabledWords(app: app, title: title)
+                : "\(app)'s '\(title ?? role)' is disabled; nothing was sent"
+            return .backgroundRefusal("requires_foreground", words)
+        case .enabledUnread:
+            return .backgroundRefusal("not_actionable", "\(app) did not confirm that '\(title ?? role)' is enabled; nothing was sent. Look again")
+        case .opensMenu:
+            return .backgroundRefusal("requires_foreground", MenuBarCommand.openingWords(app: app, title: title, index: index, role: role))
+        case .childrenUnread:
+            return .backgroundRefusal("not_actionable", "\(app) did not say whether '\(title ?? role)' holds a submenu; nothing was sent. Look again")
+        case .observedWindowChanged:
+            return .backgroundRefusal("window_stale", "\(app)'s '\(title ?? role)' was read in a different or unknown window; nothing was sent. Read it again in the window you mean")
+        case .windowUnbound:
+            return .backgroundRefusal("focus_changed", "\(app)'s key and main windows could not both be matched to the observed window; nothing was sent. Look again")
+        case .personChanged:
+            return .backgroundRefusal("not_actionable", "the foreground app or the person's input changed while preparing the press; nothing was sent. Look again")
+        }
+    }
+
+    private func requireClosedCommand(_ action: String, on element: AXUIElement, role: String, app: String, index: Int? = nil) throws {
+        do {
+            try PressCertainty.requireClosedCommand(role: role, action: action, children: { childrenAnswered(element) })
+        } catch let refusal as PressCertainty.Refusal {
+            throw pressRefusal(refusal, app: app, title: faceLabel(element), index: index, role: role)
+        }
+    }
+
+    private func requireMenuEnabled(_ item: AXUIElement, role: String, action: String, app: String) throws {
+        guard role == kAXMenuItemRole as String, action != "AXCancel" else { return }
+        do {
+            try PressCertainty.requireEnabled(pressEnabled(item))
+        } catch let refusal as PressCertainty.Refusal {
+            throw pressRefusal(refusal, app: app, title: faceLabel(item), role: role)
+        }
+    }
+
+    /// Last read before sending an app's own press or a row selection.
+    private func requireBackgroundPress(
+        _ action: String, on element: AXUIElement, expectedRole: String, readFor: AXUIElement?,
+        onSurface: Bool, in snapshot: Snapshot, person: PressCertainty.Person,
+        checkedElement: AXUIElement? = nil, expectedTitle: String? = nil, index: Int? = nil
+    ) throws {
+        let app = snapshot.app
+        do {
+            guard !app.app.isTerminated,
+                  stringAttribute(element, kAXRoleAttribute as String) == expectedRole else { throw PressCertainty.Refusal.targetChanged }
+            if let expectedTitle, stringAttribute(element, kAXTitleAttribute as String) != expectedTitle {
+                throw PressCertainty.Refusal.targetChanged
+            }
+            if let checked = RequestContext.current.checkedPress {
+                let item = checkedElement ?? element
+                let face: (label: String?, defaultButton: AXUIElement?)
+                if let secondary = RequestContext.current.checkedSecondaryAction {
+                    guard secondary == action else { throw PressCertainty.Refusal.targetChanged }
+                    face = try secondaryPressFace(secondary, item: item, requireAnswer: true)
+                } else {
+                    face = (faceLabel(item), nil)
+                }
+                let actual = face.label.flatMap {
+                    app.pressTarget(window: snapshot.axWindow, item: item, defaultButton: face.defaultButton, label: $0)
+                }
+                try PressCertainty.requireTarget(checked, actual: actual, same: { CFEqual($0, $1) })
+            }
+            if action != "AXCancel" {
+                try PressCertainty.requireEnabled(
+                    pressEnabled(element), mustAnswer: expectedRole == kAXMenuItemRole as String
+                )
+            }
+            try PressCertainty.requireClosedCommand(role: expectedRole, action: action, children: { childrenAnswered(element) })
+            func menuWindows() -> (focused: AXUIElement?, main: AXUIElement?) {
+                let appElement = AXUIElementCreateApplication(app.pid)
+                return (copyElement(appElement, kAXFocusedWindowAttribute as String),
+                        copyElement(appElement, kAXMainWindowAttribute as String))
+            }
+            let checksMenuWindows = expectedRole == kAXMenuItemRole as String && action != "AXCancel"
+            try PressCertainty.requireElementWindow(
+                readFor: readFor, target: snapshot.axWindow, targetPID: app.pid,
+                elementPID: { pidAttribute(element) }, onSurface: onSurface,
+                menuWindows: checksMenuWindows ? menuWindows : nil,
+                containingWindow: { containingWindow(element) }, same: { CFEqual($0, $1) },
+                sheetParent: {
+                    guard stringAttribute($0, kAXRoleAttribute as String) == kAXSheetRole as String else { return nil }
+                    return copyElement($0, kAXParentAttribute as String)
+                }
+            )
+            try OperatorHandHost.sleep(nanoseconds: 0)
+            if person.foreground == app.pid { try DesktopBorrowHost.refuseIfThePersonIsBusy() }
+            try person.requireUnchanged(DesktopBorrowHost.pressPerson(), targetPID: app.pid)
+        } catch let refusal as PressCertainty.Refusal {
+            throw pressRefusal(refusal, app: app.name, title: faceLabel(element), index: index, role: expectedRole)
+        }
+    }
+
+    private func personBeforeBackgroundPress() throws -> PressCertainty.Person {
+        guard let person = DesktopBorrowHost.pressPerson() else { throw pressRefusal(.personChanged) }
+        return person
+    }
+
+    /// The shortcut a key chord is when a menu item can answer to it: Command
+    /// and one printable key, read through the helper's own key table.
+    private func menuShortcut(_ key: String) -> MenuShortcut? {
+        guard let parsed = try? KeyMap.parse(key) else { return nil }
+        let flags = parsed.modifiers.flags
+        return MenuShortcut(
+            key: parsed.name,
+            command: flags.contains(.maskCommand),
+            shift: flags.contains(.maskShift),
+            option: flags.contains(.maskAlternate),
+            control: flags.contains(.maskControl)
+        )
+    }
+
+    private struct ShortcutPress {
+        let item: AXUIElement
+        let window: AXUIElement
+        let title: String
+        let person: PressCertainty.Person
+    }
+
+    /// A window key is safe here only after a complete search without a match.
+    private func menuShortcutItem(_ params: [String: JSONValue], snapshot: Snapshot) throws -> ShortcutPress? {
+        guard params["background"]?.bool == true, let key = params["key"]?.string else { return nil }
+        let app = snapshot.app
+        var person: PressCertainty.Person?
+        let deadline = MenuShortcut.Deadline(now: { ProcessInfo.processInfo.systemUptime })
+        let road: MenuShortcut.Road<AXUIElement> = try MenuShortcut.road(
+            chord: key,
+            shortcut: menuShortcut(key),
+            behind: {
+                let initial = try personBeforeBackgroundPress()
+                person = initial
+                return initial.foreground != app.pid
+            },
+            menus: {
+                let bar: PressCertainty.Reading<AXUIElement?> = menuAttribute(
+                    AXUIElementCreateApplication(app.pid), kAXMenuBarAttribute as String, deadline: deadline, decode: decodedAXElement
+                )
+                switch bar {
+                case .read(nil): return .read(nil)
+                case .read(let bar?):
+                    guard let menus = menuChildren(bar, deadline: deadline) else { return .unread }
+                    return .read(menus)
+                case .unread: return .unread
+                }
+            },
+            children: { menuChildren($0, deadline: deadline) },
+            equivalent: { item in
+                let character = menuString(item, kAXMenuItemCmdCharAttribute as String, deadline: deadline)
+                guard !deadline.expired() else { return (.unread, .unread) }
+                let modifiers: PressCertainty.Reading<Int?> = menuAttribute(
+                    item, kAXMenuItemCmdModifiersAttribute as String, deadline: deadline, decode: {
+                        CFGetTypeID($0) == CFNumberGetTypeID() ? $0 as? Int : nil
+                    })
+                return (character, modifiers)
+            },
+            expired: deadline.expired
+        )
+        switch road {
+        case .clipboard:
+            throw ProviderError.coded("requires_foreground", BackgroundInput.clipboardWords)
+        case .windowKey:
+            return nil
+        case let .several(items):
+            throw ProviderError.coded("ambiguous_target", MenuShortcut.severalWords(
+                app: app.name, key: key, titles: items.map { PressCertainty.value(menuString($0, kAXTitleAttribute as String, deadline: deadline)) ?? "" }
+            ))
+        case let .unfinished(item):
+            throw ProviderError.coded("ambiguous_target", MenuShortcut.unfinishedWords(
+                app: app.name, key: key, title: item.flatMap { PressCertainty.value(menuString($0, kAXTitleAttribute as String, deadline: deadline)) }
+            ))
+        case let .item(item):
+            guard let person else { throw pressRefusal(.personChanged) }
+            let title = PressCertainty.value(menuString(item, kAXTitleAttribute as String, deadline: deadline))
+            guard !deadline.expired() else {
+                throw pressRefusal(.searchUnfinished, app: app.name)
+            }
+            guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+                throw pressRefusal(.targetChanged, app: app.name)
+            }
+            return ShortcutPress(item: item, window: snapshot.axWindow, title: title, person: person)
+        }
+    }
+
+    private func backgroundMenuShortcut(_ shortcut: ShortcutPress, key: String, snapshot: Snapshot) throws -> [String: Any] {
+        try requireMenuEnabled(shortcut.item, role: kAXMenuItemRole as String, action: "AXPress", app: snapshot.app.name)
+        guard try performActionChecked(shortcut.item, "AXPress", beforeSend: {
+            try requireBackgroundPress("AXPress", on: shortcut.item, expectedRole: kAXMenuItemRole as String,
+                                       readFor: shortcut.window, onSurface: true, in: snapshot, person: shortcut.person,
+                                       expectedTitle: shortcut.title)
+        }) else {
+            throw ProviderError.coded("accessibility_error", "'\(key)' menu item did not take its own press; no key was sent instead")
+        }
+        return actionMetadata(path: "accessibility", actionName: "AXPress")
+    }
+
+    /// A plain, cmd or shift click on a row of a list behind the person is that
+    /// list's selection — the row alone, the row added or taken away, the run
+    /// from the one chosen row to it — written through accessibility and read
+    /// back (t-125705: a Finder row offers no press, and a window click on it
+    /// was refused). Nil where the click is no such pick, the list's rows
+    /// chosen now cannot be read, or the app refuses the write outright: the
+    /// click then goes on as it went. A write that may have landed sends
+    /// nothing more, and a selection that cannot be read back is not said to
+    /// be chosen (R6).
+    private func backgroundSelection(
+        _ record: ElementRecord,
+        modifiers: [KeyModifier],
+        count: Int,
+        button: MouseButtonSelection,
+        in snapshot: Snapshot,
+        person: PressCertainty.Person,
+        at requestedPoint: CGPoint?
+    ) throws -> [String: Any]? {
+        let flags = modifiers.flags
+        guard button == .left, count == 1,
+              let pick = RowSelection.pick(
+                  command: flags.contains(.maskCommand),
+                  shift: flags.contains(.maskShift),
+                  others: !flags.subtracting([.maskCommand, .maskShift]).isEmpty
+              ),
+              let item = selectableItem(from: record.element)
+        else { return nil }
+        // The list writes its chosen rows as a whole; a lone row only itself.
+        guard let parent = copyElement(item, kAXParentAttribute as String) else {
+            throw pressRefusal(.targetChanged)
+        }
+        var settable = DarwinBoolean(false)
+        let settableStatus = AXUIElementIsAttributeSettable(parent, kAXSelectedRowsAttribute as CFString, &settable)
+        let list: AXUIElement?
+        switch settableStatus {
+        case .success: list = settable.boolValue ? parent : nil
+        case .attributeUnsupported, .noValue: list = nil
+        default:
+            throw ProviderError.backgroundRefusal("not_actionable", "the app did not say whether its list can select rows; nothing was sent")
+        }
+        let wanted: [AXUIElement]
+        if pick == .only {
+            wanted = [item]
+        } else {
+            // A list whose chosen rows cannot be read is not an empty one.
+            guard let list,
+                  let rows = copyArray(list, kAXRowsAttribute as String), rows.count <= RowSelection.maxRows,
+                  let target = rows.firstIndex(where: { CFEqual($0, item) }),
+                  let chosen = copyArray(list, kAXSelectedRowsAttribute as String) else {
+                throw ProviderError.backgroundRefusal("not_actionable", "the list's rows or selection could not be read; nothing was sent")
+            }
+            let now = chosen.compactMap { row in rows.firstIndex { CFEqual($0, row) } }
+            guard now.count == chosen.count, let places = RowSelection.after(pick, target: target, chosen: now) else {
+                throw ProviderError.backgroundRefusal("not_actionable", "the list's selection could not be matched to its rows; nothing was sent")
+            }
+            wanted = places.map { rows[$0] }
+        }
+        func requireSameRow() throws {
+            guard let current = selectableItem(from: record.element), CFEqual(current, item),
+                  let currentParent = copyElement(item, kAXParentAttribute as String), CFEqual(currentParent, parent),
+                  let role = stringAttribute(item, kAXRoleAttribute as String), RowSelection.itemRoles.contains(role) else {
+                throw staleElement(record.index)
+            }
+            try requireBackgroundPress("AXSelect", on: item, expectedRole: role,
+                                       readFor: record.observedWindow, onSurface: false,
+                                       in: snapshot, person: person, checkedElement: record.element, index: record.index)
+        }
+        try requireReachable(record, in: snapshot, at: requestedPoint, beforeScroll: requireSameRow)
+        var shown: PointerArrival?
+        if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+            shown = try travel(to: point, in: snapshot)
+        }
+        let context = RequestContext.current
+        let sentBefore = context.sent
+        try context.askThePersonIfFirst()
+        try requireSameRow()
+        context.sent = true
+        let written = list.map { AXUIElementSetAttributeValue($0, kAXSelectedRowsAttribute as CFString, wanted as CFArray) }
+            ?? AXUIElementSetAttributeValue(item, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+        let verdict = AXActionVerdict.of(raw: written.rawValue)
+        guard verdict == .done else {
+            if RowSelection.clickGoesOn(after: verdict) {
+                // Refused outright, nothing chosen: the click goes on as it went.
+                context.sent = sentBefore
+                return nil
+            }
+            switch verdict {
+            case .stale:
+                context.sent = sentBefore
+                throw staleElement(record.index)
+            case .denied:
+                context.sent = sentBefore
+                throw ProviderError.coded("permission_denied", "Accessibility is off for ZeroCode Computer Use")
+            default:
+                throw ProviderError.coded("delivery_uncertain", "the list answered its rows' choosing with an error or not at all, and they may be chosen: nothing more was sent. Look before choosing again.")
+            }
+        }
+        BackgroundPointerOverlay.pressed(shown, agent: RequestContext.current.agent)
+        let attribute = list == nil ? "AXSelected" : "AXSelectedRows"
+        let expected = "\(wanted.count) chosen"
+        let read: [AXUIElement]?
+        if let list {
+            read = copyArray(list, kAXSelectedRowsAttribute as String)
+        } else {
+            read = boolAttribute(item, kAXSelectedAttribute as String).map { $0 ? [item] : [] }
+        }
+        let verification: [String: Any]
+        switch RowSelection.chosenAsWanted(wanted, read: read, same: { CFEqual($0, $1) }) {
+        case true?:
+            verification = verifiedAction(property: "selected", expected: expected, actualPreview: "\(read?.count ?? 0) chosen")
+        case false?:
+            verification = unverifiedAction(reason: "value_mismatch", expected: expected, actualPreview: "\(read?.count ?? 0) chosen")
+        case nil:
+            verification = unverifiedAction(reason: "readback_unsupported", expected: expected)
+        }
+        return actionMetadata(path: "accessibility", actionName: attribute, verification: verification)
     }
 
     private func setValue(params: [String: JSONValue]) throws -> [String: Any] {
@@ -2686,10 +3192,15 @@ final class Provider {
         ), secureInput)
     }
 
-    private func hotkey(params: [String: JSONValue]) throws -> [String: Any] {
-        let snapshot = try currentKeyboardSnapshot(params: params)
+    private func hotkey(params: [String: JSONValue], shortcut: (Snapshot) throws -> ShortcutPress?, snapshot loadSnapshot: () throws -> Snapshot) throws -> [String: Any] {
+        let snapshot = try loadSnapshot()
         let key = try requiredString(params, "key")
         if params["background"]?.bool == true {
+            // A shortcut that is one of the app's own menu items is that item
+            // (t-125705 D4), the one this request found before any check.
+            if let item = try shortcut(snapshot) {
+                return try backgroundMenuShortcut(item, key: key, snapshot: snapshot)
+            }
             return try backgroundKey(key, snapshot: snapshot)
         }
         let writes = KeyboardInputSafety.chordWrites(key)
@@ -3038,7 +3549,7 @@ final class Provider {
 
     private func backgroundKey(_ key: String, snapshot: Snapshot) throws -> [String: Any] {
         guard !KeyboardInputSafety.usesClipboard(key) else {
-            throw ProviderError.coded("requires_foreground", "background keys never use the shared clipboard; pass text directly instead")
+            throw ProviderError.coded("requires_foreground", BackgroundInput.clipboardWords)
         }
         try requireBackgroundWindow(snapshot)
         let focus = backgroundFocusedElement(snapshot)
@@ -3862,6 +4373,127 @@ private func hitTestSyntheticClickRecipient(
     return .focused(syntheticClickRecipient(pid: ownerPID, windowId: candidate.windowId))
 }
 
+/// The menu bar item a menu item's menu hangs from, or the bar item itself —
+/// nil for a control in no app's menu bar (a context menu's item).
+private func menuBarItem(above element: AXUIElement) -> AXUIElement? {
+    var current: AXUIElement? = element
+    var barItem: AXUIElement?
+    for _ in 0..<MenuBarCommand.barDepth {
+        guard let here = current else { return nil }
+        let role = stringAttribute(here, kAXRoleAttribute as String) ?? ""
+        if role == kAXMenuBarRole as String { return barItem }
+        if role == kAXMenuBarItemRole as String { barItem = here }
+        current = copyElement(here, kAXParentAttribute as String)
+    }
+    return nil
+}
+
+/// What a menu bar, a menu bar item or a menu item holds: the items of the
+/// menu AppKit puts between them, else its own children. Nil when the app
+/// would not say: a menu read in part is not read whole (t-125705 R4).
+private func menuChildren(_ owner: AXUIElement, deadline: MenuShortcut.Deadline) -> [AXUIElement]? {
+    guard let children = childrenAnswered(owner, deadline: deadline) else { return nil }
+    var items: [AXUIElement] = []
+    for child in children {
+        guard let role = PressCertainty.value(menuString(child, kAXRoleAttribute as String, deadline: deadline)), !role.isEmpty else { return nil }
+        guard role == kAXMenuRole as String else {
+            items.append(child)
+            continue
+        }
+        guard let inner = childrenAnswered(child, deadline: deadline) else { return nil }
+        items += inner
+    }
+    return deadline.expired() ? nil : items
+}
+
+private func menuString(
+    _ element: AXUIElement, _ attribute: String, deadline: MenuShortcut.Deadline
+) -> PressCertainty.Reading<String?> {
+    menuAttribute(element, attribute, deadline: deadline, decode: {
+        CFGetTypeID($0) == CFStringGetTypeID() ? $0 as? String : nil
+    })
+}
+
+private func pressEnabled(_ element: AXUIElement) -> PressCertainty.Reading<Bool?> {
+    menuAttribute(element, kAXEnabledAttribute as String, decode: pressEnabledValue)
+}
+
+func pressEnabledValue(_ value: CFTypeRef) -> Bool? {
+    let type = CFGetTypeID(value)
+    if type == CFBooleanGetTypeID() { return value as? Bool }
+    guard type == CFNumberGetTypeID(), let number = value as? NSNumber else { return nil }
+    if number.isEqual(to: NSNumber(value: 0)) { return false }
+    if number.isEqual(to: NSNumber(value: 1)) { return true }
+    return nil
+}
+
+private func menuAttribute<Value>(
+    _ element: AXUIElement, _ attribute: String, deadline: MenuShortcut.Deadline? = nil, decode: (CFTypeRef) -> Value?
+) -> PressCertainty.Reading<Value?> {
+    if let deadline {
+        let remaining = Float(deadline.remaining())
+        guard remaining > 0, AXUIElementSetMessagingTimeout(element, remaining) == .success else { return .unread }
+    }
+    // macOS applies this timeout to this AX reference only. Drop it before
+    // keeping a found item for confirmation or performing its action.
+    defer { if deadline != nil { _ = AXUIElementSetMessagingTimeout(element, 0) } }
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    guard deadline?.expired() != true else { return .unread }
+    switch status {
+    case .success:
+        guard let value, let typed = decode(value) else { return .unread }
+        return .read(typed)
+    case .noValue, .attributeUnsupported:
+        return .read(nil)
+    default:
+        return .unread
+    }
+}
+
+/// An element's children as the app answers: none when it has no such
+/// attribute or no value, nil when it failed or did not answer.
+private func childrenAnswered(_ element: AXUIElement, deadline: MenuShortcut.Deadline? = nil) -> [AXUIElement]? {
+    switch menuAttribute(element, kAXChildrenAttribute as String, deadline: deadline, decode: { $0 as? [AXUIElement] }) {
+    case let .read(children): return children ?? []
+    case .unread: return nil
+    }
+}
+
+/// The row, cell or icon a click inside it chooses: the nearest one up from
+/// the control that answers whether it is chosen.
+private func selectableItem(from element: AXUIElement) -> AXUIElement? {
+    var current: AXUIElement? = element
+    for _ in 0..<RowSelection.itemDepth {
+        guard let here = current else { return nil }
+        if let role = stringAttribute(here, kAXRoleAttribute as String), RowSelection.itemRoles.contains(role),
+           boolAttribute(here, kAXSelectedAttribute as String) != nil {
+            return here
+        }
+        current = copyElement(here, kAXParentAttribute as String)
+    }
+    return nil
+}
+
+/// The default button of the dialog or window around a control — what a
+/// Return, or a confirm that stands for one, fires there.
+private func nearestDefaultButton(_ element: AXUIElement, strict: Bool) -> PressCertainty.Reading<AXUIElement?> {
+    var current = element
+    for _ in 0..<64 {
+        switch menuAttribute(current, kAXDefaultButtonAttribute as String, decode: decodedAXElement) {
+        case let .read(button?): return .read(button)
+        case .unread where strict: return .unread
+        case .read(nil), .unread: break
+        }
+        let role = stringAttribute(current, kAXRoleAttribute as String)
+        if strict, role == nil { return .unread }
+        if role == kAXWindowRole as String { return .read(nil) }
+        guard let parent = copyElement(current, kAXParentAttribute as String) else { return .unread }
+        current = parent
+    }
+    return .unread
+}
+
 private func containingWindow(_ element: AXUIElement) -> AXUIElement? {
     var current = element
     for _ in 0..<64 {
@@ -4137,12 +4769,17 @@ private func focusedElement(appElement: AXUIElement) -> AXUIElement? {
     copyElement(appElement, kAXFocusedUIElementAttribute as String)
 }
 
+private func decodedAXElement(_ value: CFTypeRef) -> AXUIElement? {
+    guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+
 private func copyElement(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success, let value else {
         return nil
     }
-    return (value as! AXUIElement)
+    return decodedAXElement(value)
 }
 
 private func copyArray(_ element: AXUIElement, _ attribute: String) -> [AXUIElement]? {
@@ -4283,11 +4920,12 @@ private func performAction(_ element: AXUIElement, _ action: String) -> Bool {
 /// the element does not offer it, so nothing happened and another road may go.
 /// A timeout or a generic failure throws: the action may have landed, and a
 /// second road after it could press twice.
-private func performActionChecked(_ element: AXUIElement, _ action: String) throws -> Bool {
+private func performActionChecked(_ element: AXUIElement, _ action: String, beforeSend: () throws -> Void = {}) throws -> Bool {
     guard actions(element).contains(where: { $0.caseInsensitiveCompare(action) == .orderedSame }) else { return false }
     let context = RequestContext.current
     let sentBefore = context.sent
     try context.askThePersonIfFirst()
+    try beforeSend()
     context.sent = true
     let asked = Date()
     let status = AXUIElementPerformAction(element, action as CFString)
@@ -4482,6 +5120,7 @@ private final class TreeRenderer {
     private let book: ElementIdentityBook<AXUIElement>
     private let rootKey: String
     private let onSurface: Bool
+    private let observedWindow: AXUIElement
     private let cutDepth: Int?
     private let deadline: Date
     /// The numbers in reading order.
@@ -4498,6 +5137,7 @@ private final class TreeRenderer {
         book: ElementIdentityBook<AXUIElement>,
         rootKey: String,
         onSurface: Bool,
+        observedWindow: AXUIElement,
         maxDepth: Int?,
         deadline: Date
     ) {
@@ -4507,6 +5147,7 @@ private final class TreeRenderer {
         self.book = book
         self.rootKey = rootKey
         self.onSurface = onSurface
+        self.observedWindow = observedWindow
         self.cutDepth = maxDepth
         self.deadline = deadline
     }
@@ -4608,7 +5249,7 @@ private final class TreeRenderer {
         let childContext = name ?? context
         let childContextOwner = name == nil ? contextOwner : element
 
-        let index = book.number(for: element, root: rootKey)
+        let index = book.number(for: element, root: rootKey, surfaceWindow: onSurface ? observedWindow : nil)
         rendered += 1
         order.append(index)
         let line = SnapshotRenderHeuristics.line(index: index, node: node)
@@ -4631,13 +5272,18 @@ private final class TreeRenderer {
             title: title,
             label: label,
             value: value,
-            onSurface: onSurface
+            onSurface: onSurface,
+            observedWindow: observedWindow
         )
         if let focused, CFEqual(focused, element) {
             focusedElementId = index
             focusedSummary = line
         }
-        if summary != nil || SnapshotRenderHeuristics.shouldSuppressChildren(node) {
+        // A look that starts at a menu bar item, or an item with a submenu,
+        // reads that menu's items as they stand, closed: nothing opens over
+        // the person's app (t-125705).
+        let readsItsMenu = ancestors.isEmpty && MenuBarCommand.menuOwnerRoles.contains(role)
+        if !readsItsMenu, summary != nil || SnapshotRenderHeuristics.shouldSuppressChildren(node) {
             return
         }
         if let cutDepth, depth >= cutDepth, !children.isEmpty {
@@ -5821,9 +6467,16 @@ struct KeyModifier {
     let flag: CGEventFlags
 }
 
+extension Array where Element == KeyModifier {
+    /// Every flag the modifiers hold together.
+    var flags: CGEventFlags { reduce(into: CGEventFlags()) { $0.formUnion($1.flag) } }
+}
+
 struct ParsedKey {
     let keyCode: CGKeyCode
     let modifiers: [KeyModifier]
+    /// The key's own name, as the chord spelled it ("n", "return").
+    let name: String
 
     /// The chord as the hand posts it.
     var stroke: KeyChordStroke {
@@ -5859,7 +6512,7 @@ enum KeyMap {
         guard let keyName, let keyCode = codes[keyName] else {
             throw ProviderError.coded("invalid_argument", "unsupported key '\(spec)'")
         }
-        return ParsedKey(keyCode: keyCode, modifiers: modifiers)
+        return ParsedKey(keyCode: keyCode, modifiers: modifiers, name: keyName)
     }
 
     static func parseModifiers(_ spec: String?) throws -> [KeyModifier] {
@@ -7268,7 +7921,7 @@ func handleRequest(
             return ["id": request.id, "ok": true, "result": answer]
         }
     } catch let error as ProviderError {
-        return failureAnswer(id: request.id, code: error.code, message: error.message)
+        return failureAnswer(id: request.id, code: error.code, message: error.message, confirmationToken: error.confirmationToken)
     } catch {
         return failureAnswer(id: request.id, code: "invalid_argument", message: String(describing: error))
     }
@@ -7287,7 +7940,7 @@ func handleRequest(
         let result = try provider.handle(method: request.method, params: params)
         return ["id": request.id, "ok": true, "result": result]
     } catch let error as ProviderError {
-        return failureAnswer(id: request.id, code: error.code, message: error.message)
+        return failureAnswer(id: request.id, code: error.code, message: error.message, confirmationToken: error.confirmationToken)
     } catch {
         return failureAnswer(id: request.id, code: "accessibility_error", message: String(describing: error))
     }
@@ -7295,11 +7948,11 @@ func handleRequest(
 
 /// A refusal, saying whether anything reached the app and so whether it may be
 /// repeated.
-private func failureAnswer(id: Int, code: String, message: String) -> [String: Any] {
+private func failureAnswer(id: Int, code: String, message: String, confirmationToken: String? = nil) -> [String: Any] {
     let delivery = ActionDelivery.failed(anythingSent: RequestContext.current.sent)
-    return ["id": id, "ok": false, "error": [
-        "code": code, "message": message, "delivery": delivery.rawValue, "retry": delivery.retry,
-    ]]
+    var error = ["code": code, "message": message, "delivery": delivery.rawValue, "retry": delivery.retry]
+    error["confirmationToken"] = confirmationToken
+    return ["id": id, "ok": false, "error": error]
 }
 
 /// The requests answered outside the provider lock, or nil for every other.
@@ -8831,6 +9484,14 @@ enum DesktopBorrowHost {
         }
     }
 
+    static func pressPerson() -> PressCertainty.Person? {
+        guard let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier, foreground > 0 else { return nil }
+        let counts = (pointerEvents + [.keyDown, .keyUp, .flagsChanged]).map {
+            CGEventSource.counterForEventType(.hidSystemState, eventType: $0)
+        }
+        return PressCertainty.Person(foreground: foreground, events: counts)
+    }
+
     static func reading() -> DesktopBorrow.Reading {
         lock.lock()
         let ownKey = ownKeyAt
@@ -9017,25 +9678,108 @@ private func faceLabelAtPoint(_ point: CGPoint, in pid: pid_t? = nil) -> String?
 }
 
 extension Provider {
-    /// The label a press is about to land on, by method — nil when the press
-    /// has no readable target (a bare key, a point over nothing).
-    func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {
+    private func validatePressApproval(
+        _ token: String, method: String, params: [String: JSONValue],
+        snapshot: () throws -> Snapshot, shortcut: (Snapshot) throws -> ShortcutPress?
+    ) throws {
+        cacheLock.lock()
+        let index = pressApprovals.firstIndex { $0.token == token }
+        let approval = index.map { pressApprovals.remove(at: $0) }
+        cacheLock.unlock()
+        guard let approval, !ComputerSnapshotCachePolicy.isExpired(createdAt: approval.createdAt),
+              approval.method == method, approval.agent == RequestContext.current.agent,
+              params["background"]?.bool == true, params["confirmed"]?.bool == true else {
+            throw pressRefusal(.targetChanged)
+        }
+        // Re-run the read even when no shortcut matches. A vanished item
+        // cannot redeem the approval by falling back to a window key.
+        _ = try confirmTarget(method: method, params: params, snapshot: snapshot, shortcut: shortcut)
+        guard approval.target.matches(RequestContext.current.checkedPress, same: { CFEqual($0, $1) }) else {
+            throw pressRefusal(.targetChanged)
+        }
+    }
+
+    private func checkedPress(_ item: AXUIElement, label: String, defaultButton: AXUIElement? = nil, in snapshot: Snapshot) throws {
+        guard let target = snapshot.app.pressTarget(window: snapshot.axWindow, item: item,
+                                                    defaultButton: defaultButton, label: label) else {
+            throw pressRefusal(.targetChanged)
+        }
+        RequestContext.current.checkedPress = target
+    }
+
+    private func requireCheckedPressElement(_ item: AXUIElement?, in snapshot: Snapshot) throws {
+        guard let checked = RequestContext.current.checkedPress else { return }
+        let actual = item.flatMap {
+            snapshot.app.pressTarget(window: snapshot.axWindow, item: $0,
+                                     defaultButton: checked.defaultButton, label: checked.label)
+        }
+        do {
+            try PressCertainty.requireTarget(checked, actual: actual, same: { CFEqual($0, $1) })
+        } catch {
+            throw pressRefusal(.targetChanged)
+        }
+    }
+
+    private func secondaryPressFace(_ action: String, item: AXUIElement, requireAnswer: Bool) throws -> (label: String?, defaultButton: AXUIElement?) {
+        var button: AXUIElement?
+        if action == "AXConfirm" {
+            switch nearestDefaultButton(item, strict: requireAnswer) {
+            case let .read(read): button = read
+            case .unread:
+                if requireAnswer { throw PressCertainty.Refusal.targetChanged }
+            }
+        }
+        let fired = button.flatMap { faceLabel($0) }
+        if requireAnswer, button != nil, fired == nil { throw PressCertainty.Refusal.targetChanged }
+        return (ConfirmationTarget.secondaryActionLabels(action: action, label: faceLabel(item), defaultButton: fired), button)
+    }
+
+    private func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot, shortcut: (Snapshot) throws -> ShortcutPress?) throws -> String? {
         func label(_ record: ElementRecord?, in snapshot: Snapshot, at point: CGPoint? = nil) throws -> String? {
             if params["background"]?.bool == true {
-                // The check reads the press a web view offers by now, as the press does.
+                // Report a disabled menu even if it offers no AXPress.
+                if let record { try requireMenuEnabled(record.element, role: record.role, action: "AXPress", app: snapshot.app.name) }
                 guard let record = record.map({ offeringItsPress($0, pid: snapshot.app.pid) }),
                       let text = ConfirmationTarget.backgroundLabel(role: record.role, actions: record.actions,
-                                                                    label: faceLabel(record.element)) else {
-                    // Refused all the same; the words say where to look next.
+                                                                    label: faceLabel(record.element),
+                                                                    selectable: selectableItem(from: record.element) != nil) else {
                     let why = record == nil ? unreadablePoint(point, in: snapshot) : .notAControl
                     throw ProviderError.coded("element_not_found", ReadingRefusal.backgroundTarget(why))
                 }
+                try checkedPress(record.element, label: text, in: snapshot)
                 return text
             }
             return record.flatMap { faceLabel($0.element) }
         }
         switch method {
-        case "click", "performSecondaryAction":
+        case "performSecondaryAction":
+            let snapshot = try loadSnapshot()
+            // An action the control does not offer is refused by the act itself.
+            guard let index = try optionalInteger(params, "elementIndex"),
+                  let requested = params["action"]?.string else { return nil }
+            let found = try element(snapshot, index)
+            let offered = BackgroundInput.secondaryAction(requested, among: found.actions)
+            if params["background"]?.bool == true {
+                try requireMenuEnabled(found.element, role: found.role, action: offered ?? requested, app: snapshot.app.name)
+            }
+            guard let action = offered else { return nil }
+            let background = params["background"]?.bool == true
+            let face: (label: String?, defaultButton: AXUIElement?)
+            do {
+                face = try secondaryPressFace(action, item: found.element, requireAnswer: background)
+            } catch let refusal as PressCertainty.Refusal {
+                throw pressRefusal(refusal, app: snapshot.app.name, title: found.title, index: found.index, role: found.role)
+            }
+            // Behind the person, what cannot be read is not acted on unasked.
+            if background {
+                guard let text = face.label else {
+                    throw ProviderError.coded("element_not_found", ReadingRefusal.backgroundTarget(.notAControl))
+                }
+                try checkedPress(found.element, label: text, defaultButton: face.defaultButton, in: snapshot)
+                RequestContext.current.checkedSecondaryAction = action
+            }
+            return face.label
+        case "click":
             let snapshot = try loadSnapshot()
             if let index = try optionalInteger(params, "elementIndex") {
                 return try label(element(snapshot, index), in: snapshot)
@@ -9043,14 +9787,13 @@ extension Provider {
             // A click by reading is held for what it would press; one that
             // cannot choose is refused by the press itself, not asked about.
             let query = readingQuery(params)
-            if method == "click", !query.isEmpty {
+            if !query.isEmpty {
                 guard let index = try? chosenIndex(query, in: snapshot) else { return nil }
                 return try label(element(snapshot, index), in: snapshot)
             }
             // A click at a window's point presses whatever is under it — read
             // it there, as a desktop click is read: a saved coordinate click
             // on "Place order" is the person's last step too.
-            guard method == "click" else { return nil }
             let point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
             if params["background"]?.bool == true {
                 return try label(backgroundClickRecord(at: point, in: snapshot), in: snapshot, at: point)
@@ -9063,6 +9806,18 @@ extension Provider {
             // mouse-up only where the pointer is released.
             return faceLabelAtPoint(try desktopPoint(params, "toX", "toY"))
         case "key", "holdKey", "pressKey", "hotkey":
+            // A shortcut that is one of the app's own menu items behind the
+            // person is that item, admitted as its press admits it and read by
+            // its title: found once, so the item read is the item pressed
+            // (t-125705 D4, R1).
+            if method == "hotkey", params["background"]?.bool == true,
+               params["key"]?.string.flatMap({ menuShortcut($0) }) != nil,
+               let press = try shortcut(try loadSnapshot()) {
+                let snapshot = try loadSnapshot()
+                try requireMenuEnabled(press.item, role: kAXMenuItemRole as String, action: "AXPress", app: snapshot.app.name)
+                try checkedPress(press.item, label: press.title, in: snapshot)
+                return press.title
+            }
             guard let chord = params["key"]?.string, firesDefaultButton(chord) else { return nil }
             let focused: AXUIElement?
             let window: AXUIElement?

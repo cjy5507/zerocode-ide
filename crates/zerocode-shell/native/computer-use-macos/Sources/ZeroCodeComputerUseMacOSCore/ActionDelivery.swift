@@ -17,8 +17,8 @@ public enum ActionDelivery: String, Equatable, Sendable {
 
     /// What a finished act is, from its own read-back and from what the look
     /// after it saw change.
-    public static func finished(readBackVerified: Bool, effectSeen: Bool) -> ActionDelivery {
-        readBackVerified || effectSeen ? .deliveredVerified : .deliveredUnverified
+    public static func finished(readBackVerified: Bool, effectSeen: Bool, requiresReadBack: Bool = false) -> ActionDelivery {
+        readBackVerified || (!requiresReadBack && effectSeen) ? .deliveredVerified : .deliveredUnverified
     }
 
     /// What a refused or failed act is, from whether anything was sent first.

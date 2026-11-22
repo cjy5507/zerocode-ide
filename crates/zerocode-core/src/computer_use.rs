@@ -2865,13 +2865,14 @@ impl ComputerMethod {
     /// Whether this takes the person's pointer, keyboard, front app or
     /// clipboard: under the shared-desktop setting it goes only when the call
     /// says `--foreground`. Moving a window, quitting an app or starting a
-    /// program takes none of them.
+    /// program takes none of them, and neither does an app's own action on
+    /// one of its controls (`perform-secondary-action`): the helper refuses
+    /// the ones that raise a window or open a menu over the person's app.
     #[must_use]
     pub const fn takes_the_desk(self) -> bool {
         matches!(
             self,
             Self::Drag
-                | Self::PerformSecondaryAction
                 | Self::MouseMove
                 | Self::MouseClick
                 | Self::MouseDrag
