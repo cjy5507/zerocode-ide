@@ -15949,19 +15949,32 @@ const helperClock = idlePoller({
   tick: () => void pollHelperPages(),
 });
 
-// A pane conversation that finished while the window was hidden retained its
-// new turns in memory (or missed a background poll) and is now at rest, so
-// `helperClock` will not wake it; read and paint once the window is visible.
+// A pane's conversation is not read while nobody can see the window
+// (`pollHelperPages`): its hooks are kept, and it is at rest by the time the
+// window is seen again, so `helperClock` will not wake it — read and paint it
+// once, then (t-125261).
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden || document.visibilityState !== "visible") return;
+  if (windowAway()) return;
   const page = activeHelperPage();
   if (page?.worker.helper?.id === PANE_LOG_ID) void pollHelperPages();
+});
+
+// A hook of a turn that has ended drew on the pane's page — a result that came
+// after its turn's Stop — and said nothing of the pane's state, so no
+// `hook:agent` follows it: the page on screen reads it (t-125261).
+listen("pane:live-turns", ({ payload }) => {
+  const term = payload?.term;
+  if (paneChatOn(term) && activeHelperPage()?.worker.term === term) void pollHelperPages();
 });
 
 async function pollHelperPages() {
   const tab = activeHelperPage();
   if (!tab) return;
   const held = tab.worker.helper;
+  // A pane's own conversation waits until the window is seen again: a document
+  // its CLI writes whole is read whole, and a hidden window's hooks would read
+  // it at every call for no one (t-125261).
+  if (held.id === PANE_LOG_ID && windowAway()) return;
   // News that arrives while a read is out is not lost: the read that is out
   // cannot carry it, so one more follows it (`wire:update` between polls).
   if (held.polling) {

@@ -297,6 +297,7 @@ fn the_document_road_branches_on_no_agents_name() {
     let core_binding = shipped_code(&core_source("pane_transcript.rs"));
     let core_vault = shipped_code(&core_source("vault.rs"));
     let terminal = shipped_code(&shell_source("cmd/terminal.rs"));
+    let pane_runtime = shipped_code(&shell_source("pane_runtime.rs"));
     let binding = shipped_code(&shell_source("pane_transcript.rs"));
     let roads = [
         ("live_hook_turns.rs", core_live.as_str()),
@@ -327,8 +328,24 @@ fn the_document_road_branches_on_no_agents_name() {
             block_after(&terminal, "fn document_log_within("),
         ),
         (
-            "settle_live_turns",
-            block_after(&terminal, "pub(crate) fn settle_live_turns("),
+            "document_read_within",
+            block_after(&terminal, "fn document_read_within("),
+        ),
+        (
+            "whole_document_log",
+            block_after(&terminal, "pub(crate) fn whole_document_log<"),
+        ),
+        (
+            "live_rows",
+            block_after(&terminal, "pub(crate) fn live_rows("),
+        ),
+        (
+            "hear_live_turn",
+            block_after(&pane_runtime, "pub(crate) fn hear_live_turn<"),
+        ),
+        (
+            "tell_when_settled",
+            block_after(&pane_runtime, "pub(crate) fn tell_when_settled("),
         ),
         ("steps_back", block_after(&terminal, "fn steps_back(")),
         (

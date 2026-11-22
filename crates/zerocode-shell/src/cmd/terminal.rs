@@ -3,6 +3,7 @@
 use crate::*;
 use zerocode_core::agent::{Injected, prompt_injection};
 use zerocode_core::capabilities::SpawnRoad;
+use zerocode_core::live_hook_turns::LiveTurnBuffer;
 use zerocode_core::secret_prompt::{SecretKind, SecretPrompt};
 
 /// Open the floating panel's shell, if it is not already running.
@@ -352,13 +353,10 @@ pub(crate) fn pane_log(
         let mut log = SubagentLog::not_found(after.unwrap_or_default());
         // A CLI that writes its session once a turn has ended has no file
         // through its first turn: what its hooks told of that turn is the
-        // conversation until then (t-125261).
+        // conversation until then (t-125261) — of the pane's own conversation,
+        // never of one a CLI the pane ran before told.
         if matches!(read, LogRead::Tail | LogRead::After(_)) {
-            log.live_turns = state
-                .pane_live_turns()
-                .get(&term)
-                .map(|live| live.turns().to_vec())
-                .unwrap_or_default();
+            log.live_turns = live_rows(&state.pane_live_turns(), term, session_id.as_deref());
             log.found = !log.live_turns.is_empty();
         }
         return Ok(log);
@@ -372,7 +370,14 @@ pub(crate) fn pane_log(
     // agent's name (t-124593).
     let whole_doc = crate::pane_transcript::written_whole(&state, term, &path);
     let mut log = if whole_doc {
-        document_log(&path, read, whole.unwrap_or(false))?
+        whole_document_log(
+            || state.pane_live_turns(),
+            term,
+            session_id.as_deref(),
+            &path,
+            read,
+            whole.unwrap_or(false),
+        )?
     } else {
         transcript_log_source(&path, read, whole.unwrap_or(false), archive)?
     };
@@ -383,12 +388,6 @@ pub(crate) fn pane_log(
         turn.session_id.clone_from(&session_id);
     }
     restart_nudge_runtime::mark_window_notes(log.turns.iter_mut().map(|one| &mut one.turn));
-    if whole_doc && matches!(read, LogRead::Tail | LogRead::After(_)) {
-        state
-            .pane_doc_steps()
-            .insert(term, usize::try_from(log.next).unwrap_or(usize::MAX));
-        settle_live_turns(&mut log, state.pane_live_turns().get_mut(&term));
-    }
     // A context its transcript counts but does not size is sized by the
     // pane's model in its own CLI's list (Devin's `max_context_tokens`, the
     // number its own screen draws); zo's catalog sizes no other CLI's window
@@ -403,20 +402,69 @@ pub(crate) fn pane_log(
     Ok(log)
 }
 
-/// The turn a pane's CLI is running beside a read of its session document:
-/// the document's rows let the turn go once they hold it, and what still
-/// stands of it rides the answer as `live_turns` (t-125261).
-pub(crate) fn settle_live_turns(
-    log: &mut SubagentLog,
-    live: Option<&mut zerocode_core::live_hook_turns::LiveTurnBuffer>,
-) {
-    let Some(live) = live else {
-        return;
+/// The turns a pane's hooks told and its session document does not hold yet,
+/// of `session_id`'s conversation only (t-125261): a pane whose CLI changed
+/// shows no row the CLI before it told.
+pub(crate) fn live_rows(
+    held: &HashMap<TermId, LiveTurnBuffer>,
+    term: TermId,
+    session_id: Option<&str>,
+) -> Vec<zerocode_core::transcript::TranscriptTurn> {
+    held.get(&term)
+        .map(|live| live.rows_of(session_id))
+        .unwrap_or_default()
+}
+
+/// A pane's conversation out of a session document its CLI writes whole,
+/// beside the turns its hooks told (t-125261). A read on from where the last
+/// one ended, of the file unchanged — its size and time — finds nothing new
+/// and is answered without reading the file again: a document is read and
+/// parsed whole, and the hooks of a running turn ask the page to read at
+/// every call while the CLI writes nothing. A read that parsed the document
+/// tells the hooks' turns which of them it holds now
+/// ([`LiveTurnBuffer::reconcile`]); what still stands of them rides the answer
+/// as `live_turns`. `held` is taken for a moment at a time, never across the
+/// read.
+pub(crate) fn whole_document_log<'a>(
+    held: impl Fn() -> MutexGuard<'a, HashMap<TermId, LiveTurnBuffer>>,
+    term: TermId,
+    session_id: Option<&str>,
+    path: &Path,
+    read: LogRead,
+    whole: bool,
+) -> Result<SubagentLog, String> {
+    let (LogRead::Tail | LogRead::After(_)) = read else {
+        return document_log(path, read, whole);
     };
-    let read: Vec<&zerocode_core::transcript::TranscriptTurn> =
-        log.turns.iter().map(|one| &one.turn).collect();
-    live.reconcile_turns(usize::try_from(log.next).unwrap_or(usize::MAX), &read);
-    log.live_turns = live.turns().to_vec();
+    let stamp = crate::pane_runtime::file_stamp(path);
+    let unchanged = match (read, stamp) {
+        (LogRead::After(after), Some(stamp)) => usize::try_from(after).is_ok_and(|after| {
+            held()
+                .get(&term)
+                .is_some_and(|live| live.read_unchanged(session_id, stamp, after))
+        }),
+        _ => false,
+    };
+    let mut log = if let (true, LogRead::After(after)) = (unchanged, read) {
+        document_nothing_new(after, false)
+    } else {
+        let (log, settled) = document_read_within(path, read, whole, LONG_LINE_CAP)?;
+        if let (Some(stamp), Some(settled)) = (stamp, settled) {
+            let brought: Vec<(usize, &zerocode_core::transcript::TranscriptTurn)> = log
+                .turns
+                .iter()
+                .map(|one| (usize::try_from(one.line).unwrap_or(usize::MAX), &one.turn))
+                .collect();
+            held().entry(term).or_default().reconcile(
+                session_id,
+                zerocode_core::live_hook_turns::DocRead { stamp, settled },
+                &brought,
+            );
+        }
+        log
+    };
+    log.live_turns = live_rows(&held(), term, session_id);
+    Ok(log)
 }
 
 /// The tail of a pane's own transcript, as lines joined for the readers
@@ -836,11 +884,13 @@ pub(crate) fn document_log_within(
     whole: bool,
     cap: u64,
 ) -> Result<SubagentLog, String> {
-    let held = match read {
-        LogRead::After(at) | LogRead::Before(at) => at,
-        LogRead::Tail => 0,
-    };
-    let nothing_new = |skipped: bool| SubagentLog {
+    document_read_within(path, read, whole, cap).map(|(log, _)| log)
+}
+
+/// What a read of a session document answers when it brings nothing new: the
+/// cursor where it was, and `skipped` when the document is past the cap.
+fn document_nothing_new(held: u64, skipped: bool) -> SubagentLog {
+    SubagentLog {
         skipped,
         turns: Vec::new(),
         model: None,
@@ -852,12 +902,27 @@ pub(crate) fn document_log_within(
         usage: None,
         about: None,
         live_turns: Vec::new(),
+    }
+}
+
+/// [`document_log_within`], and the settled steps of the document it parsed —
+/// `None` when it parsed none: one read while its CLI wrote it, or one past
+/// the cap.
+fn document_read_within(
+    path: &std::path::Path,
+    read: LogRead,
+    whole: bool,
+    cap: u64,
+) -> Result<(SubagentLog, Option<usize>), String> {
+    let held = match read {
+        LogRead::After(at) | LogRead::Before(at) => at,
+        LogRead::Tail => 0,
     };
     let size = std::fs::metadata(path)
         .map_err(|error| error.to_string())?
         .len();
     if size > cap {
-        return Ok(nothing_new(true));
+        return Ok((document_nothing_new(held, true), None));
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let detail = if whole {
@@ -868,7 +933,7 @@ pub(crate) fn document_log_within(
     let Some(document) =
         zerocode_core::transcript::document_read(&String::from_utf8_lossy(&bytes), detail)
     else {
-        return Ok(nothing_new(false));
+        return Ok((document_nothing_new(held, false), None));
     };
     let steps: Vec<Vec<LineTurn>> = document
         .steps
@@ -908,7 +973,7 @@ pub(crate) fn document_log_within(
             (steps_back(&steps, before, &PAGE_REACH), before)
         }
     };
-    Ok(SubagentLog {
+    let log = SubagentLog {
         skipped: false,
         turns: steps.into_iter().take(to).skip(from).flatten().collect(),
         model: document.model,
@@ -924,7 +989,8 @@ pub(crate) fn document_log_within(
         usage: document.usage,
         about: None,
         live_turns: Vec::new(),
-    })
+    };
+    Ok((log, Some(settled)))
 }
 
 /// Where a read back from step `before` begins: as far up as the newest

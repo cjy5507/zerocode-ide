@@ -20846,7 +20846,7 @@ details[open] > .helper-cap::after {
   max-height: min(40dvh, 24rem);
   overflow-y: auto;
   padding: var(--space-1);
-  border: 1px solid var(--chat-composer-edge);
+  border: var(--rule-width) solid var(--chat-composer-edge);
   border-radius: var(--radius-md);
   background: var(--surface-raised);
   box-shadow: var(--shadow-soft);
@@ -20860,11 +20860,13 @@ details[open] > .helper-cap::after {
 .composer-menu {
   position: fixed;
   inset: auto;
-  /* Never wider than the window less its edges, its padding and the 1px edge
-   * the rule above draws (t-125261: a long model list at 320px) — and 16rem
-   * of content wherever the window has room, as it always stood. */
-  min-width: min(16rem, calc(100vw - var(--space-4) - 2 * (var(--space-1) + 1px)));
-  max-width: calc(100vw - var(--space-4) - 2 * (var(--space-1) + 1px));
+  /* The room the window leaves the menu, its edges kept, is the painter's
+   * (`--menu-room`, `standComposerMenu`). The box stands inside it, its own
+   * padding and edge within (t-125261: a row longer than a 320px window), and
+   * stands 16rem of content wherever the room allows, as it always stood. */
+  --menu-content-room: calc(var(--menu-room, 100vw) - 2 * (var(--space-1) + var(--rule-width)));
+  min-width: min(16rem, var(--menu-content-room));
+  max-width: var(--menu-content-room);
 }
 
 .composer-menu-search {
@@ -20958,9 +20960,11 @@ details[open] > .helper-cap::after {
   color: var(--chat-accent);
 }
 
+/* A name stands whole beside its id, and the id gives way first, as it always
+ * did; only a name longer than the row ends in an ellipsis (t-125261). */
 .composer-menu-name {
-  flex: 0 1 auto;
-  min-width: 0;
+  flex: none;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

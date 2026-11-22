@@ -1,4 +1,5 @@
 use super::*;
+use zerocode_core::live_hook_turns::LiveTurnBuffer;
 
 /// How many things one card remembers having done.
 ///
@@ -866,6 +867,35 @@ pub(super) async fn hook_loop(
         // (t-11540) — a check the agent scheduled on itself fires the same
         // hook. Asked of the pane's own reports only, before anyone hears it.
         hooks::settle_prompt_name(&mut report);
+        // A CLI that writes its session once a turn has ended
+        // (`Format::settles_after_turn`) has its turn told by these hooks as
+        // they come — the prompt, each call and its result, the last answer —
+        // and the page shows it until the document holds it
+        // (`zerocode_core::live_hook_turns`, t-125261). Heard before the
+        // window is told below, so the read that telling starts finds it, and
+        // before anything here hears the report: a hook of a turn that has
+        // ended — a result that came after its Stop, a prompt heard twice —
+        // adds what it says to the page and nothing of the pane. It goes no
+        // further: not to the parked all-clear, the pane's state, its ring or
+        // the ledger, and the looks after the Stop wait on the turn still.
+        let fold = {
+            let state = app.state::<AppState>();
+            hear_live_turn(
+                || state.pane_live_turns(),
+                &report,
+                &envelope.payload,
+                || transcript_file_stamp(&state, report.term),
+                epoch_ms_now(),
+            )
+        };
+        if let Some(fold) = fold
+            && fold.late
+        {
+            if fold.drawn {
+                tell_live_turns(&app, report.term);
+            }
+            continue;
+        }
         // Whether a PERSON ended this turn. Asked BEFORE the done gate below,
         // because that gate reads it: Orca computes `interrupted` first and
         // hands it to `resolveClaudePaneState` (`agent-hook-listener.ts:2962`
@@ -1019,34 +1049,6 @@ pub(super) async fn hook_loop(
                 };
                 say_pane_conversation(&app, report.term, word.word(), Some(&session.id), holder);
             }
-        }
-        // A CLI that writes its session once a turn has ended
-        // (`Format::settles_after_turn`) has its turn told by these hooks as
-        // they come — the prompt, each call and its result, the last answer —
-        // and the page shows it until the document holds it
-        // (`zerocode_core::live_hook_turns`, t-125261). Heard before the
-        // window is told below, so the read that telling starts finds it. One
-        // lock at a time.
-        if zerocode_core::vault::turn_write_settle(report.agent.slug()).is_some() {
-            let current_settled = app
-                .state::<AppState>()
-                .pane_doc_steps()
-                .get(&report.term)
-                .copied()
-                .unwrap_or(0);
-            let session_id = report.session.as_ref().map(|session| session.id.as_str());
-            let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);
-            app.state::<AppState>()
-                .pane_live_turns()
-                .entry(report.term)
-                .or_default()
-                .note_hook(
-                    &report.event,
-                    &payload,
-                    session_id,
-                    current_settled,
-                    Some(epoch_ms_now()),
-                );
         }
         // And what it is doing, stamped, and out to the window. A turn whose model
         // request failed tells the ledger so, and why, the road zo's own channel
@@ -1777,10 +1779,12 @@ pub(super) fn note_pane_state(
     // document, 29–34 ms after its Stop — t-124593) has not written this turn
     // when the page reads at this event. The file is looked at again at the
     // store's waits (`TURN_WRITE_SETTLE`) — its size and time, never its bytes
-    // — and the page is told once, when it is new or moved since this event:
-    // a long document written late under a busy disk lands too, and a store
-    // that wrote nothing tells nothing (t-125261). Asked of the agent's store
-    // rows, never its name.
+    // — and the page is told when it is new or moved since this event, and
+    // again when it moves on, until the page has read a document that holds
+    // the turn: a first change the page could not read yet (mid-write), and a
+    // long document written late under a busy disk land too, and a store that
+    // wrote nothing tells nothing (t-125261). Asked of the agent's store rows,
+    // never its name.
     if report.state == zerocode_core::hook::HookState::Done
         && let Some(looks) = zerocode_core::vault::turn_write_settle(report.agent.slug())
     {
@@ -1796,10 +1800,12 @@ pub(super) fn note_pane_state(
         let before_stamp = transcript_file_stamp(&app.state::<AppState>(), term);
         let watching = app.clone();
         let probing = app.clone();
+        let reading = app.clone();
         let app = app.clone();
         let again = shown.clone();
         tell_when_settled(
             looks,
+            before_stamp,
             move || {
                 watching
                     .state::<AppState>()
@@ -1820,13 +1826,17 @@ pub(super) fn note_pane_state(
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .drop_pane(&term);
                 }
-                moved_since(
-                    before_stamp,
-                    transcript_file_stamp(&probing.state::<AppState>(), term),
-                )
+                transcript_file_stamp(&probing.state::<AppState>(), term)
             },
             move || {
-                tell_window(&app, again);
+                !reading
+                    .state::<AppState>()
+                    .pane_live_turns()
+                    .get(&term)
+                    .is_some_and(LiveTurnBuffer::awaits_document)
+            },
+            move || {
+                tell_window(&app, again.clone());
             },
         );
     }
@@ -1847,8 +1857,9 @@ fn transcript_file_stamp(state: &AppState, term: TermId) -> Option<FileStamp> {
     file_stamp(&crate::pane_transcript::pane_transcript(state, term).ok()?)
 }
 
-/// A file's size and time of last write, or `None` while there is no file.
-pub(crate) type FileStamp = (u64, Option<std::time::SystemTime>);
+/// A file's size and time of last write — the one mark the turns a page shows
+/// compare — or `None` while there is no file.
+pub(crate) type FileStamp = zerocode_core::live_hook_turns::DocStamp;
 
 pub(crate) fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
     let meta = std::fs::metadata(path).ok()?;
@@ -1863,27 +1874,72 @@ pub(crate) fn moved_since(before: Option<FileStamp>, now: Option<FileStamp>) -> 
 
 /// Looks at a store that settles after a turn at each wait of `looks`
 /// ([`zerocode_core::vault::TURN_WRITE_SETTLE`]), on a thread of its own, and
-/// runs `tell` once, at the first look where `changed` says the file is new
-/// or moved — and not at all when `still_newest` says a newer word came for
-/// the pane first, or the last look found nothing.
+/// runs `tell` at each look where `stamp` finds the file new or moved since
+/// `at_stop` — or since the look that last told: a change the page could not
+/// read yet is told again once the file moves on. The looks end once `landed`
+/// says the page read a document that holds the turn, once `still_newest`
+/// says a newer word came for the pane, and at the last of them (t-125261).
 pub(crate) fn tell_when_settled(
     looks: &'static [Duration],
+    at_stop: Option<FileStamp>,
     still_newest: impl Fn() -> bool + Send + 'static,
-    changed: impl Fn() -> bool + Send + 'static,
-    tell: impl FnOnce() + Send + 'static,
+    stamp: impl Fn() -> Option<FileStamp> + Send + 'static,
+    landed: impl Fn() -> bool + Send + 'static,
+    tell: impl Fn() + Send + 'static,
 ) {
     std::thread::spawn(move || {
+        let mut told = at_stop;
         for wait in looks {
             std::thread::sleep(*wait);
-            if !still_newest() {
+            if !still_newest() || landed() {
                 return;
             }
-            if changed() {
+            let now = stamp();
+            if moved_since(told, now) {
                 tell();
-                return;
+                told = now;
             }
         }
     });
+}
+
+/// A hook of a pane whose CLI writes its session once a turn has ended, heard
+/// into the turns its page shows (`zerocode_core::live_hook_turns`,
+/// t-125261), with the session file's stamp at the hook (`doc_now`, taken
+/// before `held` is: one lock at a time). `None` for a CLI that writes as the
+/// turn goes: its pane keeps no such turns, and a pane that ran Devin and
+/// runs another CLI now lets the old ones go.
+pub(crate) fn hear_live_turn<'a>(
+    held: impl Fn() -> MutexGuard<'a, HashMap<TermId, LiveTurnBuffer>>,
+    report: &hooks::PaneHookReport,
+    payload: &str,
+    doc_now: impl FnOnce() -> Option<FileStamp>,
+    at_ms: i64,
+) -> Option<zerocode_core::live_hook_turns::HookFold> {
+    if zerocode_core::vault::turn_write_settle(report.agent.slug()).is_none() {
+        held().remove(&report.term);
+        return None;
+    }
+    let doc = doc_now();
+    let session = report.session.as_ref().map(|session| session.id.as_str());
+    Some(held().entry(report.term).or_default().note_hook(
+        &report.event,
+        &zerocode_core::payload::HookPayload::of(payload),
+        session,
+        doc,
+        Some(at_ms),
+    ))
+}
+
+/// The pane a late hook drew on — a result after its turn's Stop — whose page
+/// reads it now, with no word of the pane's state (t-125261).
+#[derive(Clone, Serialize)]
+struct PaneLiveTurns {
+    term: TermId,
+}
+
+fn tell_live_turns(app: &AppHandle, term: TermId) {
+    let _ = app.emit("pane:live-turns", PaneLiveTurns { term });
 }
 
 /// 소식의 무게만큼 뒤에 적는다 — 새 대화 id는 `last_status::PERSIST_DEBOUNCE`,

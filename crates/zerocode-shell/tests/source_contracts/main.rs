@@ -11882,11 +11882,14 @@ mod tests {
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");
+        let away = block_after(window, "function windowAway(");
         assert!(
             poller.contains("document.addEventListener(\"visibilitychange\"")
                 && poller.contains("if (away() || !wanted())")
-                && poller.contains("document.visibilityState !== \"visible\""),
-            "the poller no longer stops for a hidden window or a gone target:\n{poller}"
+                && poller.contains("const away = windowAway;")
+                && away.contains("document.hidden")
+                && away.contains("document.visibilityState !== \"visible\""),
+            "the poller no longer stops for a hidden window or a gone target:\n{poller}\n{away}"
         );
     }
 

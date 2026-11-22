@@ -1498,6 +1498,9 @@ function standComposerSlash(pane, anchor) {
  * `right: 0` against the sticky form put it at the top right while the chip
  * was at the bottom left, and `bottom: 100%` cleared the whole box. */
 function standComposerMenu(menu, chip) {
+  // The room the window leaves it, its edges kept: the menu's width stands
+  // inside it (`.composer-menu`, t-125261 — a row longer than the window).
+  menu.style.setProperty("--menu-room", `${window.innerWidth - 2 * MENU_EDGE_KEEP}px`);
   // Measured at its own size, under the painter's cap, before being placed.
   menu.style.maxHeight = "";
   const cap = parseFloat(getComputedStyle(menu).maxHeight) || Infinity;

@@ -475,6 +475,14 @@ function reportWindowFault(event) {
 for (const fault of ["error", "unhandledrejection"]) {
   window.addEventListener(fault, reportWindowFault);
 }
+
+/* Whether nobody can see the window — both spellings of it: `hidden` is the
+ * boolean, and `visibilityState` is what a window that was never shown reports
+ * first. The one answer for every beat (`idlePoller`) and for a read that
+ * waits until the window is seen again (`pollHelperPages`). */
+function windowAway() {
+  return document.hidden || document.visibilityState !== "visible";
+}
 /* One idle-aware poller for every background beat this window keeps.
  *
  * A poller has a target — something on screen worth ticking for — and it
@@ -489,9 +497,7 @@ for (const fault of ["error", "unhandledrejection"]) {
  * target standing, for the beats that owe an immediate look after an absence. */
 function idlePoller({ wanted, every, tick, onResume }) {
   let handle = null;
-  // Both spellings of "nobody is looking": `hidden` is the boolean, and
-  // `visibilityState` is what a window that was never shown reports first.
-  const away = () => document.hidden || document.visibilityState !== "visible";
+  const away = windowAway;
   const stop = () => {
     if (handle === null) return;
     clearInterval(handle);

@@ -57030,6 +57030,11 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
             live_turns: [],
           };
         }
+        // Turn 5's Stop came before its call's result and the document is not
+        // written yet: the hooks' rows stand — the result too, once it comes
+        // after the Stop (`turn5-late`).
+        const turn5Call = { role: "tool", text: "exec cargo test", tool: { kind: "bash", name: "exec", call_id: "c-live-5", input: "cargo test", result: "", is_error: false } };
+        const turn5Result = { role: "tool_result", text: "ok", tool: { kind: "bash", name: "exec", call_id: "c-live-5", input: "", result: "ok", is_error: false } };
         return {
           found: true,
           next: 10,
@@ -57039,7 +57044,11 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
             { role: "user", text: "turn 4 hidden" },
             { role: "assistant", text: "answer 4" },
           ],
-          live_turns: [],
+          live_turns: devinPhase === "turn5-stop"
+            ? [{ role: "user", text: "turn 5 late result" }, turn5Call, { role: "assistant", text: "answer 5" }]
+            : devinPhase === "turn5-late"
+              ? [{ role: "user", text: "turn 5 late result" }, turn5Call, turn5Result, { role: "assistant", text: "answer 5" }]
+              : [],
         };
       };
       devinTerm = await openTermTab({ placement: "tab" });
@@ -57141,9 +57150,10 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await until(() => devinChat?.textContent.includes("answer 3"), 3000);
       seen.devinAwayTabTurn3 = !readWhileAway &&
         devinChat?.textContent.includes("turn 3 background") && devinChat?.textContent.includes("answer 3");
-      // Turn 4 runs and ends while the window is hidden: the hook's read holds
-      // its turns and draws nothing, nobody looking; the window shown again
-      // draws them at once.
+      // Turn 4 runs and ends while the window is hidden: its hooks are kept
+      // and nothing reads the document, nobody looking — a tool call's news
+      // neither (t-125261 F5: the document is read whole); the window shown
+      // again reads it once and draws the turn at once.
       const lookAway = (away) => {
         for (const [key, value] of [["hidden", away], ["visibilityState", away ? "hidden" : "visible"]]) {
           if (away) Object.defineProperty(document, key, { configurable: true, get: () => value });
@@ -57152,14 +57162,20 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         document.dispatchEvent(new Event("visibilitychange"));
       };
       lookAway(true);
+      await settle(200);
+      const pollsBeforeHidden = devinPolls;
       tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      await settle(40);
+      tell("hook:activity", { pane: `term:${devinTerm}`, activities: [{ seq: 0, activity: { verb: "bash", target: "cargo build", phase: "started" } }] });
       await settle(40);
       devinPhase = "turn4";
       tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
       await settle(400);
       const drawnWhileHidden = devinChat?.textContent.includes("answer 4");
+      seen.devinHiddenReads = devinPolls - pollsBeforeHidden;
       lookAway(false);
       await until(() => devinChat?.textContent.includes("answer 4"), 3000);
+      seen.devinShownReads = devinPolls - pollsBeforeHidden;
       seen.devinHiddenTurn4 = !drawnWhileHidden &&
         devinChat?.textContent.includes("turn 4 hidden") && devinChat?.textContent.includes("answer 4");
       // Every finished turn stands, in order, once.
@@ -57168,6 +57184,28 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         .map((said) => userWords.filter((words) => words.includes(said)).length === 1 ? userWords.findIndex((words) => words.includes(said)) : -1);
       seen.devinTurnsInOrderOnce = userAt.every((at, i) => at >= 0 && (i === 0 || at > userAt[i - 1]));
       seen.devinUserWords = userWords;
+      // Turn 5's Stop comes before its call's result, and the result after it
+      // (t-125261 F1): the pane is done at the Stop, and the late result joins
+      // its call on the page without a word of the pane's state — the backend
+      // tells the page alone (`pane:live-turns`) — so the turn stays done, its
+      // foot line down.
+      devinPhase = "turn5-stop";
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      await settle(40);
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      await until(() => devinChat?.textContent.includes("answer 5"), 3000);
+      const lateCall = () => [...devinChat.querySelectorAll(".is-provisional.is-tool")].find((row) => row.textContent.includes("cargo test"));
+      const outAtStop = Boolean(lateCall()) && !lateCall().classList.contains("is-done");
+      devinPhase = "turn5-late";
+      tell("pane:live-turns", { term: devinTerm });
+      await until(() => lateCall()?.classList.contains("is-done"), 3000);
+      const footLine = devinChat?.querySelector(".helper-status");
+      seen.devinLateResult = {
+        outAtStop,
+        joined: lateCall()?.classList.contains("is-done") === true,
+        stillDone: hookStates.get(devinTerm) === "done",
+        footDown: !footLine || footLine.hidden,
+      };
       window.__ANSWER__.list_agents = baseListAgents;
       if (prevPaneEffort) window.__ANSWER__.pane_effort = prevPaneEffort; else delete window.__ANSWER__.pane_effort;
       agentModelLists.delete(settlingCli);
@@ -57196,12 +57234,20 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       }),
     );
     ok(
-      "a pane's finished turns all stand, in order and once (t-125261): one that ran and ended while another tab was in front, for longer than the page's own follow-up read, stands when the tab comes back, and one that ran and ended while the window was hidden stands when it is shown again",
-      seen.devinAwayTabTurn3 && seen.devinHiddenTurn4 && seen.devinTurnsInOrderOnce,
+      "a pane's finished turns all stand, in order and once (t-125261): one that ran and ended while another tab was in front, for longer than the page's own follow-up read, stands when the tab comes back, and one that ran and ended while the window was hidden stands when it is shown again — its hooks and tool news read nothing while hidden, and the window shown reads it",
+      seen.devinAwayTabTurn3 && seen.devinHiddenTurn4 && seen.devinTurnsInOrderOnce &&
+        seen.devinHiddenReads === 0 && seen.devinShownReads >= 1,
       JSON.stringify({
         awayTab: seen.devinAwayTabTurn3, hidden: seen.devinHiddenTurn4,
         inOrderOnce: seen.devinTurnsInOrderOnce, users: seen.devinUserWords,
+        hiddenReads: seen.devinHiddenReads, shownReads: seen.devinShownReads,
       }),
+    );
+    ok(
+      "a turn whose Stop came before its call's result stays done when the result comes after it (t-125261): the result joins its call on the page, read on the backend's word to the page alone, and the pane's state, spinner and foot line stay as the Stop left them",
+      seen.devinLateResult?.outAtStop && seen.devinLateResult?.joined &&
+        seen.devinLateResult?.stillDone && seen.devinLateResult?.footDown,
+      JSON.stringify(seen.devinLateResult ?? null),
     );
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the pane's effort beside it (t-81532), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
