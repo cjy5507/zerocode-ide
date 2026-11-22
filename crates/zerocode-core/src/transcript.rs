@@ -2235,7 +2235,22 @@ fn tool_target(name: &str, input: &serde_json::Map<String, serde_json::Value>) -
         .map(str::to_string)
 }
 
-fn tool_result_turn(
+pub(crate) fn tool_call_turn(
+    part: &serde_json::Value,
+    at_ms: Option<i64>,
+    detail: Detail,
+) -> Option<TranscriptTurn> {
+    let text = tool_line(part)?;
+    Some(TranscriptTurn {
+        role: "tool".into(),
+        text,
+        at_ms,
+        tool: Some(transcript_tool(part, false, detail)),
+        images: Vec::new(),
+    })
+}
+
+pub(crate) fn tool_result_turn(
     part: &serde_json::Value,
     at_ms: Option<i64>,
     detail: Detail,
@@ -2386,22 +2401,22 @@ fn step_turns(step: &serde_json::Value, detail: Detail) -> Vec<TranscriptTurn> {
                     "arguments": call.get("arguments"),
                     "call_id": call.get("tool_call_id"),
                 });
-                if let Some(text) = tool_line(&part) {
-                    turns.push(TranscriptTurn {
-                        role: "tool".into(),
-                        text,
-                        at_ms,
-                        tool: Some(transcript_tool(&part, false, detail)),
-                        images: Vec::new(),
-                    });
+                if let Some(turn) = tool_call_turn(&part, at_ms, detail) {
+                    turns.push(turn);
                 }
             }
             for call in calls {
                 if let Some(result) = call_result(step, call) {
+                    let is_error = result
+                        .get("is_error")
+                        .or_else(|| result.pointer("/extra/is_error"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
                     let part = serde_json::json!({
                         "tool_name": call.get("function_name"),
                         "call_id": call.get("tool_call_id"),
                         "content": result.get("content"),
+                        "is_error": is_error,
                     });
                     turns.push(tool_result_turn(&part, at_ms, detail));
                 }
@@ -2459,17 +2474,21 @@ fn model_of(row: &serde_json::Value) -> Option<String> {
     (!model.is_empty() && !model.starts_with('<')).then(|| model.to_string())
 }
 
-/// The spelling of the field [`usage_in`] looks for, used as a byte filter
+/// The spellings of the fields [`usage_in`] looks for, used as a byte filter
 /// before any line is parsed.
 const USAGE_FIELD: &str = "\"usage\"";
+const TOKEN_COUNT_FIELD: &str = "\"token_count\"";
+const CONTEXT_WINDOW_FIELD: &str = "\"model_context_window\"";
 
 /// The context a transcript's last answer stood on — the tokens, and the
 /// window they stand in.
 ///
-/// A transcript records what was SPENT, never what the model can hold, so
-/// `window` is always 0 here and the page draws the count rather than a
-/// ring. The shape is the wire's (`WireUsage`) and zo's channel's on
-/// purpose: one chip reads all three roads without branching on which.
+/// When a transcript only records what was spent, `window` is 0 here and the
+/// caller enriches it from the model catalog/list or leaves it unknown. When
+/// the transcript itself carries a `model_context_window` (such as a Codex
+/// rollout's `token_count` / `task_started` events), that value travels here.
+/// The shape is the wire's (`WireUsage`) and zo's channel's on purpose: one
+/// chip reads all three roads without branching on which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct TranscriptUsage {
     pub tokens: u64,
@@ -2477,29 +2496,38 @@ pub struct TranscriptUsage {
 }
 
 /// The context the LAST answer in this chunk carried — `input_tokens` plus
-/// both cache counts, the same three the wire adds.
+/// both cache counts (Claude Code / zo `message.usage`), or a rollout's
+/// `token_count` (`last_token_usage` / `total_token_usage` plus
+/// `model_context_window`).
 ///
-/// Claude Code and zo stamp it in the same place (`message.usage`, measured
-/// against both fixtures) and only on an answer, so the presence of the
-/// field is itself the test for whose line it is; asking the row's kind
-/// again would be the same question spelled twice, once per vendor. A chunk
-/// with no such line answers `None` and nothing is drawn.
-///
-/// The chunk is a quarter of a megabyte and this runs on every read, so the
-/// lines that cannot hold the field are turned away by a byte scan before
-/// any of them is parsed: parsing all of them a second time (`turns_in`
-/// already parsed them once) put a measured third onto the shell suite's
-/// wall clock. A line whose prose merely says `"usage"` costs one parse and
-/// the walk goes on, so the answer is the same either way.
+/// The chunk is a quarter of a megabyte and this runs on every read, so lines
+/// that cannot hold any of the fields are turned away by a byte scan before
+/// any of them is parsed.
 #[must_use]
 pub fn usage_in(chunk: &str) -> Option<TranscriptUsage> {
-    chunk
-        .lines()
-        .rev()
-        .filter(|line| line.contains(USAGE_FIELD))
-        .find_map(|line| {
-            let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-            let usage = row.get("message")?.get("usage")?;
+    let mut best_window = 0u64;
+    let mut found: Option<TranscriptUsage> = None;
+    for line in chunk.lines().rev() {
+        let has_usage = line.contains(USAGE_FIELD);
+        let has_token_count = line.contains(TOKEN_COUNT_FIELD);
+        let has_window = line.contains(CONTEXT_WINDOW_FIELD);
+        if !has_usage && !has_token_count && !has_window {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if has_window && best_window == 0 {
+            best_window = row
+                .pointer("/payload/info/model_context_window")
+                .or_else(|| row.pointer("/payload/model_context_window"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+        }
+        if found.is_none()
+            && has_usage
+            && let Some(usage) = row.get("message").and_then(|message| message.get("usage"))
+        {
             let count = |name: &str| {
                 usage
                     .get(name)
@@ -2509,8 +2537,60 @@ pub fn usage_in(chunk: &str) -> Option<TranscriptUsage> {
             let tokens = count("input_tokens")
                 + count("cache_creation_input_tokens")
                 + count("cache_read_input_tokens");
-            (tokens > 0).then_some(TranscriptUsage { tokens, window: 0 })
-        })
+            if tokens > 0 {
+                found = Some(TranscriptUsage { tokens, window: 0 });
+            }
+        }
+        if found.is_none()
+            && has_token_count
+            && row.get("type").and_then(serde_json::Value::as_str) == Some("event_msg")
+            && row
+                .pointer("/payload/type")
+                .and_then(serde_json::Value::as_str)
+                == Some("token_count")
+            && let Some(info) = row.pointer("/payload/info")
+        {
+            let counts = info
+                .get("last_token_usage")
+                .or_else(|| info.get("total_token_usage"));
+            let tokens = counts
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let window = info
+                .get("model_context_window")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if window > 0 && best_window == 0 {
+                best_window = window;
+            }
+            if tokens > 0 {
+                found = Some(TranscriptUsage { tokens, window });
+            }
+        }
+        if let Some(usage) = found {
+            if usage.window > 0 {
+                return Some(usage);
+            }
+            if best_window > 0 {
+                return Some(TranscriptUsage {
+                    tokens: usage.tokens,
+                    window: best_window,
+                });
+            }
+            if !has_token_count && !chunk.contains(CONTEXT_WINDOW_FIELD) {
+                return Some(usage);
+            }
+        }
+    }
+    found.map(|usage| TranscriptUsage {
+        tokens: usage.tokens,
+        window: if usage.window > 0 {
+            usage.window
+        } else {
+            best_window
+        },
+    })
 }
 
 /// A Codex rollout's `turn_context` payload, for a row that is one.
@@ -5425,6 +5505,8 @@ mod tests {
     #[test]
     fn a_document_cut_mid_write_is_not_read_and_the_agent_names_the_model() {
         let text = atif_session(&[ATIF_SYSTEM, ATIF_USER].join(","));
+        // A document read while its CLI was writing it is no document yet; one
+        // with no agent step names the model its agent was started on.
         assert_eq!(
             document_read(&text[..text.len() / 2], Detail::Clipped),
             None
@@ -5433,5 +5515,120 @@ mod tests {
         let read = document_read(&text, Detail::Clipped).expect("a document");
         assert_eq!(read.model.as_deref(), Some("example-default-model"));
         assert_eq!(read.usage, None);
+    }
+
+    /// Six user turns across 61 ATIF-v1.7 steps (array user message, multiple
+    /// tool calls, `is_error: true` observation, and growing prompt tokens) all
+    /// read in order without stopping after the first turn.
+    #[test]
+    fn a_multi_turn_61_step_atif_document_reads_every_turn_and_tool_error() {
+        let mut steps: Vec<String> = Vec::with_capacity(61);
+        steps.push(ATIF_SYSTEM.to_string());
+        for turn in 0..6 {
+            let base = steps.len() + 1;
+            if turn == 2 {
+                steps.push(format!(
+                    r#"{{"step_id":{base},"timestamp":"2026-01-02T03:04:{:02}Z","source":"user","message":[{{"type":"text","text":"user turn {turn}"}}]}}"#,
+                    turn * 10
+                ));
+            } else {
+                steps.push(format!(
+                    r#"{{"step_id":{base},"timestamp":"2026-01-02T03:04:{:02}Z","source":"user","message":"user turn {turn}"}}"#,
+                    turn * 10
+                ));
+            }
+            for call in 0..8 {
+                let sid = steps.len() + 1;
+                let failed = turn == 4 && call == 3;
+                steps.push(format!(
+                    r#"{{"step_id":{sid},"source":"agent","model_name":"example-model-v2","message":"","tool_calls":[{{"tool_call_id":"t{turn}-c{call}","function_name":"exec","arguments":{{"command":"echo {turn}-{call}"}}}}],"observation":{{"results":[{{"source_call_id":"t{turn}-c{call}","content":"out {turn}-{call}","is_error":{failed}}}]}},"metrics":{{"prompt_tokens":{}}}}}"#,
+                    20_000 + sid * 100
+                ));
+            }
+            let ans_id = steps.len() + 1;
+            steps.push(format!(
+                r#"{{"step_id":{ans_id},"source":"agent","model_name":"example-model-v2","message":"answer turn {turn}","metrics":{{"prompt_tokens":{}}}}}"#,
+                20_000 + ans_id * 100
+            ));
+        }
+        assert_eq!(steps.len(), 61);
+        let read = document_read(&atif_session(&steps.join(",")), Detail::Clipped)
+            .expect("61-step ATIF document");
+        assert_eq!((read.steps.len(), read.settled), (61, 61));
+        let users: Vec<&str> = read
+            .steps
+            .iter()
+            .flatten()
+            .filter(|turn| turn.role == "user")
+            .map(|turn| turn.text.as_str())
+            .collect();
+        assert_eq!(
+            users,
+            [
+                "user turn 0",
+                "user turn 1",
+                "user turn 2",
+                "user turn 3",
+                "user turn 4",
+                "user turn 5",
+            ]
+        );
+        let answers: Vec<&str> = read
+            .steps
+            .iter()
+            .flatten()
+            .filter(|turn| turn.role == "assistant")
+            .map(|turn| turn.text.as_str())
+            .collect();
+        assert_eq!(answers.len(), 6);
+        assert_eq!(answers.last().copied(), Some("answer turn 5"));
+        let errored: Vec<&str> = read
+            .steps
+            .iter()
+            .flatten()
+            .filter(|turn| {
+                turn.role == "tool_result" && turn.tool.as_ref().is_some_and(|t| t.is_error)
+            })
+            .map(|turn| turn.tool.as_ref().unwrap().call_id.as_str())
+            .collect();
+        assert_eq!(errored, ["t4-c3"]);
+        assert_eq!(
+            read.usage,
+            Some(TranscriptUsage {
+                tokens: 26_100,
+                window: 0
+            })
+        );
+    }
+
+    /// Codex rollouts report `token_count` and `model_context_window` on
+    /// `event_msg` lines rather than Claude's `message.usage`: `usage_in` reads
+    /// both tokens and window without affecting Claude/zo lines.
+    #[test]
+    fn usage_in_reads_rollout_token_count_and_context_window() {
+        let rollout = [
+            rollout::META,
+            rollout::CONTEXT,
+            rollout::STARTED,
+            r#"{"timestamp":"2026-09-05T05:31:37.376Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":42000},"model_context_window":258400}}}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            usage_in(&rollout),
+            Some(TranscriptUsage {
+                tokens: 42_000,
+                window: 258_400
+            })
+        );
+        // Window declared on `task_started` still pairs with a `token_count`
+        // that omits `model_context_window`.
+        let split = [rollout::STARTED, rollout::TOKENS].join("\n");
+        assert_eq!(
+            usage_in(&split),
+            Some(TranscriptUsage {
+                tokens: 1,
+                window: 258_400
+            })
+        );
     }
 }

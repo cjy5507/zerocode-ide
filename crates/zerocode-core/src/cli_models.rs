@@ -65,6 +65,10 @@ pub struct Listed {
     /// (`ListShape::Json`'s `family`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
+    /// The model's declared context window in tokens, when its CLI lists one
+    /// (`ListShape::Json`'s `context_window`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// What came of one ask.
@@ -172,14 +176,7 @@ pub fn read(shape: ListShape, ran: &Ran) -> Answer {
             };
             let listed = match shape {
                 ListShape::Unmeasured => return unread(UnreadWhy::Unmeasured),
-                ListShape::Json {
-                    list,
-                    each,
-                    id,
-                    name,
-                    default,
-                    family,
-                } => json_list(stdout, list, each, id, name, default, family),
+                ListShape::Json { .. } => json_list(stdout, shape),
                 ListShape::Lines => line_list(stdout),
             };
             listed.map_or_else(
@@ -243,15 +240,19 @@ pub fn said_as(program: &str, words: &[&str]) -> String {
 /// name rides only where it differs from the id; the default is the CLI's
 /// own. A model without an id, or a group without its list, makes the whole
 /// answer not the measured shape — half a list is not the CLI's list.
-fn json_list(
-    text: &str,
-    list: &str,
-    each: Option<&str>,
-    id: &str,
-    name: Option<&str>,
-    default: Option<&str>,
-    family: Option<&str>,
-) -> Option<(Vec<Listed>, Option<String>)> {
+fn json_list(text: &str, shape: ListShape) -> Option<(Vec<Listed>, Option<String>)> {
+    let ListShape::Json {
+        list,
+        each,
+        id,
+        name,
+        default,
+        family,
+        context_window,
+    } = shape
+    else {
+        return None;
+    };
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let text_at = |value: &serde_json::Value, pointer: &str| {
         value
@@ -286,7 +287,18 @@ fn json_list(
             let name = name
                 .and_then(|pointer| text_at(entry, pointer))
                 .filter(|name| *name != id);
-            Some(Listed { id, name, family })
+            let context_window = context_window.and_then(|pointer| {
+                entry
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|tokens| *tokens > 0)
+            });
+            Some(Listed {
+                id,
+                name,
+                family,
+                context_window,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
     Some((models, default.and_then(|pointer| text_at(&value, pointer))))
@@ -302,6 +314,7 @@ fn line_list(text: &str) -> Option<(Vec<Listed>, Option<String>)> {
             id: id.to_string(),
             name: None,
             family: None,
+            context_window: None,
         })
         .collect();
     (!models.is_empty()).then_some((models, None))
@@ -478,11 +491,13 @@ mod tests {
                         id: "auto".into(),
                         name: None,
                         family: None,
+                        context_window: None,
                     },
                     Listed {
                         id: "example-model".into(),
                         name: Some("Example Model".into()),
                         family: None,
+                        context_window: None,
                     },
                 ],
                 default: Some("auto".into()),
@@ -496,6 +511,7 @@ mod tests {
             name: None,
             default: None,
             family: None,
+            context_window: None,
         };
         assert_eq!(
             read(bare, &ended(0, r#"["model-a", "model-b"]"#, "")).listed(),
@@ -504,11 +520,13 @@ mod tests {
                     id: "model-a".into(),
                     name: None,
                     family: None,
+                    context_window: None,
                 },
                 Listed {
                     id: "model-b".into(),
                     name: None,
                     family: None,
+                    context_window: None,
                 },
             ]
         );
@@ -627,6 +645,7 @@ mod tests {
                     id: format!("{family}-{at}"),
                     name: None,
                     family: Some(family.into()),
+                    context_window: None,
                 }
             })
             .collect();
@@ -663,8 +682,8 @@ mod tests {
     fn a_grouped_list_and_a_list_of_lines_are_read_by_their_rows() {
         let grouped = r#"{"families":[
             {"slug":"family-a","aliases":["a"],"variants":[
-                {"model_uid":"family-a-high","label":"Family A High","is_new":false},
-                {"model_uid":"family-a-max","label":"Family A Max","is_new":true}]},
+                {"model_uid":"family-a-high","label":"Family A High","max_context_tokens":262000,"is_new":false},
+                {"model_uid":"family-a-max","label":"Family A Max","max_context_tokens":1000000,"is_new":true}]},
             {"slug":"family-b","aliases":[],"variants":[
                 {"model_uid":"family-b","label":"family-b","is_new":false}]}
         ]}"#;
@@ -677,16 +696,19 @@ mod tests {
                         id: "family-a-high".into(),
                         name: Some("Family A High".into()),
                         family: Some("family-a".into()),
+                        context_window: Some(262_000),
                     },
                     Listed {
                         id: "family-a-max".into(),
                         name: Some("Family A Max".into()),
                         family: Some("family-a".into()),
+                        context_window: Some(1_000_000),
                     },
                     Listed {
                         id: "family-b".into(),
                         name: None,
                         family: Some("family-b".into()),
+                        context_window: None,
                     },
                 ],
                 default: None,
@@ -714,11 +736,13 @@ mod tests {
                     id: "provider-a/model-a".into(),
                     name: None,
                     family: None,
+                    context_window: None,
                 },
                 Listed {
                     id: "provider-b/model-b".into(),
                     name: None,
                     family: None,
+                    context_window: None,
                 },
             ]
         );

@@ -902,12 +902,19 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             ])],
             vault_resume_carries_launch_args: true,
             // `devin --help` (3000.14.30821, 2026-11-21): `--model <MODEL>`
-            // (also `DEVIN_MODEL`), and no effort flag. `models list --format
-            // json` — "List available models, organized by model family" —
-            // answered the same day (t-124593, 0.7 s): `{"families":[{"slug",
-            // "aliases","variants":[{"model_uid","label",…}]}]}`, 55 families
-            // and 1,302 models, no default named; an effort is part of a
-            // model's id (`…-high`, `…-max`), not a flag of its own.
+            // (also `DEVIN_MODEL`), and no effort flag. `models.mdx` (:60-68)
+            // and `reference/commands.mdx` (:494): `/model [name]` switches
+            // models during a session (`/model opus`, `/model sonnet`, or bare
+            // `/model` for its picker). `models list --format json` — "List
+            // available models, organized by model family" — answered the same
+            // day (t-124593, 0.7 s): `{"families":[{"slug","aliases",
+            // "variants":[{"model_uid","label","max_context_tokens",…}]}]}`,
+            // 55 families and 1,302 models, no default named; an effort is
+            // part of a model's id (`…-high`, `…-max`), not a flag of its own.
+            moves: TurnMoves {
+                model: Some(MoveRoad::Line("/model")),
+                ..TurnMoves::NONE
+            },
             tuning: Some(LaunchTuning {
                 model_flag: "--model",
                 effort: None,
@@ -922,6 +929,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                     name: Some("/label"),
                     default: None,
                     family: Some("/slug"),
+                    context_window: Some("/max_context_tokens"),
                 },
             }),
             ..Harness::PLAIN
@@ -1335,6 +1343,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                     name: Some("/model_name"),
                     default: Some("/default_model"),
                     family: None,
+                    context_window: None,
                 },
             }),
             ..Harness::PLAIN
@@ -2744,6 +2753,10 @@ mod tests {
         assert!(!of("codex").model_command_takes_id);
         assert_eq!(of("zo").model_command, Some("/model"));
         assert!(of("zo").model_command_takes_id);
+        // Devin CLI docs (`models.mdx` :60-68, `reference/commands.mdx` :494):
+        // `/model [name]` switches models directly during a session.
+        assert_eq!(of("devin").model_command, Some("/model"));
+        assert!(of("devin").model_command_takes_id);
         assert_eq!(of("aider").model_command, None);
         assert!(!of("aider").model_command_takes_id);
         for row in &rows {
