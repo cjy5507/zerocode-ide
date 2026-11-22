@@ -340,8 +340,10 @@ impl LiveTurnBuffer {
     /// - one written after the turn's `Stop` holds it, whatever its words.
     ///
     /// A document with fewer settled steps than the last read was replaced: a
-    /// prompt may stand anywhere in it. A read of another session starts
-    /// afresh.
+    /// prompt may stand anywhere in it. A read of another session than the
+    /// hooks told says nothing of their turns — the pane's record of its
+    /// conversation can trail its newest hook by a moment — and a buffer no
+    /// hook named a session takes the read's.
     pub fn reconcile(
         &mut self,
         session_id: Option<&str>,
@@ -349,10 +351,10 @@ impl LiveTurnBuffer {
         brought: &[(usize, &TranscriptTurn)],
     ) {
         if self.session_id.as_deref() != session_id {
-            *self = Self {
-                session_id: session_id.map(str::to_string),
-                ..Self::default()
-            };
+            if self.session_id.is_some() {
+                return;
+            }
+            self.session_id = session_id.map(str::to_string);
         }
         if self.read.is_some_and(|last| read.settled < last.settled) {
             for turn in &mut self.turns {
@@ -1086,9 +1088,9 @@ mod tests {
     }
 
     /// F3: the rows are of the session the hooks told; a pane on another
-    /// conversation shows none, and a read of another session starts
-    /// afresh. F5: a read on from where the last one ended, of the same file,
-    /// is known unchanged.
+    /// conversation shows none, and a read of another session leaves them
+    /// as they are. F5: a read on from where the last one ended, of the same
+    /// file, is known unchanged.
     #[test]
     fn rows_and_reads_are_of_one_session() {
         let mut buffer = LiveTurnBuffer::default();
@@ -1121,8 +1123,23 @@ mod tests {
             },
             &[],
         );
-        assert!(buffer.is_empty() && buffer.rows_of(Some(SESSION)).is_empty());
-        assert!(buffer.read_unchanged(Some("another-session"), (4, None), 1));
+        assert_eq!(
+            buffer.rows_of(Some(SESSION)).len(),
+            1,
+            "a read of another conversation took this one's turns"
+        );
+        assert!(!buffer.read_unchanged(Some("another-session"), (4, None), 1));
+        // A buffer a read began takes the read's session.
+        let mut read_first = LiveTurnBuffer::default();
+        read_first.reconcile(
+            Some("another-session"),
+            DocRead {
+                stamp: (4, None),
+                settled: 1,
+            },
+            &[],
+        );
+        assert!(read_first.read_unchanged(Some("another-session"), (4, None), 1));
     }
 
     /// A buffer remembers its last few turns: one that nothing read for
