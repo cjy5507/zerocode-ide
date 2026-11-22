@@ -194,6 +194,64 @@ export async function testComposerMenuPosition(page, ok) {
     Boolean(spill) && spill.offTopBy === 0 && spill.offBottomBy === 0 && spill.flippedBelow,
     JSON.stringify({ ...palette, ...(spill ?? {}) }),
   );
+
+  // 6. At a narrow 320px viewport with a long model list (>30 rows, as a
+  //    multi-vendor CLI such as Devin lists), the menu stays inside the 320px
+  //    viewport with no clipped buttons, shows the sticky search field, and
+  //    filters across families.
+  await page.setViewportSize({ width: 320, height: 640 });
+  const narrowSearch = await page.evaluate(async () => {
+    const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+    const chat = document.querySelector(`.pane-slot[data-term="${window.__TERM__}"] .pane-chat`);
+    chat.style.cssText = "";
+    const composer = chat?.querySelector(".worker-composer");
+    const chip = composer?.querySelector(".worker-composer-agent");
+    // Close any standing popup.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle(60);
+    const many = Array.from({ length: 42 }, (_, at) => ({
+      id: `fam-${Math.floor(at / 7)}-v${at}`,
+      display_name: `Family ${Math.floor(at / 7)} Variant ${at} Very Long Display Name`,
+      provider: "claude",
+      family: `fam-${Math.floor(at / 7)}`,
+    }));
+    window.__ANSWER__.agent_models = () => many;
+    agentModelLists.clear();
+    chip?.click();
+    await settle(260);
+    const menu = composer?.querySelector(".composer-menu");
+    const search = menu?.querySelector(".composer-menu-search");
+    const m = menu?.getBoundingClientRect();
+    const s = search?.getBoundingClientRect();
+    const firstBtn = menu?.querySelector(".composer-menu-item")?.getBoundingClientRect();
+    const beforeCount = menu?.querySelectorAll(".composer-menu-item").length ?? 0;
+    if (search) {
+      search.value = "fam-5-v38";
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle(40);
+    }
+    const filteredNames = [...(menu?.querySelectorAll(".composer-menu-models .composer-menu-item .composer-menu-name") ?? [])]
+      .map((node) => node.textContent);
+    const vw = Math.round(innerWidth);
+    return {
+      vw,
+      hasSearch: Boolean(search),
+      menuInWindow: Boolean(m) && Math.round(m.left) >= -2 && Math.round(m.right) <= vw + 2,
+      searchVisible: Boolean(s) && s.width > 120 && Math.round(s.right) <= vw + 2,
+      buttonUnclipped: Boolean(firstBtn) && Math.round(firstBtn.left) >= Math.round(m.left) - 1 && Math.round(firstBtn.right) <= Math.round(m.right) + 1 && Math.round(firstBtn.right) <= vw + 2,
+      beforeCount,
+      filteredNames,
+    };
+  });
+  ok(
+    "at 320px width, a long (>30) model list opens a searchable menu inside the viewport with unclipped buttons and filters across families",
+    narrowSearch.hasSearch && narrowSearch.menuInWindow && narrowSearch.searchVisible &&
+      narrowSearch.buttonUnclipped && narrowSearch.beforeCount > 6 &&
+      narrowSearch.filteredNames.length === 1 && narrowSearch.filteredNames[0].includes("Variant 38"),
+    JSON.stringify(narrowSearch),
+  );
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1280, height: 900 });
 }
 
 /* ---- how the composer's menus open and close (2026-11-08) ------------------

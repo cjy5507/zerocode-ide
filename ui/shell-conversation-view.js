@@ -3776,7 +3776,9 @@ function helperCardOf(run) {
 function nowActivityOf(run) {
   if (run.wire) return null;
   if (isHelperPage(run)) return newestActivity(helperCardOf(run)) ?? null;
-  return run.helper?.id === PANE_LOG_ID ? paneNow.get(run.term) ?? null : null;
+  return run.helper?.id === PANE_LOG_ID
+    ? paneNow.get(run.term) ?? newestActivity(`term:${run.term}`) ?? null
+    : null;
 }
 
 /* The kind an activity's verb is drawn by: the catalog's todo tool; else the word the core reduced the

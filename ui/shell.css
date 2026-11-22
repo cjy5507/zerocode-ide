@@ -20860,7 +20860,44 @@ details[open] > .helper-cap::after {
 .composer-menu {
   position: fixed;
   inset: auto;
-  min-width: 16rem;
+  min-width: min(16rem, calc(100vw - var(--space-4)));
+  max-width: calc(100vw - var(--space-4));
+  box-sizing: border-box;
+}
+
+.composer-menu-search {
+  display: block;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.composer-menu-search::placeholder {
+  color: var(--ink-mist);
+}
+
+.composer-menu-search:hover,
+.composer-menu-search:focus-visible {
+  border-color: var(--edge-mark);
+}
+
+.composer-menu-family {
+  padding: var(--space-1) var(--space-2) 0;
+  font-size: var(--text-3xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-mist);
 }
 
 .composer-slash[hidden] {
@@ -20919,7 +20956,14 @@ details[open] > .helper-cap::after {
   color: var(--chat-accent);
 }
 
-.composer-menu-name,
+.composer-menu-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-slash-name {
   flex: none;
 }
@@ -21759,7 +21803,7 @@ button.helper-sib:hover {
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
  * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy, .helper-code-wrap, .helper-code-more, .helper-tool-gap):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-menu-search, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy, .helper-code-wrap, .helper-code-more, .helper-tool-gap):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -21801,6 +21845,7 @@ button.helper-sib:hover {
   .helper-rewind,
   .helper-expand,
   .composer-menu-item,
+  .composer-menu-search,
   .composer-slash-row,
   .worker-composer-slash,
   .helper-crumb-back,

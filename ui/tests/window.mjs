@@ -56928,6 +56928,158 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         .map((one) => one.textContent);
       seen.helperRows = quietRows;
       seen.copyUnlisted = quietRows.length > 0 && !quietRows.includes("/copy");
+
+      // A turn-settling multi-model CLI pane (Devin: `/model [name]` per
+      // models.mdx:60-68, OwnList >30 models with `context_window`, no effort
+      // ladder, provisional `live_turns` replaced cleanly when ATIF settles,
+      // live foot clock, and tab-switch refresh after a background turn ends).
+      const baseListAgents = window.__ANSWER__.list_agents;
+      const devinSpec = {
+        id: "devin", name: "Devin", favicon_domain: "devin.ai",
+        homepage_url: "https://devin.ai/cli", installed: true,
+        found_as: "devin", unsupported_here: false, missing_requirement: null,
+        takes_a_paste: true, ready: "quiet", glyph: "", busy_word: "",
+        models_provider: null, model_command: "/model", model_command_takes_id: true,
+        permission_road: null, permission_modes: [],
+      };
+      window.__ANSWER__.list_agents = () => [...(baseListAgents?.() ?? []), devinSpec];
+      await refreshAgents();
+      const devinModels = [
+        { id: "gemini-4-neon-xhigh", display_name: "Gemini 4 Neon XHigh", provider: "devin", family: "gemini-4-neon", context_window: 1000000 },
+        { id: "swe-2-high", display_name: "SWE-2 High", provider: "devin", family: "swe-2", context_window: 262000 },
+        { id: "gpt-6-2-astra-medium", display_name: "GPT-6.2 Astra Medium Thinking", provider: "devin", family: "gpt-6.2-astra", context_window: 1050000 },
+        ...Array.from({ length: 32 }, (_, idx) => ({
+          id: `extra-fam-${idx % 4}-v${idx}`,
+          display_name: `Extra ${idx}`,
+          provider: "devin",
+          family: `extra-fam-${idx % 4}`,
+          context_window: 200000,
+        })),
+      ];
+      const prevAgentModels = window.__ANSWER__.agent_models;
+      window.__ANSWER__.agent_models = (args) => args.agent === "devin" ? devinModels : prevAgentModels(args);
+      const prevPaneEffort = window.__ANSWER__.pane_effort;
+      window.__ANSWER__.pane_effort = (args) => args.term === devinTerm
+        ? { current: null, witness: "default", ladder: [], door: "none", command: null, stuck: "no_road", rewritesCache: false, pending: null }
+        : (prevPaneEffort ? prevPaneEffort(args) : null);
+      let devinPhase = "mid";
+      let devinPolls = 0;
+      const prevPaneLog = window.__ANSWER__.pane_log;
+      let devinTerm = null;
+      window.__ANSWER__.pane_log = (args) => {
+        if (args.term !== devinTerm) return prevPaneLog(args);
+        devinPolls += 1;
+        if (devinPhase === "mid") {
+          return {
+            found: true,
+            next: 3,
+            start: 0,
+            model: "gemini-4-neon-xhigh",
+            usage: { tokens: 26000, window: 0 },
+            turns: args.after ? [] : [
+              { role: "user", text: "turn 1" },
+              { role: "assistant", text: "answer 1" },
+            ],
+            live_turns: [
+              { role: "user", text: "turn 2 live" },
+              { role: "tool", text: "exec ls", tool: { kind: "bash", name: "exec", call_id: "c-live-1", input: "ls", result: "", is_error: false } },
+              { role: "tool_result", text: "a.rs", tool: { kind: "bash", name: "exec", call_id: "c-live-1", input: "", result: "a.rs", is_error: false } },
+            ],
+          };
+        }
+        if (devinPhase === "settled") {
+          return {
+            found: true,
+            next: 6,
+            start: args.after ? 3 : 0,
+            model: "gemini-4-neon-xhigh",
+            usage: { tokens: 40000, window: 1000000 },
+            turns: [
+              { role: "user", text: "turn 2 live" },
+              { role: "tool", text: "exec ls", tool: { kind: "bash", name: "exec", call_id: "c-live-1", input: "ls", result: "", is_error: false } },
+              { role: "tool_result", text: "a.rs", tool: { kind: "bash", name: "exec", call_id: "c-live-1", input: "", result: "a.rs", is_error: false } },
+              { role: "assistant", text: "answer 2" },
+            ],
+            live_turns: [],
+          };
+        }
+        return {
+          found: true,
+          next: 8,
+          start: 6,
+          model: "gemini-4-neon-xhigh",
+          usage: { tokens: 50000, window: 1000000 },
+          turns: [
+            { role: "user", text: "turn 3 background" },
+            { role: "assistant", text: "answer 3" },
+          ],
+          live_turns: [],
+        };
+      };
+      devinTerm = await openTermTab({ placement: "tab" });
+      const devinTab = tabOfTerm(devinTerm);
+      tell("hook:agent", { term: devinTerm, state: "working", agent: "devin", session: "s-devin", resumable: false, model: "gemini-4-neon-xhigh" });
+      await window.__PAINTED__();
+      el("view-toggle-chat").click();
+      await until(() => document.querySelector(`.pane-slot[data-term="${devinTerm}"] .pane-chat .is-provisional`));
+      const devinChat = document.querySelector(`.pane-slot[data-term="${devinTerm}"] .pane-chat`);
+      const devinComposer = devinChat?.querySelector(".worker-composer");
+      // Hook activity updates foot line; tickWorkers updates .helper-status-clock.
+      tell("hook:activity", {
+        pane: `term:${devinTerm}`,
+        activities: [{ at: Date.now(), activity: { verb: "bash", target: "git status", phase: "started" } }],
+      });
+      await settle(40);
+      const footWordsBefore = devinChat?.querySelector(".helper-status-now")?.textContent ?? "";
+      const devinRun = activeHelperPage()?.worker;
+      if (devinRun) devinRun.startedAt = Date.now() - 65_000;
+      tickWorkers();
+      const footClockAfterTick = devinChat?.querySelector(".helper-status-clock")?.textContent ?? "";
+      seen.devinMidProvisional = devinChat?.querySelectorAll(".is-provisional").length ?? 0;
+      seen.devinFootActivity = footWordsBefore;
+      seen.devinFootClockTicked = footClockAfterTick.includes("1분") || footClockAfterTick.includes("1m") || footClockAfterTick.includes("65");
+      // Open Devin model menu: search field present, context window resolved from list (not 창 모름), effort chip hidden.
+      const devinChip = devinComposer?.querySelector(".worker-composer-agent");
+      devinChip?.click();
+      await until(() => devinComposer?.querySelector(".composer-menu .composer-menu-search"));
+      const devinSearch = devinComposer?.querySelector(".composer-menu-search");
+      seen.devinHasSearch = Boolean(devinSearch);
+      seen.devinChipNamed = devinChip?.querySelector(".worker-composer-model-words")?.textContent ?? "";
+      seen.devinEffortHidden = devinComposer?.querySelector(".worker-composer-effort")?.hidden === true;
+      seen.devinContextWords = devinComposer?.querySelector(".worker-composer-context .worker-composer-pill-words")?.textContent ?? "";
+      // Filter and pick SWE-2 High → sends `/model swe-2-high` down the same send road.
+      devinSearch.value = "swe-2";
+      devinSearch.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle(40);
+      const sweBtn = [...devinComposer.querySelectorAll(".composer-menu-models .composer-menu-item")]
+        .find((row) => row.querySelector(".composer-menu-name")?.textContent === "SWE-2 High");
+      const sentBeforeDevin = calls.length;
+      sweBtn?.click();
+      await until(() => calls.length >= sentBeforeDevin + 2);
+      await settle(60);
+      seen.devinModelSent = JSON.stringify(calls.slice(-2));
+      seen.wantDevinModelSent = JSON.stringify([["paste", devinTerm, "/model swe-2-high"], ["key", devinTerm, "Enter", false]]);
+      seen.devinModelRoads = JSON.stringify(roads.slice(-2));
+      // Authoritative ATIF settles: provisional rows vanish and turn 2 appears ONCE (0 duplicates).
+      devinPhase = "settled";
+      tell("hook:agent", { term: devinTerm, state: "done", agent: "devin", session: "s-devin", resumable: false, model: "gemini-4-neon-xhigh" });
+      await until(() => (devinChat?.querySelectorAll(".is-provisional").length ?? 1) === 0 && devinChat?.textContent.includes("answer 2"));
+      const turn2Occurrences = [...devinChat.querySelectorAll(".helper-turn.is-user")].filter((n) => n.textContent.includes("turn 2 live")).length;
+      const toolOccurrences = [...devinChat.querySelectorAll(".helper-turn.is-tool")].filter((n) => n.textContent.includes("ls")).length;
+      seen.devinSettledZeroDupes = turn2Occurrences === 1 && toolOccurrences === 1 && devinChat.querySelectorAll(".is-provisional").length === 0;
+      // Switch to another tab, let turn 3 finish while inactive (`done`), then switch back: setActiveTab polls and paints turn 3.
+      const otherTab = tabOfTerm(term);
+      setActiveTab(otherTab.id);
+      await settle(40);
+      devinPhase = "turn3";
+      tell("hook:agent", { term: devinTerm, state: "done", agent: "devin", session: "s-devin", resumable: false, model: "gemini-4-neon-xhigh" });
+      await settle(40);
+      setActiveTab(devinTab.id);
+      await until(() => devinChat?.textContent.includes("answer 3"));
+      seen.devinInactiveTabTurn3 = devinChat?.textContent.includes("turn 3 background") && devinChat?.textContent.includes("answer 3");
+      window.__ANSWER__.list_agents = baseListAgents;
+      if (prevPaneEffort) window.__ANSWER__.pane_effort = prevPaneEffort; else delete window.__ANSWER__.pane_effort;
+      await refreshAgents();
       delete window.__ANSWER__.term_paste; delete window.__ANSWER__.term_key;
       delete window.__ANSWER__.agent_models; delete window.__ANSWER__.slash_commands;
       delete window.__ANSWER__.pane_log; delete window.__ANSWER__.subagent_log;
@@ -56935,6 +57087,21 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       for (const at of [...termViews.keys()]) dropTermView(at);
       return seen;
     });
+    ok(
+      "a turn-settling multi-model CLI pane (Devin) renders mid-turn provisional turns, hook activity and ticking foot clock, replaces provisional rows with zero duplicates when ATIF settles, refreshes turns finished on an inactive tab, hides an empty effort chip, resolves context window from the model list, and sends `/model <id>` down the same chip road",
+      seen.devinMidProvisional === 2 && seen.devinFootActivity.includes("git status") &&
+        seen.devinFootClockTicked && seen.devinHasSearch &&
+        seen.devinChipNamed === " · Gemini 4 Neon XHigh" &&
+        seen.devinEffortHidden && !seen.devinContextWords.includes("모름") && seen.devinContextWords.includes("3%") &&
+        seen.devinModelSent === seen.wantDevinModelSent && seen.devinModelRoads === JSON.stringify(["model", null]) &&
+        seen.devinSettledZeroDupes && seen.devinInactiveTabTurn3,
+      JSON.stringify({
+        mid: seen.devinMidProvisional, foot: seen.devinFootActivity, tick: seen.devinFootClockTicked,
+        search: seen.devinHasSearch, named: seen.devinChipNamed, effortHidden: seen.devinEffortHidden,
+        ctx: seen.devinContextWords, sent: seen.devinModelSent, roads: seen.devinModelRoads,
+        zeroDupes: seen.devinSettledZeroDupes, turn3: seen.devinInactiveTabTurn3,
+      }),
+    );
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the pane's effort beside it (t-81532), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&

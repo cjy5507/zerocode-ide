@@ -5738,6 +5738,10 @@ function setActiveTab(id) {
   noteTermFocus();
   workerClock.sync();
   helperClock.sync();
+  // A pane conversation that finished while another tab was in front is now at
+  // rest (`helperClock` will not poll it): read once when brought forward so
+  // finished turns appear immediately.
+  if (activeHelperPage()?.worker.helper?.id === PANE_LOG_ID) void pollHelperPages();
   browserMenuPoll.sync();
   resourcePoll.sync();
   jevPoll.sync();

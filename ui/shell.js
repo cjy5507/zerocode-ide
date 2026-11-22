@@ -10689,16 +10689,22 @@ listen("hook:activity", (event) => {
   // The file tree wears the files these name (t-24298) — the batch as it
   // came, never the ring: a file already lit is not lit again by a replay.
   noteTreeActivities(pane, activities);
-  // A helper's page says what its own card last did when no row is out to say
-  // it (`nowActivityOf`): the card's news is the foot line's, not the list's.
+  // A helper's page — or a pane's own conversation whose CLI writes its file
+  // only after the turn ends — says what its card last did when no row is out
+  // to say it (`nowActivityOf`): the card's news is the foot line's, not the
+  // list's.
   const page = activeHelperPage();
-  if (page && isHelperPage(page.worker) && helperCardOf(page.worker) === pane) {
+  const term = Number(/^term:(\d+)$/.exec(pane)?.[1]);
+  if (
+    page &&
+    ((isHelperPage(page.worker) && helperCardOf(page.worker) === pane) ||
+      (Number.isInteger(term) && page.worker.helper?.id === PANE_LOG_ID && page.worker.term === term))
+  ) {
     const status = helperStatusOf(page);
     if (status) updateHelperStatus(status, page.worker);
   }
   // A tool call is a line in the transcript already; the conversation view on
   // this pane, if it is up, reads it now (`pollHelperPages` is the one reader).
-  const term = Number(/^term:(\d+)$/.exec(pane)?.[1]);
   if (Number.isInteger(term) && paneChatOn(term) && activeHelperPage()?.worker.term === term) {
     void pollHelperPages();
   }
@@ -14262,8 +14268,11 @@ const workerClock = idlePoller({
 function tickWorkers() {
   const active = activeRunningPage();
   if (!active) return;
+  const elapsed = workerElapsedWords(active.run);
   const face = active.host.querySelector(".worker-elapsed");
-  if (face) writeTextContent(face, workerElapsedWords(active.run));
+  if (face) writeTextContent(face, elapsed);
+  const footClock = active.host.querySelector(".helper-status-clock");
+  if (footClock) writeTextContent(footClock, elapsed);
 }
 
 function workerStatusWords(run) {
@@ -15946,6 +15955,15 @@ const helperClock = idlePoller({
   tick: () => void pollHelperPages(),
 });
 
+// A pane conversation that finished while the window was hidden retained its
+// new turns in memory (or missed a background poll) and is now at rest, so
+// `helperClock` will not wake it; read and paint once the window is visible.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || document.visibilityState !== "visible") return;
+  const page = activeHelperPage();
+  if (page?.worker.helper?.id === PANE_LOG_ID) void pollHelperPages();
+});
+
 async function pollHelperPages() {
   const tab = activeHelperPage();
   if (!tab) return;
@@ -16046,19 +16064,33 @@ async function pollHelperPages() {
           }
         }
         held.next = more?.next ?? held.next;
+        const incomingLive = Array.isArray(more?.live_turns) ? more.live_turns : [];
+        const liveSig = incomingLive.length > 0 ? JSON.stringify(incomingLive) : "";
+        const liveMoved = (held.liveSig ?? "") !== liveSig;
+        if (liveMoved) {
+          held.liveSig = liveSig;
+          held.liveTurns = incomingLive;
+        }
         // A wire's log carries the session's state beside its turns — status, the
         // open question, model, mode, commands. It lives on the run (the page and
         // the composer read it there), and a change repaints with no new turn.
         const wireMoved = held.id === WIRE_LOG_ID ? holdWireState(tab.worker, more) : { state: false, live: false };
         const wireChanged = wireMoved.state || wireMoved.live;
-        if (document.hidden || activeHelperPage() !== tab) return;
+        const dataMoved = Boolean(more?.turns?.length) || replaced || skippedNow || wireChanged ||
+          usageMoved || aboutMoved || firstAnswer || liveMoved;
+        if (document.hidden || activeHelperPage() !== tab) {
+          if (dataMoved) held.dirtyPaint = true;
+          return;
+        }
         // The page on screen is drawn — by this answer's paint below, or already:
         // what stands above its newest turns is read once that frame is up.
         fillAboveOnce(tab.worker);
         // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
         // that brought no new line repaints once when a hook moved since the paint.
         const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
-        if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved && !firstAnswer) return;
+        const dirtyPaint = held.dirtyPaint === true;
+        if (!dataMoved && !hooksMoved && !dirtyPaint) return;
+        held.dirtyPaint = false;
         if (wireMoved.state) syncWorkerComposers(tab.worker);
         if (wireMoved.state) settleComposerQueue(tab.worker);
         // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
@@ -16067,7 +16099,7 @@ async function pollHelperPages() {
         // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`). 말만 움직였으면 그 말이
         // 흐르는 행과 발밑 줄만 그린다(t-22095).
         const wordsOnly = wireMoved.live && !wireMoved.state && !more?.turns?.length && !replaced && !skippedNow &&
-          !usageMoved && !hooksMoved && !aboutMoved;
+          !usageMoved && !hooksMoved && !aboutMoved && !liveMoved && !dirtyPaint;
         if (wordsOnly) paintHelperWords(tab);
         else paintHelperSurface(tab);
         // The file goes on past this chunk (a page opened late on a long
@@ -17894,6 +17926,7 @@ function syncHelperTurns(list, run) {
     run.helper.gone?.clear();
     list.__lastAnswer = null;
     list.__tailed = null;
+    syncProvisionalTurns(list, run);
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
@@ -18055,6 +18088,7 @@ function syncHelperTurns(list, run) {
   // the foot, or under a pin the page itself holds (`standChatPinRoom`, below).
   standNewestResult(list, run, follow || Boolean(list.__follow?.pin && !list.__follow.pinMoved));
   askShelfAgain(list);
+  syncProvisionalTurns(list, run);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
   // A finished helper's page opens on its report, at the top (t-15682).
@@ -18236,6 +18270,33 @@ function standEarlierRows(list, run, earlier, folded, spoken, pills) {
  * channel streams (`paneLive`, zo's frames) — the vendor writes its file a
  * turn at a time — and a pane with neither wire nor channel draws nothing
  * here. */
+/* Provisional turns accumulated from lifecycle hooks while a turn-settling CLI
+ * has not yet flushed its session document (`more.live_turns`). Rendered with
+ * the exact same row nodes and tool-result folding (`holdHelperTurns`), tagged
+ * `.is-provisional` without `data-turn` so settled transcript rows never
+ * collide with them; cleared in one paint once the authoritative document lands. */
+function syncProvisionalTurns(list, run) {
+  const sig = run.helper?.liveSig ?? "";
+  if (list.__provisionalSig === sig) return;
+  list.__provisionalSig = sig;
+  for (const stale of list.querySelectorAll(":scope > .is-provisional")) stale.remove();
+  const raw = run.helper?.liveTurns;
+  if (!Array.isArray(raw) || raw.length === 0) return;
+  const batch = { turns: [], seq: 0 };
+  holdHelperTurns(batch, raw);
+  const spoken = batch.turns.reduce(
+    (max, turn) => (turn.role === "user" || turn.role === "assistant" ? Math.max(max, turn.seq) : max),
+    -1,
+  );
+  const anchor = list.querySelector(":scope > .is-streaming") ?? helperListTail(list);
+  for (const turn of batch.turns) {
+    const row = helperTurnRowNode(run, turn, spoken, false);
+    delete row.dataset.turn;
+    row.classList.add("is-provisional");
+    list.insertBefore(row, anchor);
+  }
+}
+
 function syncStreamingTurns(list, run) {
   const live = (run.wire ? run.wireLog?.live ?? [] : paneLiveOf(run)).filter(liveWords);
   const rows = [...list.querySelectorAll(":scope > .is-streaming")];

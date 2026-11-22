@@ -18386,13 +18386,17 @@ async function openNewChatAgentMenu(chip, host) {
   const menu = composerMenuNode();
   if (models.length > 0) {
     composerMenuSection(menu, t("newChat.model", "모델"));
-    composerMenuItem(menu, t("newChat.cliDefault", "기본"), t("newChat.modelDefaultSub", "CLI가 정한 모델"),
-      () => chooseNewChat(host, { model: "" }), { current: !newChatChoice.model });
-    for (const row of models) {
-      const words = row.display_name || row.id;
-      composerMenuItem(menu, words, words === row.id ? "" : row.id,
-        () => chooseNewChat(host, { model: row.id }), { current: newChatChoice.model === row.id });
-    }
+    appendComposerModelRows(menu, models, {
+      current: newChatChoice.model,
+      onPick: (id) => chooseNewChat(host, { model: id }),
+      defaultRow: {
+        words: t("newChat.cliDefault", "기본"),
+        sub: t("newChat.modelDefaultSub", "CLI가 정한 모델"),
+        on: () => chooseNewChat(host, { model: "" }),
+        current: !newChatChoice.model,
+      },
+      showSub: false,
+    });
   }
   composerMenuSection(menu, t("newChat.agent", "에이전트"));
   for (const row of installedAgents()) {
