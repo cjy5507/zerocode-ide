@@ -204,6 +204,8 @@ pub struct LiveTurnBuffer {
     turns: Vec<LiveTurn>,
     /// The last read of the session document that parsed it.
     read: Option<DocRead>,
+    /// How many reads parsed the document since the buffer began.
+    reads: u64,
 }
 
 impl LiveTurnBuffer {
@@ -238,13 +240,20 @@ impl LiveTurnBuffer {
             .all(|turn| turn.written || turn.rows.is_empty())
     }
 
-    /// Whether a turn that has ended waits for the document to hold it — what
-    /// the looks after a turn's end ask before they tell the page again.
+    /// How many reads parsed the document since the buffer began: what the
+    /// looks after a turn's end take at its `Stop` ([`Self::read_since`]).
     #[must_use]
-    pub fn awaits_document(&self) -> bool {
-        self.turns
-            .iter()
-            .any(|turn| turn.stopped.is_some() && !turn.written)
+    pub fn reads(&self) -> u64 {
+        self.reads
+    }
+
+    /// Whether, since the buffer had counted `reads`, the page read a document
+    /// that parsed and whose file is not the one stamped `at_stop` — one
+    /// written since the turn ended, which holds it: what the looks after a
+    /// turn's end ask before they tell the page again.
+    #[must_use]
+    pub fn read_since(&self, reads: u64, at_stop: Option<DocStamp>) -> bool {
+        self.reads > reads && self.read.is_some_and(|read| Some(read.stamp) != at_stop)
     }
 
     /// Whether a read on from `after` steps of `session_id`'s document, its
@@ -377,6 +386,7 @@ impl LiveTurnBuffer {
             turn.rows.clear();
         }
         self.read = Some(read);
+        self.reads = self.reads.saturating_add(1);
     }
 
     /// A prompt begins a turn of its own — unless its turn is told already. A
@@ -672,11 +682,15 @@ mod tests {
         assert_eq!(rows[2].text, "a.rs");
         assert_eq!(rows[2].tool.as_ref().map(|tool| tool.is_error), Some(false));
         assert_eq!(rows[3].text, "Found a.rs.");
-        assert!(buffer.awaits_document());
+        // What the looks after the Stop take, and ask.
+        let at_stop = buffer.reads();
+        assert!(!buffer.read_since(at_stop, stamp(10)));
 
-        // The document as it stood: nothing of the turn.
+        // The document as it stood: nothing of the turn, and not a document
+        // written since the Stop.
         read(&mut buffer, 10, 3, &[]);
         assert_eq!(buffer.rows().len(), 4);
+        assert!(!buffer.read_since(at_stop, stamp(10)));
         // The document written after the Stop holds it: the turn goes.
         read(
             &mut buffer,
@@ -685,7 +699,11 @@ mod tests {
             &[(3, user("list the files")), (5, answer("Found a.rs."))],
         );
         assert!(buffer.is_empty(), "the document's rows stand for the turn");
-        assert!(!buffer.awaits_document());
+        assert!(buffer.read_since(at_stop, stamp(10)));
+        assert!(
+            !buffer.read_since(buffer.reads(), stamp(10)),
+            "no read since"
+        );
     }
 
     /// Hooks that come twice, a result before its call, and a result after
@@ -1064,7 +1082,7 @@ mod tests {
                 late: false
             }
         );
-        assert!(!buffer.awaits_document());
+        assert!(buffer.is_empty(), "the Stop stood the written turn again");
     }
 
     /// F3: the rows are of the session the hooks told; a pane on another

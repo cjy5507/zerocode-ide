@@ -1798,6 +1798,13 @@ pub(super) fn note_pane_state(
             .get(&term)
             .map(|held| held.at);
         let before_stamp = transcript_file_stamp(&app.state::<AppState>(), term);
+        // The page's reads of the document so far: one after them, of a file
+        // written since this Stop, holds the turn.
+        let reads_at_stop = app
+            .state::<AppState>()
+            .pane_live_turns()
+            .get(&term)
+            .map_or(0, LiveTurnBuffer::reads);
         let watching = app.clone();
         let probing = app.clone();
         let reading = app.clone();
@@ -1829,11 +1836,11 @@ pub(super) fn note_pane_state(
                 transcript_file_stamp(&probing.state::<AppState>(), term)
             },
             move || {
-                !reading
+                reading
                     .state::<AppState>()
                     .pane_live_turns()
                     .get(&term)
-                    .is_some_and(LiveTurnBuffer::awaits_document)
+                    .is_some_and(|live| live.read_since(reads_at_stop, before_stamp))
             },
             move || {
                 tell_window(&app, again.clone());
