@@ -1,0 +1,32 @@
+[package]
+name = "zerocode-gpui-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version = "1.98.1"
+license = "MIT"
+
+# The phase 0 recorder is a member so both share one lockfile; it needs no GPUI.
+[workspace]
+members = ["recorder"]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-features = false, features = ["font-kit", "runtime_shaders"] }
+serde_json = "1"
+zerocode-pty = { path = "../../crates/zerocode-pty" }
+
+[[bin]]
+name = "phase0-gpui"
+path = "src/bin/phase0-gpui/main.rs"
+required-features = ["capture", "timing"]
+
+[features]
+# Offscreen frame capture and the scene's painted quads (GPUI's test support).
+capture = ["gpui/test-support", "gpui_platform/test-support"]
+# GPUI's own frame journal: when a frame became dirty, drew and was submitted.
+timing = ["gpui/profiler"]
+
+[profile.dev]
+debug = 0
+incremental = false

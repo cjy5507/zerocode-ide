@@ -1,0 +1,15 @@
+[package]
+name = "zerocode-phase0-record"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Writes the frames a ZeroCode terminal hands its screen, so two renderers can be fed the same ones"
+
+[[bin]]
+name = "phase0-record"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+zerocode-pty = { path = "../../../crates/zerocode-pty" }
