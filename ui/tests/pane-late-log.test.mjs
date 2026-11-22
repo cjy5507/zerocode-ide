@@ -20,13 +20,20 @@ function pageAnswering(id = "pane", { paintError = false } = {}) {
   const held = { id, next: 0, epoch: 0, found: null, from: 0, skipped: false, turns: [] };
   const tab = { kind: "chat", worker: { term: 7, helper: held } };
   let active = tab;
+  const document = { hidden: false };
   const context = vm.createContext({
     activeHelperPage: () => active,
     invoke: (command, args) => new Promise((resolve, failed) => {
       reply = resolve; reject = failed; requests.push({ command, args });
     }),
     PANE_LOG_ID: "pane", WIRE_LOG_ID: "wire",
-    document: { hidden: true },
+    document,
+    windowAway: () => document.hidden,
+    fillAboveOnce: () => {},
+    paneChatKey: () => "",
+    hookStates: new Map(),
+    isMidTurn: () => false,
+    syncWorkerComposers: () => {},
     paintHelperSurface: () => { if (paintError) throw new Error("paint failed"); }, paintStatusModel: () => {},
     holdHelperAbout: () => false,
     holdHelperTurns: (entry, turns) => entry.turns.push(...turns),
@@ -34,12 +41,13 @@ function pageAnswering(id = "pane", { paintError = false } = {}) {
   });
   vm.runInContext(lifecycle, context);
   vm.runInContext('const paneModels = paneLifecycle.map("paneModels"); const paneUsage = paneLifecycle.map("paneUsage");', context);
-  vm.runInContext(production("rememberPaneUsage") + "\n" + production("pollHelperPages"), context);
+  vm.runInContext(["rememberPaneUsage", "paneLogReadDeferred", "pollHelperPages"].map(production).join("\n"), context);
   const stores = vm.runInContext("({ paneLifecycle, paneModels, paneUsage })", context);
   return {
     held, requests, ...stores,
     poll: () => vm.runInContext("pollHelperPages()", context),
     reply: value => reply(value),
+    hide: () => { document.hidden = true; },
     reject: error => reject(error),
     close: () => { stores.paneLifecycle.dispose(7); active = null; },
   };
@@ -73,6 +81,7 @@ test("an old pane log cannot replace the usage of a new pane at that id", async 
 test("live pane logs still update their metadata and helper history still arrives", async () => {
   const live = pageAnswering();
   const pending = live.poll();
+  live.hide();
   live.reply(answer);
   await pending;
   assert.equal(live.paneModels.get(7), "transcript-model");

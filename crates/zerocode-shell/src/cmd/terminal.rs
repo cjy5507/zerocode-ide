@@ -437,33 +437,48 @@ pub(crate) fn whole_document_log<'a>(
         return document_log(path, read, whole);
     };
     let stamp = crate::pane_runtime::file_stamp(path);
-    let unchanged = match (read, stamp) {
-        (LogRead::After(after), Some(stamp)) => usize::try_from(after).is_ok_and(|after| {
-            held()
-                .get(&term)
-                .is_some_and(|live| live.read_unchanged(session_id, stamp, after))
-        }),
-        _ => false,
-    };
-    let mut log = if let (true, LogRead::After(after)) = (unchanged, read) {
-        document_nothing_new(after, false)
-    } else {
-        let (log, settled) = document_read_within(path, read, whole, LONG_LINE_CAP)?;
-        if let (Some(stamp), Some(settled)) = (stamp, settled) {
-            let brought: Vec<(usize, &zerocode_core::transcript::TranscriptTurn)> = log
-                .turns
-                .iter()
-                .map(|one| (usize::try_from(one.line).unwrap_or(usize::MAX), &one.turn))
-                .collect();
-            held().entry(term).or_default().reconcile(
-                session_id,
-                zerocode_core::live_hook_turns::DocRead { stamp, settled },
-                &brought,
-            );
+    if let (LogRead::After(after), Some(stamp)) = (read, stamp) {
+        let live = held();
+        if usize::try_from(after).is_ok_and(|after| {
+            live.get(&term)
+                .is_some_and(|buffer| buffer.read_unchanged(session_id, stamp, after))
+        }) {
+            let mut log = document_nothing_new(after, false);
+            log.live_turns = live_rows(&live, term, session_id);
+            return Ok(log);
         }
-        log
-    };
-    log.live_turns = live_rows(&held(), term, session_id);
+    }
+    let mut live_turns = None;
+    let mut log = document_read_within(path, read, whole, LONG_LINE_CAP, |document| {
+        let Some(stamp) = stamp else {
+            return Some(document.settled);
+        };
+        // Match against complete questions and their outcomes, including
+        // rows before the cursor and the last step the parser held back.
+        let rows: Vec<_> = document
+            .steps
+            .iter()
+            .enumerate()
+            .flat_map(|(place, step)| step.iter().map(move |row| (place, row)))
+            .collect();
+        let mut live = held();
+        // A competing read may have seen a later rewrite before this parse
+        // finished. Leave its cursor and proof alone and wait for a new read.
+        if crate::pane_runtime::file_stamp(path) != Some(stamp) {
+            return None;
+        }
+        let visible = live.entry(term).or_default().reconcile(
+            session_id,
+            zerocode_core::live_hook_turns::DocRead {
+                stamp,
+                settled: document.settled,
+            },
+            &rows,
+        );
+        live_turns = Some(live_rows(&live, term, session_id));
+        Some(visible)
+    })?;
+    log.live_turns = live_turns.unwrap_or_else(|| live_rows(&held(), term, session_id));
     Ok(log)
 }
 
@@ -884,7 +899,7 @@ pub(crate) fn document_log_within(
     whole: bool,
     cap: u64,
 ) -> Result<SubagentLog, String> {
-    document_read_within(path, read, whole, cap).map(|(log, _)| log)
+    document_read_within(path, read, whole, cap, |document| Some(document.settled))
 }
 
 /// What a read of a session document answers when it brings nothing new: the
@@ -905,15 +920,15 @@ fn document_nothing_new(held: u64, skipped: bool) -> SubagentLog {
     }
 }
 
-/// [`document_log_within`], and the settled steps of the document it parsed —
-/// `None` when it parsed none: one read while its CLI wrote it, or one past
-/// the cap.
+/// Read the document once. `visible_end` withholds a partial turn until
+/// its outcome can replace the provisional rows.
 fn document_read_within(
     path: &std::path::Path,
     read: LogRead,
     whole: bool,
     cap: u64,
-) -> Result<(SubagentLog, Option<usize>), String> {
+    visible_end: impl FnOnce(&zerocode_core::transcript::DocumentRead) -> Option<usize>,
+) -> Result<SubagentLog, String> {
     let held = match read {
         LogRead::After(at) | LogRead::Before(at) => at,
         LogRead::Tail => 0,
@@ -922,7 +937,7 @@ fn document_read_within(
         .map_err(|error| error.to_string())?
         .len();
     if size > cap {
-        return Ok((document_nothing_new(held, true), None));
+        return Ok(document_nothing_new(held, true));
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let detail = if whole {
@@ -933,12 +948,15 @@ fn document_read_within(
     let Some(document) =
         zerocode_core::transcript::document_read(&String::from_utf8_lossy(&bytes), detail)
     else {
-        return Ok((document_nothing_new(held, false), None));
+        return Ok(document_nothing_new(held, false));
+    };
+    let Some(settled) = visible_end(&document) else {
+        return Ok(document_nothing_new(held, false));
     };
     let steps: Vec<Vec<LineTurn>> = document
         .steps
         .into_iter()
-        .take(document.settled)
+        .take(settled)
         .enumerate()
         .map(|(place, turns)| {
             turns
@@ -952,7 +970,6 @@ fn document_read_within(
                 .collect()
         })
         .collect();
-    let settled = steps.len();
     let (from, to) = match read {
         // A document with fewer settled steps than the cursor was replaced:
         // read from its first step, as a file that shrank is read from its
@@ -990,7 +1007,7 @@ fn document_read_within(
         about: None,
         live_turns: Vec::new(),
     };
-    Ok((log, Some(settled)))
+    Ok(log)
 }
 
 /// Where a read back from step `before` begins: as far up as the newest

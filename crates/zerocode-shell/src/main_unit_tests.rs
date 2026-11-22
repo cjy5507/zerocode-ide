@@ -35308,6 +35308,50 @@ fn a_turn_shown_from_its_hooks_then_its_document_shows_each_step_once() {
     assert_eq!(twice(&shown, &late), Vec::<String>::new());
 }
 
+#[test]
+fn a_session_document_with_a_pending_tool_result_does_not_end_the_stop_checks() {
+    use crate::cmd::terminal::{LogRead, whole_document_log};
+    use crate::pane_runtime::{file_stamp, hear_live_turn};
+    const TERM: u32 = 125_261;
+    let held = std::sync::Mutex::new(HashMap::new());
+    let lock = || held.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("example-session.json");
+    let hook = |event, body| {
+        let envelope = settling_hook(TERM, event, body);
+        let report = crate::hooks::report_of(&envelope, None).expect("a report");
+        hear_live_turn(lock, &report, &envelope.payload, || file_stamp(&path), 1_000);
+    };
+    let read = |read| whole_document_log(lock, TERM, Some("example-session"), &path, read, false)
+        .expect("the page reads the document");
+    std::fs::write(&path, atif_document(1, &[])).expect("the earlier turn");
+    let first = read(LogRead::Tail);
+    hook("UserPromptSubmit", serde_json::json!({"prompt_id": "p-2", "prompt": "list the files"}));
+    hook("Stop", serde_json::json!({"prompt_id": "p-2", "last_assistant_message": "Found the files."}));
+    let landed = || lock()[&TERM].document_holds(Some("example-session"), Some("p-2"));
+
+    let question = serde_json::json!({"source": "user", "message": "list the files"});
+    let mut call = serde_json::json!({"source": "agent", "message": "",
+        "tool_calls": [{"tool_call_id": "doc-call", "function_name": "exec", "arguments": {"command": "ls"}}]});
+    std::fs::write(&path, atif_document(1, &[question.clone(), call.clone()])).expect("an incomplete step");
+    let partial = read(LogRead::After(first.next));
+    assert!(!landed(), "a parsed document with a pending call ended the checks");
+    assert_eq!(partial.live_turns.len(), 2, "the provisional turn went before its answer landed");
+    assert_eq!(partial.next, first.next, "the page should swap the whole turn once");
+
+    call["observation"] = serde_json::json!({"results": [{"source_call_id": "doc-call", "content": "a.rs"}]});
+    std::fs::write(&path, atif_document(1, &[question.clone(), call.clone()])).expect("the tool result");
+    let interim = read(LogRead::After(partial.next));
+    assert!(!landed(), "this Stop's assistant answer is still missing");
+    assert_eq!(interim.next, partial.next);
+    let answer = serde_json::json!({"source": "agent", "message": "Found the files."});
+    std::fs::write(&path, atif_document(1, &[question, call, answer])).expect("the completed turn");
+    let done = read(LogRead::After(partial.next));
+    assert!(landed() && done.live_turns.is_empty());
+    assert_eq!(done.turns.iter().map(|row| row.turn.role.as_str()).collect::<Vec<_>>(),
+        ["user", "tool", "tool_result", "assistant"]);
+}
+
 /// A result that comes after its turn's Stop (t-125261 F1): the classifier
 /// reads it as work (`hook_state`), and the hook road hears the turn first —
 /// the report of a turn that has ended goes no further than the page, so the
@@ -35315,32 +35359,28 @@ fn a_turn_shown_from_its_hooks_then_its_document_shows_each_step_once() {
 /// result joins its call before the last answer.
 #[test]
 fn a_result_after_its_turns_stop_reaches_the_page_and_not_the_panes_state() {
-    use crate::pane_runtime::hear_live_turn;
+    use crate::pane_runtime::{hear_live_turn, route_hook_report};
     use zerocode_core::hook::HookState;
     const TERM: u32 = 125_262;
     let held = std::sync::Mutex::new(HashMap::new());
     let lock = || held.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let hooks = [
-        ("UserPromptSubmit", serde_json::json!({"prompt": "build it", "prompt_id": "p-1"})),
-        ("PreToolUse", serde_json::json!({"prompt_id": "p-1", "tool_name": "exec", "tool_input": {"command": "cargo build"}, "tool_use_id": "c-1"})),
-        ("Stop", serde_json::json!({"prompt_id": "p-1", "last_assistant_message": "Built."})),
-        ("PostToolUse", serde_json::json!({"prompt_id": "p-1", "tool_name": "exec", "tool_input": {"command": "cargo build"}, "tool_use_id": "c-1",
-            "tool_response": {"success": true, "output": "Finished", "error": null}})),
-    ];
-    let mut heard = Vec::new();
-    let mut pane = Vec::new();
-    for (event, body) in hooks {
+    let mut published = Vec::new();
+    let mut page_told = Vec::new();
+    let mut dispatch = |event, body| {
         let envelope = settling_hook(TERM, event, body);
         let report = crate::hooks::report_of(&envelope, None).expect("a report");
-        let fold = hear_live_turn(lock, &report, &envelope.payload, || None, 1_000).expect("Devin's store settles after a turn");
-        heard.push((event, report.state, fold.late));
-        // The hook road's gate: a late fold `continue`s before the pane hears it.
-        if !fold.late {
-            pane.push(report.state);
-        }
-    }
-    assert_eq!(heard[3], ("PostToolUse", HookState::Working, true), "{heard:?}");
-    assert_eq!(pane, [HookState::Working, HookState::Working, HookState::Done], "the late result moved the pane");
+        let fold = hear_live_turn(lock, &report, &envelope.payload, || None, 1_000);
+        route_hook_report(report, fold, |term| page_told.push(term), |report| published.push(report.state));
+    };
+    let question = serde_json::json!({"prompt": "build it", "prompt_id": "p-1"});
+    let call = serde_json::json!({"prompt_id": "p-1", "tool_name": "exec", "tool_input": {"command": "cargo build"}, "tool_use_id": "c-1"});
+    let stop = serde_json::json!({"prompt_id": "p-1", "last_assistant_message": "Built."});
+    let mut result = call.clone();
+    result["tool_response"] = serde_json::json!({"success": true, "output": "Finished", "error": null});
+    dispatch("UserPromptSubmit", question.clone());
+    dispatch("PreToolUse", call);
+    dispatch("Stop", stop.clone());
+    dispatch("PostToolUse", result.clone());
     let rows = crate::cmd::terminal::live_rows(&lock(), TERM, Some("example-session"));
     assert_eq!(
         rows.iter().map(|row| row.role.as_str()).collect::<Vec<_>>(),
@@ -35348,16 +35388,21 @@ fn a_result_after_its_turns_stop_reaches_the_page_and_not_the_panes_state() {
     );
     assert_eq!(rows[2].text, "Finished");
 
-    // And the road is the hook loop's: the turns are heard before the parked
-    // all-clear is touched and before the state door, and a late fold goes
-    // no further.
-    let looping = block_after(shipped_backend(), "async fn hook_loop(");
-    let heard_at = looping.find("hear_live_turn(").expect("the hook road no longer hears a settling CLI's turns");
-    let parked_at = looping.find(".pending_done().remove(&report.term)").expect("the parked all-clear's eviction moved");
-    let state_at = looping.find("note_pane_state(&app, Some(&envelope.worktree_id), &report)").expect("the state door moved");
-    assert!(heard_at < parked_at && parked_at < state_at, "the turns are heard after the pane hears the report");
-    let gate = &looping[heard_at..parked_at];
-    assert!(gate.contains("fold.late") && gate.contains("continue;"), "a late fold goes on to the pane: {gate}");
+    for i in 2..=7 {
+        let id = format!("p-{i}");
+        dispatch("UserPromptSubmit", serde_json::json!({"prompt_id": id, "prompt": "next"}));
+        dispatch("Stop", serde_json::json!({"prompt_id": id, "last_assistant_message": "Done."}));
+    }
+    dispatch("PostToolUse", result);
+    dispatch("UserPromptSubmit", question);
+    dispatch("Stop", stop);
+
+    let mut expected = vec![HookState::Working, HookState::Working, HookState::Done];
+    for _ in 2..=7 {
+        expected.extend([HookState::Working, HookState::Done]);
+    }
+    assert_eq!(published, expected, "an ended prompt published its state again");
+    assert_eq!(page_told, [TERM], "only the first late result changed provisional rows");
 }
 
 /// A pane whose CLI changed (t-125261 F3): the rows its hooks told are of

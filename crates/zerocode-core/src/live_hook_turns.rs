@@ -16,15 +16,10 @@
 //! readers (`transcript::tool_call_turn`, `transcript::tool_result_turn`), so
 //! a call's kind and file are read where every transcript's are.
 //!
-//! Each turn is held on its own, by its `prompt_id` (t-125261, the fix round
-//! after the cross-provider review). A turn's hooks touch only its rows; a
-//! turn stands until the document holds it — the next prompt does not take
-//! it — and the document is asked of the turns in order
-//! ([`LiveTurnBuffer::reconcile`]): by the turn's own prompt among the steps
-//! written since it began, or, for a turn whose words the document keeps
-//! otherwise, by a write after its `Stop`. A write is known by the session
-//! file's size and time ([`DocStamp`]) as the shell saw them; a document not
-//! written since a turn began cannot hold it, whatever words it repeats.
+//! Hooks identify a turn by `prompt_id`. The document identifies it by its
+//! question and terminal result, in order. Only that content lets a provisional
+//! turn go ([`LiveTurnBuffer::reconcile`]). File metadata only avoids opening an
+//! unchanged document.
 //!
 //! A hook of a turn that has ended — its `Stop` heard, a newer turn begun, or
 //! the document holding it — adds what it says to that turn and says nothing
@@ -33,29 +28,23 @@
 //! already draws nothing. Nothing here branches on an agent's name or touches
 //! the disk.
 
+use std::collections::HashSet;
+
 use crate::hook::{normalized_event, worker_call_id_in};
 use crate::payload::HookPayload;
 use crate::transcript::{
     Detail, TranscriptTurn, message_text, prompt_words_in_parsed, tool_call_turn, tool_result_turn,
 };
 
-/// A session file's size and time of last write, as the shell read them: the
-/// one mark of a write this module compares, never reads.
+/// The file's size and modification time, used to schedule or skip a read.
 pub type DocStamp = (u64, Option<std::time::SystemTime>);
 
-/// How many turns a buffer remembers, the newest last: those the document does
-/// not hold yet stand, and those it does are kept by their ids, so a hook of
-/// one that comes late draws nothing. A page that reads lets a turn go within
-/// a turn's end; more than this stand only while nothing reads, and the
-/// document holds the oldest of them by then.
-const TURNS_KEPT: usize = 4;
-
-/// The session document as a read that parsed it found it.
+/// The cursor of a parsed document and the file stamp for that read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DocRead {
-    /// Its file's size and time when the read began.
+    /// The file's size and modification time when the read began.
     pub stamp: DocStamp,
-    /// Its settled steps ([`crate::transcript::DocumentRead::settled`]).
+    /// The end of the steps this read can deliver.
     pub settled: usize,
 }
 
@@ -81,10 +70,11 @@ struct LiveTurn {
     /// The document's settled steps as last read when the turn began: its
     /// prompt stands at this step or after it.
     base: usize,
-    /// The document's stamp when the turn began (`None`: no file yet).
-    began: Option<DocStamp>,
-    /// Once the turn has ended — its `Stop`, or a newer turn begun — the
-    /// document's stamp then. The CLI writes the turn after that.
+    /// When the question's hook was heard. On a first read, it can rule out
+    /// a historical answer to the same question.
+    prompted_at: Option<i64>,
+    /// The file at `Stop`, for scheduling follow-up reads. A newer prompt
+    /// also ends the previous turn, even when its Stop did not reach us.
     stopped: Option<Option<DocStamp>>,
     /// The document holds the turn: its rows are let go.
     written: bool,
@@ -98,6 +88,24 @@ struct LiveTurn {
 impl LiveTurn {
     fn ended(&self) -> bool {
         self.stopped.is_some() || self.written
+    }
+
+    fn matches_outcome(&self, row: &TranscriptTurn) -> bool {
+        let answer = self.rows.last().filter(|live| live.role == "assistant");
+        if row.role == "assistant" {
+            return answer.is_none_or(|live| same_words(&row.text, &live.text));
+        }
+        // A Stop with no assistant message can end on a tool result the
+        // hooks also saw. A call alone cannot end a turn.
+        answer.is_none()
+            && self.stopped.is_some()
+            && row.role == "tool_result"
+            && self.rows.last().is_some_and(|live| {
+                live.role == "tool_result"
+                    && live.tool.as_ref().map(|tool| &tool.name)
+                        == row.tool.as_ref().map(|tool| &tool.name)
+                    && same_words(&row.text, &live.text)
+            })
     }
 
     fn drew_call(&self, id: &str) -> bool {
@@ -200,12 +208,19 @@ pub struct LiveTurnBuffer {
     /// The session these turns are of: a hook of another starts afresh, and a
     /// read of another leaves them be ([`Self::reconcile`]).
     session_id: Option<String>,
-    /// The turns remembered, oldest first, at most [`TURNS_KEPT`].
+    /// Turns awaiting the document or the first Stop, oldest first.
     turns: Vec<LiveTurn>,
-    /// The last read of the session document that parsed it.
+    /// Finished prompts whose document rows already replaced the live ones.
+    written: HashSet<String>,
+    /// Calls in those turns, for the fallback when a result has no prompt id.
+    written_calls: HashSet<String>,
+    /// The document cursor after the last matched turn.
+    matched_through: usize,
+    /// The last cursor delivered and whether it withheld an incomplete turn.
     read: Option<DocRead>,
-    /// How many reads parsed the document since the buffer began.
-    reads: u64,
+    held_back: bool,
+    /// A new hook may supply evidence that a withheld document turn is complete.
+    recheck: bool,
 }
 
 impl LiveTurnBuffer {
@@ -240,28 +255,51 @@ impl LiveTurnBuffer {
             .all(|turn| turn.written || turn.rows.is_empty())
     }
 
-    /// How many reads parsed the document since the buffer began: what the
-    /// looks after a turn's end take at its `Stop` ([`Self::read_since`]).
+    /// The file observed by this prompt's Stop.
     #[must_use]
-    pub fn reads(&self) -> u64 {
-        self.reads
+    pub fn stamp_at_stop(
+        &self,
+        session_id: Option<&str>,
+        prompt_id: Option<&str>,
+    ) -> Option<DocStamp> {
+        if self.session_id.as_deref() != session_id {
+            return None;
+        }
+        self.turns
+            .iter()
+            .rev()
+            .find(|turn| turn.prompt_id.as_deref() == prompt_id)?
+            .stopped
+            .flatten()
     }
 
-    /// Whether, since the buffer had counted `reads`, the page read a document
-    /// that parsed and whose file is not the one stamped `at_stop` — one
-    /// written since the turn ended, which holds it: what the looks after a
-    /// turn's end ask before they tell the page again.
+    /// A settling check can end once this exact prompt has been confirmed.
     #[must_use]
-    pub fn read_since(&self, reads: u64, at_stop: Option<DocStamp>) -> bool {
-        self.reads > reads && self.read.is_some_and(|read| Some(read.stamp) != at_stop)
+    pub fn document_holds(&self, session_id: Option<&str>, prompt_id: Option<&str>) -> bool {
+        self.session_id.as_deref() == session_id
+            && prompt_id.is_some_and(|id| {
+                self.written.contains(id)
+                    || self
+                        .turns
+                        .iter()
+                        .any(|turn| turn.written && turn.prompt_id.as_deref() == Some(id))
+            })
     }
 
-    /// Whether a read on from `after` steps of `session_id`'s document, its
-    /// file at `stamp`, finds what the last read found — nothing new — so the
-    /// document need not be read and parsed again.
+    /// Forget completed hook ids when this session ends. Unconfirmed rows
+    /// still belong to the conversation until its document can replace them.
+    pub fn forget_finished(&mut self, session_id: Option<&str>) {
+        if self.session_id.as_deref() == session_id {
+            self.written.clear();
+            self.written_calls.clear();
+        }
+    }
+
+    /// A read from this cursor of an unchanged file needs no file open.
     #[must_use]
     pub fn read_unchanged(&self, session_id: Option<&str>, stamp: DocStamp, after: usize) -> bool {
-        self.session_id.as_deref() == session_id
+        !self.recheck
+            && self.session_id.as_deref() == session_id
             && self.read
                 == Some(DocRead {
                     stamp,
@@ -294,12 +332,26 @@ impl LiveTurnBuffer {
         };
         let event = normalized_event(event_name);
         let prompt_id = prompt_id_in(tree);
-        let fold = match event.as_str() {
-            "userpromptsubmit" => self.note_prompt(payload, prompt_id, doc, at_ms),
+        let call_id = worker_call_id_in(tree);
+        if prompt_id
+            .as_ref()
+            .is_some_and(|id| self.written.contains(id))
+            || (prompt_id.is_none()
+                && call_id.as_ref().is_some_and(|id| {
+                    self.written_calls.contains(id)
+                        && !self.turns.iter().any(|turn| turn.drew_call(id))
+                }))
+        {
+            return HookFold {
+                drawn: false,
+                late: true,
+            };
+        }
+        match event.as_str() {
+            "userpromptsubmit" => self.note_prompt(payload, prompt_id, at_ms),
             "pretooluse" | "posttooluse" => {
-                let call_id = worker_call_id_in(tree);
-                let at = self.turn_of(prompt_id, call_id.as_deref(), false, doc);
-                let late = at + 1 != self.turns.len() || self.turns[at].ended();
+                let at = self.turn_of(prompt_id, call_id.as_deref(), false);
+                let late = self.turns[at].ended();
                 let turn = &mut self.turns[at];
                 let drawn = !turn.written
                     && if event == "pretooluse" {
@@ -307,88 +359,127 @@ impl LiveTurnBuffer {
                     } else {
                         turn.note_result(tree, call_id, at_ms)
                     };
+                self.recheck |= self.held_back && drawn && event == "posttooluse";
                 HookFold { drawn, late }
             }
             "stop" => {
-                let at = self.turn_of(prompt_id, None, true, doc);
-                let late = at + 1 != self.turns.len() || self.turns[at].stopped.is_some();
+                let at = self.turn_of(prompt_id, None, true);
                 let turn = &mut self.turns[at];
-                if turn.stopped.is_none() {
+                let late = turn.stopped.is_some();
+                if !late {
                     turn.stopped = Some(doc);
                 }
                 let drawn = !turn.written && turn.note_answer(tree, at_ms);
+                self.recheck |= self.held_back && (!late || drawn);
+                self.remember_written_turns();
                 HookFold { drawn, late }
             }
-            _ => return HookFold::default(),
-        };
-        // A hook begins one turn at most: the oldest goes past the count.
-        if self.turns.len() > TURNS_KEPT {
-            self.turns.remove(0);
+            _ => HookFold {
+                late: prompt_id.as_deref().is_some_and(|id| {
+                    self.turns
+                        .iter()
+                        .any(|turn| turn.ended() && turn.prompt_id.as_deref() == Some(id))
+                }),
+                ..HookFold::default()
+            },
         }
-        fold
     }
 
-    /// The document read again, `read` what it found and `brought` the rows
-    /// this read brought, each with its step's place. The turns the document
-    /// does not hold yet are asked in order, and the first it does not hold
-    /// ends the asking — the CLI writes its turns in order:
-    ///
-    /// - a document not written since the turn began does not hold it;
-    /// - one that brings the turn's prompt, at or after where the turn began
-    ///   and after the prompt of the turn before it, holds it — a running
-    ///   turn too, whose `Stop` is still on its way;
-    /// - one written after the turn's `Stop` holds it, whatever its words.
-    ///
-    /// A document with fewer settled steps than the last read was replaced: a
-    /// prompt may stand anywhere in it. A read of another session than the
-    /// hooks told says nothing of their turns — the pane's record of its
-    /// conversation can trail its newest hook by a moment — and a buffer no
-    /// hook named a session takes the read's.
+    /// Match successive questions and their outcomes against the parsed steps.
+    /// Keep the cursor before a matched question whose outcome is still
+    /// missing, so the page can swap its whole provisional turn in one paint.
+    /// A read of another session can trail a new hook and leaves it alone.
     pub fn reconcile(
         &mut self,
         session_id: Option<&str>,
         read: DocRead,
         brought: &[(usize, &TranscriptTurn)],
-    ) {
+    ) -> usize {
         if self.session_id.as_deref() != session_id {
             if self.session_id.is_some() {
-                return;
+                return read.settled;
             }
             self.session_id = session_id.map(str::to_string);
         }
         if self.read.is_some_and(|last| read.settled < last.settled) {
+            self.matched_through = 0;
             for turn in &mut self.turns {
                 turn.base = 0;
             }
         }
-        let mut from = 0;
+        let mut visible = read.settled;
+        let mut from = self.matched_through;
         for turn in self.turns.iter_mut().filter(|turn| !turn.written) {
-            if turn.began == Some(read.stamp) {
-                break;
-            }
-            let prompt = turn.said.as_deref().and_then(|said| {
-                brought
+            let Some(question) = &turn.said else { break };
+            let floor = turn.base.max(from);
+            let rows = &brought[brought.partition_point(|(place, _)| *place < floor)..];
+            let mut prompts = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, row))| row.role == "user")
+                .peekable();
+            let mut matched = false;
+            while let Some((at, (place, row))) = prompts.next() {
+                if !same_words(&row.text, question) {
+                    continue;
+                }
+                let end = prompts.peek().map_or(rows.len(), |(at, _)| *at);
+                let last = rows[at + 1..end]
                     .iter()
-                    .find(|(place, row)| {
-                        *place >= turn.base.max(from)
-                            && row.role == "user"
-                            && collapsed(&row.text) == said
-                    })
-                    .map(|(place, _)| *place)
-            });
-            if let Some(place) = prompt {
-                from = place + 1;
-            } else if turn
-                .stopped
-                .is_none_or(|at_stop| at_stop == Some(read.stamp))
-            {
+                    .rev()
+                    .find(|(_, row)| row.role != "thinking");
+                if floor == 0
+                    && let Some((_, last)) = last
+                    && let (Some(at), Some(began)) = (last.at_ms, turn.prompted_at)
+                    && at < began
+                {
+                    continue;
+                }
+                if last.is_some_and(|(step, result)| {
+                    *step < read.settled && turn.matches_outcome(result)
+                }) {
+                    turn.written = true;
+                    turn.rows.clear();
+                    from = prompts
+                        .peek()
+                        .map_or(read.settled, |(_, (place, _))| *place);
+                    matched = true;
+                    break;
+                }
+                if end == rows.len() {
+                    visible = visible.min(*place);
+                    break;
+                }
+            }
+            if !matched {
                 break;
             }
-            turn.written = true;
-            turn.rows.clear();
         }
-        self.read = Some(read);
-        self.reads = self.reads.saturating_add(1);
+        self.matched_through = from;
+        self.read = Some(DocRead {
+            settled: visible,
+            ..read
+        });
+        self.held_back = visible < read.settled;
+        self.recheck = false;
+        self.remember_written_turns();
+        visible
+    }
+
+    fn remember_written_turns(&mut self) {
+        self.turns.retain_mut(|turn| {
+            // The first Stop can still change pane state if the file won the
+            // race to the page, so keep that turn until Stop or a newer prompt.
+            if !turn.written || turn.stopped.is_none() {
+                return true;
+            }
+            if let Some(id) = turn.prompt_id.take() {
+                self.written.insert(id);
+            }
+            self.written_calls.extend(turn.calls.drain(..));
+            self.written_calls.extend(turn.results.drain(..));
+            false
+        });
     }
 
     /// A prompt begins a turn of its own — unless its turn is told already. A
@@ -399,51 +490,51 @@ impl LiveTurnBuffer {
         &mut self,
         payload: &HookPayload<'_>,
         prompt_id: Option<String>,
-        doc: Option<DocStamp>,
         at_ms: Option<i64>,
     ) -> HookFold {
         let words = prompt_words_in_parsed(payload);
         if let Some(prompt) = prompt_id.as_deref()
-            && let Some(at) = self
+            && let Some(turn) = self
                 .turns
-                .iter()
-                .position(|turn| turn.prompt_id.as_deref() == Some(prompt))
+                .iter_mut()
+                .find(|turn| turn.prompt_id.as_deref() == Some(prompt))
         {
-            let newest = at + 1 == self.turns.len();
-            let turn = &mut self.turns[at];
-            let late = !newest || turn.ended();
-            let Some(words) = words.filter(|_| turn.said.is_none() && !turn.written) else {
+            let Some(words) = words.filter(|_| turn.said.is_none()) else {
                 return HookFold {
                     drawn: false,
                     late: true,
                 };
             };
             turn.said = Some(collapsed(&words));
+            if turn.ended() {
+                self.recheck = true;
+                return HookFold {
+                    drawn: !turn.rows.is_empty(),
+                    late: true,
+                };
+            }
             turn.rows.insert(0, said("user", words, at_ms));
-            return HookFold { drawn: true, late };
+            return HookFold {
+                drawn: true,
+                late: false,
+            };
         }
-        let at = self.begin(prompt_id, words.as_deref().map(collapsed), doc);
+        let at = self.begin(prompt_id);
         let Some(words) = words else {
             return HookFold::default();
         };
-        self.turns[at].rows.push(said("user", words, at_ms));
+        let turn = &mut self.turns[at];
+        turn.said = Some(collapsed(&words));
+        turn.prompted_at = at_ms;
+        turn.rows.push(said("user", words, at_ms));
         HookFold {
             drawn: true,
             late: false,
         }
     }
 
-    /// The turn a call, a result or a `Stop` is of: the one its `prompt_id`
-    /// names; without one, the turn that drew its call, else the newest — a
-    /// `Stop` the newest whatever it is, a call only while it runs; else a
-    /// turn the window meets mid-way, begun now.
-    fn turn_of(
-        &mut self,
-        prompt_id: Option<String>,
-        call_id: Option<&str>,
-        stop: bool,
-        doc: Option<DocStamp>,
-    ) -> usize {
+    /// Find the turn by its prompt or, for unnumbered hooks, its call.
+    fn turn_of(&mut self, prompt_id: Option<String>, call_id: Option<&str>, stop: bool) -> usize {
         let newest = self.turns.len().checked_sub(1);
         let held = match prompt_id.as_deref() {
             Some(prompt) => self
@@ -454,28 +545,20 @@ impl LiveTurnBuffer {
                 .and_then(|id| self.turns.iter().position(|turn| turn.drew_call(id)))
                 .or_else(|| newest.filter(|&at| stop || !self.turns[at].ended())),
         };
-        held.unwrap_or_else(|| self.begin(prompt_id, None, doc))
+        held.unwrap_or_else(|| self.begin(prompt_id))
     }
 
-    /// A turn begins, where the document as last read ends. A turn still
-    /// running ended unheard — its `Stop` never came — and waits for the
-    /// document from now, as a stopped one does.
-    fn begin(
-        &mut self,
-        prompt_id: Option<String>,
-        said: Option<String>,
-        doc: Option<DocStamp>,
-    ) -> usize {
-        for turn in &mut self.turns {
-            if !turn.ended() {
-                turn.stopped = Some(doc);
-            }
+    /// A new turn ends the previous one if its Stop has not arrived.
+    fn begin(&mut self, prompt_id: Option<String>) -> usize {
+        if let Some(turn) = self.turns.last_mut()
+            && turn.stopped.is_none()
+        {
+            turn.stopped = Some(None);
         }
+        self.remember_written_turns();
         self.turns.push(LiveTurn {
             prompt_id,
-            said,
             base: self.read.map_or(0, |read| read.settled),
-            began: doc,
             ..LiveTurn::default()
         });
         self.turns.len() - 1
@@ -494,6 +577,10 @@ fn prompt_id_in(tree: &serde_json::Value) -> Option<String> {
 /// Words with every run of whitespace one space, to know a prompt by.
 fn collapsed(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn same_words(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
 }
 
 fn said(role: &str, text: String, at_ms: Option<i64>) -> TranscriptTurn {
@@ -634,11 +721,11 @@ mod tests {
     }
 
     fn user(text: &str) -> TranscriptTurn {
-        said("user", text.to_string(), Some(1))
+        said("user", text.to_string(), Some(1_001))
     }
 
     fn answer(text: &str) -> TranscriptTurn {
-        said("assistant", text.to_string(), Some(2))
+        said("assistant", text.to_string(), Some(1_002))
     }
 
     /// A turn told by its hooks — the prompt, a call, its result, the last
@@ -684,15 +771,13 @@ mod tests {
         assert_eq!(rows[2].text, "a.rs");
         assert_eq!(rows[2].tool.as_ref().map(|tool| tool.is_error), Some(false));
         assert_eq!(rows[3].text, "Found a.rs.");
-        // What the looks after the Stop take, and ask.
-        let at_stop = buffer.reads();
-        assert!(!buffer.read_since(at_stop, stamp(10)));
+        assert!(!buffer.document_holds(Some(SESSION), Some("p-1")));
 
         // The document as it stood: nothing of the turn, and not a document
         // written since the Stop.
         read(&mut buffer, 10, 3, &[]);
         assert_eq!(buffer.rows().len(), 4);
-        assert!(!buffer.read_since(at_stop, stamp(10)));
+        assert!(!buffer.document_holds(Some(SESSION), Some("p-1")));
         // The document written after the Stop holds it: the turn goes.
         read(
             &mut buffer,
@@ -701,11 +786,7 @@ mod tests {
             &[(3, user("list the files")), (5, answer("Found a.rs."))],
         );
         assert!(buffer.is_empty(), "the document's rows stand for the turn");
-        assert!(buffer.read_since(at_stop, stamp(10)));
-        assert!(
-            !buffer.read_since(buffer.reads(), stamp(10)),
-            "no read since"
-        );
+        assert!(buffer.document_holds(Some(SESSION), Some("p-1")));
     }
 
     /// Hooks that come twice, a result before its call, and a result after
@@ -953,11 +1034,43 @@ mod tests {
         }
     }
 
-    /// F2: a document that shrank — replaced — holds a running turn only when
-    /// it brings its prompt; a document not written since a turn began never
-    /// holds it, though an older prompt repeats its words.
     #[test]
-    fn a_replaced_or_unwritten_document_lets_no_running_turn_go_unasked() {
+    fn two_stops_wait_for_two_complete_document_turns() {
+        for second_question in ["second", "first"] {
+            let mut buffer = LiveTurnBuffer::default();
+            read(&mut buffer, 10, 3, &[]);
+            for (id, question, reply) in [
+                ("p-1", "first", "first answer"),
+                ("p-2", second_question, "second answer"),
+            ] {
+                hook(
+                    &mut buffer,
+                    "UserPromptSubmit",
+                    &prompt(question, id),
+                    stamp(10),
+                );
+                hook(&mut buffer, "Stop", &stop(id, reply), stamp(10));
+            }
+            read(
+                &mut buffer,
+                11,
+                5,
+                &[(3, user("first")), (4, answer("first answer"))],
+            );
+            let words: Vec<_> = buffer.rows().into_iter().map(|row| row.text).collect();
+            assert_eq!(words, [second_question, "second answer"]);
+            read(
+                &mut buffer,
+                12,
+                7,
+                &[(5, user(second_question)), (6, answer("second answer"))],
+            );
+            assert!(buffer.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_shrunk_document_needs_the_questions_outcome() {
         let mut buffer = LiveTurnBuffer::default();
         read(&mut buffer, 10, 10, &[]);
         hook(
@@ -973,53 +1086,43 @@ mod tests {
             4,
             &[(0, user("other")), (1, answer("an answer"))],
         );
+        assert_eq!(roles(&buffer), ["user", "tool"]);
+        read(&mut buffer, 5, 6, &[(4, user("go on"))]);
         assert_eq!(
             roles(&buffer),
             ["user", "tool"],
-            "a replaced document let the running turn go"
+            "a question alone is incomplete"
         );
         read(
             &mut buffer,
-            5,
             6,
-            &[
-                (0, user("other")),
-                (1, answer("an answer")),
-                (4, user("go on")),
-            ],
+            7,
+            &[(4, user("go on")), (6, answer("continued"))],
         );
-        assert!(
-            buffer.is_empty(),
-            "the replaced document that brings the prompt holds it"
-        );
+        assert!(buffer.is_empty());
+    }
 
-        let mut fresh = LiveTurnBuffer::default();
+    #[test]
+    fn a_first_read_does_not_use_a_historical_answer_to_the_same_question() {
+        let mut buffer = LiveTurnBuffer::default();
         hook(
-            &mut fresh,
+            &mut buffer,
             "UserPromptSubmit",
             &prompt("continue", "p-1"),
             stamp(7),
         );
-        // A page opened mid-turn reads the document whole: an older turn
-        // said the same, but nothing was written since this one began.
+        let older_answer = said("assistant", "an older answer".into(), Some(900));
         read(
-            &mut fresh,
+            &mut buffer,
             7,
             8,
-            &[(2, user("continue")), (4, answer("an older answer"))],
+            &[(2, user("continue")), (4, older_answer)],
         );
-        assert_eq!(
-            roles(&fresh),
-            ["user"],
-            "an older prompt's words let the running turn go"
-        );
+        assert_eq!(roles(&buffer), ["user"]);
     }
 
-    /// A turn whose words the document keeps otherwise goes once the
-    /// document was written after its `Stop`; a turn ended unheard — a newer
-    /// prompt came before its `Stop` — waits from that prompt.
     #[test]
-    fn a_turn_kept_otherwise_goes_once_written_after_it_ended() {
+    fn matching_the_question_and_answer_is_independent_of_the_file_stamp() {
         let mut buffer = LiveTurnBuffer::default();
         read(&mut buffer, 10, 4, &[]);
         hook(
@@ -1029,33 +1132,39 @@ mod tests {
             stamp(10),
         );
         hook(&mut buffer, "Stop", &stop("p-1", "Went on."), stamp(10));
-        read(&mut buffer, 10, 4, &[]);
-        assert!(!buffer.is_empty(), "the document as it stood at the Stop");
-        read(&mut buffer, 11, 6, &[(4, user("<context>go on</context>"))]);
-        assert!(buffer.is_empty());
-
-        // No Stop heard for p-2: p-3's prompt ends it.
-        hook(
-            &mut buffer,
-            "UserPromptSubmit",
-            &prompt("first", "p-2"),
-            stamp(11),
-        );
-        hook(
-            &mut buffer,
-            "UserPromptSubmit",
-            &prompt("second", "p-3"),
-            stamp(12),
-        );
-        read(&mut buffer, 12, 8, &[]);
-        assert_eq!(roles(&buffer), ["user", "user"]);
         read(
             &mut buffer,
-            13,
-            10,
-            &[(6, user("<context>first</context>")), (8, user("second"))],
+            11,
+            6,
+            &[(4, user("other")), (5, answer("Went on."))],
         );
-        assert!(buffer.is_empty(), "{:?}", roles(&buffer));
+        assert_eq!(
+            roles(&buffer),
+            ["user", "assistant"],
+            "the question is different"
+        );
+        read(
+            &mut buffer,
+            12,
+            6,
+            &[(4, user("go on")), (5, answer("Still going."))],
+        );
+        assert_eq!(
+            roles(&buffer),
+            ["user", "assistant"],
+            "the answer is different"
+        );
+        read(
+            &mut buffer,
+            12,
+            6,
+            &[(4, user("go on")), (5, answer("Went on."))],
+        );
+        assert!(buffer.document_holds(Some(SESSION), Some("p-1")));
+        assert!(
+            buffer.is_empty(),
+            "the document holds both the question and its final answer"
+        );
     }
 
     /// A read that brings a turn's prompt before its `Stop` was heard holds
@@ -1142,32 +1251,62 @@ mod tests {
         assert!(read_first.read_unchanged(Some("another-session"), (4, None), 1));
     }
 
-    /// A buffer remembers its last few turns: one that nothing read for
-    /// longer is let go, and a late hook of a turn it remembers is still
-    /// known late.
     #[test]
-    fn a_buffer_remembers_its_last_turns() {
+    fn remembered_finished_prompts_are_scoped_to_their_session() {
         let mut buffer = LiveTurnBuffer::default();
-        for at in 0..=TURNS_KEPT {
+        for at in 0..7 {
             let id = format!("p-{at}");
+            let question = format!("turn {at}");
             hook(
                 &mut buffer,
                 "UserPromptSubmit",
-                &prompt(&format!("turn {at}"), &id),
+                &prompt(&question, &id),
                 None,
             );
             hook(&mut buffer, "Stop", &stop(&id, "done"), None);
+            read(
+                &mut buffer,
+                10 + at as u64,
+                2 * at + 2,
+                &[(2 * at, user(&question)), (2 * at + 1, answer("done"))],
+            );
         }
-        assert_eq!(buffer.turns.len(), TURNS_KEPT);
-        assert_eq!(buffer.rows()[0].text, "turn 1");
+        assert_eq!(buffer.written.len(), 7);
+        assert!(buffer.turns.is_empty(), "documented turns retain no rows");
         assert!(
             hook(
                 &mut buffer,
                 "PostToolUse",
-                &result("c-9", "p-2", true),
+                &result("c-9", "p-0", true),
                 None
             )
             .late
+        );
+        assert!(
+            hook(
+                &mut buffer,
+                "UserPromptSubmit",
+                &prompt("turn 0", "p-0"),
+                None
+            )
+            .late
+        );
+        let raw = prompt("the new session", "p-0").to_string();
+        assert!(
+            buffer
+                .note_hook(
+                    "UserPromptSubmit",
+                    &HookPayload::of(&raw),
+                    Some("another-session"),
+                    None,
+                    None
+                )
+                .drawn
+        );
+        assert!(buffer.written.is_empty());
+        assert_eq!(
+            buffer.rows_of(Some("another-session"))[0].text,
+            "the new session"
         );
     }
 }

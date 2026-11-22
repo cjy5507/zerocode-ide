@@ -56947,6 +56947,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // (the same page, `devin acp`). Every model name is made up.
       const baseListAgents = window.__ANSWER__.list_agents;
       const settlingCli = "example-cli";
+      const devinSession = { key: "session_id", id: "s-example" };
       const devinSpec = {
         id: settlingCli, name: "Example CLI", favicon_domain: "example.com",
         homepage_url: "https://example.com/cli", installed: true,
@@ -56982,6 +56983,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       window.__ANSWER__.pane_log = (args) => {
         if (args.term !== devinTerm) return prevPaneLog(args);
         devinPolls += 1;
+        if (devinPhase === "other-cli") return { found: false, next: args.after ?? 0 };
         if (devinPhase === "mid") {
           return {
             found: true,
@@ -57053,7 +57055,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       };
       devinTerm = await openTermTab({ placement: "tab" });
       const devinTab = tabOfTerm(devinTerm);
-      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await window.__PAINTED__();
       el("view-toggle-chat").click();
       await until(() => document.querySelector(`.pane-slot[data-term="${devinTerm}"] .pane-chat .is-provisional`));
@@ -57128,7 +57130,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // The document is written: the hooks' rows go in the paint that brings the
       // document's own, and turn 2 stands once.
       devinPhase = "settled";
-      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await until(() => (devinChat?.querySelectorAll(".is-provisional").length ?? 1) === 0 && devinChat?.textContent.includes("answer 2"));
       const turn2Occurrences = [...devinChat.querySelectorAll(".helper-turn.is-user")].filter((n) => n.textContent.includes("turn 2 live")).length;
       const answerOccurrences = [...devinChat.querySelectorAll(".helper-turn.is-assistant")].filter((n) => n.textContent.includes("answer 2")).length;
@@ -57140,10 +57142,10 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const otherTab = tabOfTerm(term);
       setActiveTab(otherTab.id);
       await settle(400);
-      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await settle(40);
       devinPhase = "turn3";
-      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await settle(400);
       const readWhileAway = devinChat?.textContent.includes("answer 3");
       setActiveTab(devinTab.id);
@@ -57164,12 +57166,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       lookAway(true);
       await settle(200);
       const pollsBeforeHidden = devinPolls;
-      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await settle(40);
       tell("hook:activity", { pane: `term:${devinTerm}`, activities: [{ seq: 0, activity: { verb: "bash", target: "cargo build", phase: "started" } }] });
       await settle(40);
       devinPhase = "turn4";
-      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await settle(400);
       const drawnWhileHidden = devinChat?.textContent.includes("answer 4");
       seen.devinHiddenReads = devinPolls - pollsBeforeHidden;
@@ -57190,9 +57192,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // tells the page alone (`pane:live-turns`) — so the turn stays done, its
       // foot line down.
       devinPhase = "turn5-stop";
-      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await settle(40);
-      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: "s-example", resumable: false, model: "example-family-a-max" });
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: devinSession, resumable: false, model: "example-family-a-max" });
       await until(() => devinChat?.textContent.includes("answer 5"), 3000);
       // Past the page's own follow-up read after a turn (160 ms): a page at
       // rest reads nothing by itself, so only the backend's word brings the
@@ -57214,6 +57216,46 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         stillDone: hookStates.get(devinTerm) === "done",
         footDown: !footLine || footLine.hidden,
       };
+      // A working read schedules a follow-up. Hide after the request answers,
+      // before the timer fires, and count what starts while nobody is looking.
+      await settle(200);
+      tell("hook:agent", { term: devinTerm, state: "working", agent: settlingCli, session: devinSession });
+      await until(() => devinRun?.helper?.quickFollow);
+      lookAway(true);
+      const pollsAtHide = devinPolls;
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: devinSession });
+      await settle(300);
+      seen.devinScheduledWhileHidden = devinPolls - pollsAtHide;
+      lookAway(false);
+      await settle(250);
+
+      // The replacement CLI has not written a file yet. The same pane must
+      // start from the tail and drop both its old document and its live rows.
+      devinPhase = "other-cli";
+      paneChats.get(devinTerm).chosen = false;
+      tell("hook:agent", { term: devinTerm, state: "done", agent: "codex", session: { key: "session_id", id: "s-replacement" } });
+      await settle(250);
+      seen.devinReplaced = {
+        rows: devinChat.querySelectorAll(".helper-turn, .is-provisional").length,
+        cursor: devinRun?.helper?.next,
+        found: devinRun?.helper?.found,
+      };
+
+      const oldFirstView = agentPaneFirstView;
+      agentPaneFirstView = AGENT_PANE_FIRST_VIEWS.conversation;
+      devinTerm = await openTermTab({ placement: "tab" });
+      devinPhase = "mid";
+      lookAway(true);
+      const pollsAtFirstHook = devinPolls;
+      tell("hook:agent", { term: devinTerm, state: "done", agent: settlingCli, session: { key: "session_id", id: "s-hidden-first" } });
+      await settle(300);
+      seen.devinFirstWhileHidden = devinPolls - pollsAtFirstHook;
+      seen.devinFirstStood = paneChatOn(devinTerm);
+      lookAway(false);
+      await until(() => devinPolls > pollsAtFirstHook, 3000);
+      await settle(250);
+      seen.devinFirstShownReads = devinPolls - pollsAtFirstHook - seen.devinFirstWhileHidden;
+      agentPaneFirstView = oldFirstView;
       window.__ANSWER__.list_agents = baseListAgents;
       if (prevPaneEffort) window.__ANSWER__.pane_effort = prevPaneEffort; else delete window.__ANSWER__.pane_effort;
       agentModelLists.delete(settlingCli);
@@ -57256,6 +57298,21 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.devinLateResult?.outAtStop && seen.devinLateResult?.quietUntilTold && seen.devinLateResult?.joined &&
         seen.devinLateResult?.stillDone && seen.devinLateResult?.footDown,
       JSON.stringify(seen.devinLateResult ?? null),
+    );
+    ok(
+      "a replacement CLI with no transcript starts with an empty page and cursor (t-125261)",
+      seen.devinReplaced?.rows === 0 && seen.devinReplaced?.cursor === null && seen.devinReplaced?.found === false,
+      JSON.stringify(seen.devinReplaced),
+    );
+    ok(
+      "a pane read scheduled before hiding starts no request while hidden (t-125261)",
+      seen.devinScheduledWhileHidden === 0,
+      JSON.stringify({ reads: seen.devinScheduledWhileHidden }),
+    );
+    ok(
+      "the first hook can open a hidden conversation but only showing it starts its first read (t-125261)",
+      seen.devinFirstStood && seen.devinFirstWhileHidden === 0 && seen.devinFirstShownReads === 1,
+      JSON.stringify({ stood: seen.devinFirstStood, hidden: seen.devinFirstWhileHidden, shown: seen.devinFirstShownReads }),
     );
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the pane's effort beside it (t-81532), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",

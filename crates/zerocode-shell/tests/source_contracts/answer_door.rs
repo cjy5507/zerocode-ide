@@ -802,18 +802,13 @@ fn a_wire_ends_only_for_a_conversation_no_door_named() {
         1,
         "a wire is ended for a pane's report from one place only"
     );
+    let inside = block_after(pane, "if let Some(word) = word {");
     assert!(
-        pane.contains(
-            "            if let Some(word) = word {\n                // A conversation no door named"
-        ),
+        inside.lines().nth(1).is_some_and(|line| line
+            .trim_start()
+            .starts_with("// A conversation no door named")),
         "the wire's end is no longer inside the word a report no door named carries"
     );
-    let word = &pane[pane
-        .find("            if let Some(word) = word {")
-        .expect("the report's word")..];
-    let inside = &word[..word
-        .find("\n            }\n")
-        .expect("the word's block closes")];
     assert!(
         inside.contains(".wires.supersede("),
         "the wire is ended outside the word a report no door named carries:\n{inside}"

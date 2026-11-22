@@ -119,8 +119,7 @@ pub enum SubagentStep {
     Stop,
 }
 
-/// One event name reduced to the word both tables below are keyed on:
-/// lowercased, with every separator dropped.
+/// The event name used by the hook classifiers: lowercase and without separators.
 ///
 /// The same fact arrives spelled `PreToolUse`, `preToolUse` and `pre_tool_use`
 /// depending on the vendor, so the spelling has to stop mattering exactly
@@ -128,7 +127,8 @@ pub enum SubagentStep {
 /// hang on the near-miss between `stop` and `subagentstop`, and two copies of
 /// this rule are two chances for one of them to start folding a separator the
 /// other keeps.
-pub(crate) fn normalized_event(event_name: &str) -> String {
+#[must_use]
+pub fn normalized_event(event_name: &str) -> String {
     event_name
         .chars()
         .filter(char::is_ascii_alphanumeric)

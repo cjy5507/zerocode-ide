@@ -38473,7 +38473,7 @@ mod tests {
                 && pane.contains("let read = LogRead::asked(after, before)?;")
                 && pane.contains("crate::pane_transcript::written_whole(&state, term, &path)")
                 && pane.contains("whole_document_log(")
-                && document.contains("document_read_within(path, read, whole, LONG_LINE_CAP)")
+                && document.contains("document_read_within(path, read, whole, LONG_LINE_CAP,")
                 && document.contains("return document_log(path, read, whole);")
                 && pane.contains(
                     "transcript_log_source(&path, read, whole.unwrap_or(false), archive)"
@@ -40468,9 +40468,8 @@ fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
     assert!(
         fill.contains("if (held.filling !== true) return;")
             && fill.contains("held.filling = false;")
-            && fill.contains(
-                "requestAnimationFrame(() => setTimeout(() => void readEarlierTurns(run)));"
-            )
+            && fill.contains("requestAnimationFrame(() => setTimeout(() => {")
+            && fill.contains("else void readEarlierTurns(run);")
             && !fill.contains("invoke("),
         "a page reads above its newest turns before they are drawn, more than once, or by a road of its own:\n{fill}"
     );
