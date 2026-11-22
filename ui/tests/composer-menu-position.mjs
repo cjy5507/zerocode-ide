@@ -195,10 +195,10 @@ export async function testComposerMenuPosition(page, ok) {
     JSON.stringify({ ...palette, ...(spill ?? {}) }),
   );
 
-  // 6. At a narrow 320px viewport with a long model list (>30 rows, as a
-  //    multi-vendor CLI such as Devin lists), the menu stays inside the 320px
-  //    viewport with no clipped buttons, shows the sticky search field, and
-  //    filters across families.
+  // 6. At a narrow 320px viewport, a long list its CLI groups into families
+  //    (past 30 rows — Devin lists 1,302 in 55, t-125261) opens on a search
+  //    field: the menu stays inside the viewport, no row clipped, and a search
+  //    finds a model across the families.
   await page.setViewportSize({ width: 320, height: 640 });
   const narrowSearch = await page.evaluate(async () => {
     const settle = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -252,6 +252,45 @@ export async function testComposerMenuPosition(page, ok) {
   );
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 1280, height: 900 });
+
+  // 7. A long list with no families keeps the flat menu it had: zo's own
+  //    catalog lists 32 models with none (2026-11-22), and only a list its CLI
+  //    groups into families stands a search field (t-125261).
+  const flat = await page.evaluate(async () => {
+    const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+    const chat = document.querySelector(`.pane-slot[data-term="${window.__TERM__}"] .pane-chat`);
+    chat.style.cssText = "";
+    const composer = chat?.querySelector(".worker-composer");
+    const chip = composer?.querySelector(".worker-composer-agent");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle(60);
+    window.__ANSWER__.agent_models = () => Array.from({ length: 32 }, (_, at) => ({
+      id: `model-${at}`,
+      display_name: `Model ${at}`,
+      provider: "claude",
+    }));
+    agentModelLists.clear();
+    chip?.click();
+    await settle(260);
+    const menu = composer?.querySelector(".composer-menu");
+    const models = [];
+    let heads = 0;
+    for (const node of menu?.children ?? []) {
+      if (node.classList.contains("composer-menu-head")) heads += 1;
+      else if (heads === 1 && node.classList.contains("composer-menu-item")) {
+        models.push(`${node.querySelector(".composer-menu-name")?.textContent}|${node.querySelector(".composer-menu-sub")?.textContent ?? ""}`);
+      }
+    }
+    const search = Boolean(menu?.querySelector(".composer-menu-search"));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle(60);
+    return { search, models };
+  });
+  ok(
+    "a long model list with no families — zo's own catalog lists 32 — keeps its flat menu: every row in order, its id beneath, no search field",
+    !flat.search && flat.models.join(",") === Array.from({ length: 32 }, (_, at) => `Model ${at}|model-${at}`).join(","),
+    JSON.stringify(flat),
+  );
 }
 
 /* ---- how the composer's menus open and close (2026-11-08) ------------------

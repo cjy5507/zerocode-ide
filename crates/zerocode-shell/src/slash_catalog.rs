@@ -79,10 +79,11 @@ pub struct ModelRow {
     pub id: String,
     pub display_name: String,
     pub provider: String,
+    /// The family its CLI keeps it in, where the CLI groups its list
+    /// (`ListShape::Json`'s `family`) — the chip's menu finds a model of a
+    /// long grouped list by it (t-125261).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
 }
 
 /// How long an answer stands before the CLI is asked again. Announcing a
@@ -594,24 +595,38 @@ fn captured_lines_in(
 
 // ---- models -----------------------------------------------------------------
 
-/// The models `agent` can switch to — from its own CLI's cached lineup when
-/// its catalog row names one (`ModelSource::OwnList`, `summon_lineup`), else
-/// from zo's live catalog (`zo models --json`), filtered to the provider the
-/// agent drives, with withdrawn rows omitted and active generations ordered
-/// ahead of superseded ones. One source per agent, chosen by the row's value.
+/// The models `agent` can switch to: the list its own CLI gives where its
+/// row names one (`ModelSource::OwnList`, the lineup `summon_lineup` holds —
+/// t-125261), else zo's live catalog (`zo models --json`), filtered to the
+/// provider the agent drives, with withdrawn rows omitted and active
+/// generations ordered ahead of superseded ones. An own list is offered only
+/// where a pick from it reaches the CLI ([`takes_a_model`]). One source per
+/// agent, chosen by its row's value.
 pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
     use zerocode_core::capabilities::ModelSource;
-    if matches!(
-        zerocode_core::agent::agent_spec(agent).map(|spec| spec.harness.models),
-        Some(ModelSource::OwnList(_))
-    ) {
+    let harness = zerocode_core::agent::agent_spec(agent).map(|spec| &spec.harness);
+    if let Some(harness) = harness
+        && matches!(harness.models, ModelSource::OwnList(_))
+    {
+        if !takes_a_model(harness) {
+            return Vec::new();
+        }
         return agent_models_from_listed(agent, &crate::summon_lineup::own_list_models(agent));
     }
     agent_models_from(agent, &zo_models_catalog(home))
 }
 
-/// Converts models listed by an agent's own CLI (`cli_models::Listed`) into the
-/// composer's [`ModelRow`] shape without branching on the agent's name.
+/// Whether a model picked for this row reaches its CLI: a model flag its
+/// launch takes (the 「새 대화」 start), or a move between turns that takes it
+/// (the chip's `/model`). OpenCode's TUI takes neither (`opencode --help`
+/// 2.2.5), so its list — 「models」 answers one — offers nothing a pick would
+/// change.
+fn takes_a_model(harness: &zerocode_core::capabilities::Harness) -> bool {
+    harness.tuning.is_some() || harness.moves.model.is_some()
+}
+
+/// The models an agent's own CLI listed (`cli_models::Listed`), in the chip's
+/// shape: the name it shows, else its id.
 pub fn agent_models_from_listed(
     agent: &str,
     listed: &[zerocode_core::cli_models::Listed],
@@ -623,39 +638,8 @@ pub fn agent_models_from_listed(
             display_name: one.name.clone().unwrap_or_else(|| one.id.clone()),
             provider: agent.to_string(),
             family: one.family.clone(),
-            context_window: one.context_window,
         })
         .collect()
-}
-
-/// Looks up a model's declared context window in tokens from the agent's cached
-/// model list without starting any subprocess. Returns `None` when the list is
-/// not yet cached or the model names no context window.
-pub(crate) fn cached_model_context_window(agent: &str, model: &str) -> Option<u64> {
-    use zerocode_core::capabilities::ModelSource;
-    let rows = match zerocode_core::agent::agent_spec(agent)?.harness.models {
-        ModelSource::OwnList(_) => {
-            agent_models_from_listed(agent, &crate::summon_lineup::peek_own_list_models(agent))
-        }
-        ModelSource::ZoCatalog(_) | ModelSource::ZoCatalogAll | ModelSource::ZoOtherLogin(_) => {
-            let catalog = peek_zo_models_catalog()?;
-            agent_models_from(agent, &catalog)
-        }
-        ModelSource::Unknown => return None,
-    };
-    model_context_window_in(&rows, model)
-}
-
-/// Resolves `model`'s declared context window from `rows` (exact id match).
-pub(crate) fn model_context_window_in(rows: &[ModelRow], model: &str) -> Option<u64> {
-    let needle = model.trim();
-    if needle.is_empty() {
-        return None;
-    }
-    rows.iter()
-        .find(|row| row.id == needle)
-        .and_then(|row| row.context_window)
-        .filter(|tokens| *tokens > 0)
 }
 
 fn band_rank(band: Option<&str>) -> u8 {
@@ -693,10 +677,6 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
                         .to_string(),
                     provider: row_provider.to_string(),
                     family: None,
-                    context_window: row
-                        .get("contextWindow")
-                        .and_then(serde_json::Value::as_u64)
-                        .filter(|tokens| *tokens > 0),
                 })
             })
             .collect();
@@ -740,10 +720,6 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
                         .to_string(),
                     provider: row_provider.to_string(),
                     family: None,
-                    context_window: row
-                        .get("contextWindow")
-                        .and_then(serde_json::Value::as_u64)
-                        .filter(|tokens| *tokens > 0),
                 },
             ))
         })
@@ -785,7 +761,6 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
                     display_name,
                     provider: name.to_string(),
                     family: None,
-                    context_window: None,
                 });
             }
         }
@@ -1002,14 +977,6 @@ fn credential_store(env: &[(String, String)]) -> String {
             || "keychain".to_string(),
             |(name, folder)| format!("{name}:{folder}"),
         )
-}
-
-/// Peeks the cached `zo models --json` catalog without starting a subprocess.
-fn peek_zo_models_catalog() -> Option<serde_json::Value> {
-    models_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.held.as_ref().map(|(_, value)| value.clone()))
 }
 
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
@@ -1855,47 +1822,61 @@ mod tests {
         assert_eq!(list["otherLogins"].as_array().unwrap().len(), 2);
     }
 
+    /// An own list reaches the chip in its shape — the name it shows, else
+    /// its id, and its family — and is offered only by a row a pick reaches:
+    /// Devin (its launch flag and `/model`) and Kiro (its launch flag), not
+    /// OpenCode, whose TUI takes neither, so its chip and 「새 대화」 offer no
+    /// list, as before (t-125261).
     #[test]
-    fn own_list_models_carry_family_and_context_window_and_lookup_resolves_them() {
+    fn an_own_list_is_offered_only_where_a_pick_reaches_the_cli() {
         use zerocode_core::cli_models::Listed;
         let rows = agent_models_from_listed(
-            "devin",
+            "example-cli",
             &[
                 Listed {
-                    id: "swe-2-high".into(),
-                    name: Some("SWE-2 High".into()),
-                    family: Some("swe-2".into()),
+                    id: "example-family-a-high".into(),
+                    name: Some("Example Family A High".into()),
+                    family: Some("example-family-a".into()),
                     context_window: Some(262_000),
                 },
                 Listed {
-                    id: "adaptive".into(),
+                    id: "example-family-b".into(),
                     name: None,
-                    family: Some("adaptive".into()),
+                    family: Some("example-family-b".into()),
                     context_window: None,
                 },
             ],
         );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].display_name, "SWE-2 High");
-        assert_eq!(rows[0].family.as_deref(), Some("swe-2"));
-        assert_eq!(rows[0].context_window, Some(262_000));
-        assert_eq!(rows[1].display_name, "adaptive");
-        assert_eq!(rows[1].context_window, None);
-        assert_eq!(model_context_window_in(&rows, "swe-2-high"), Some(262_000));
-        assert_eq!(model_context_window_in(&rows, "adaptive"), None);
-        assert_eq!(model_context_window_in(&rows, "unknown-model"), None);
-
-        let catalog = serde_json::json!({
-            "models": [
-                {"id": "gpt-6.2-astra", "provider": "openai", "displayName": "GPT-6.2-Astra", "band": "top", "contextWindow": 400_000},
-                {"id": "gpt-no-window", "provider": "openai", "displayName": "GPT No Window", "band": "rest"}
-            ]
-        });
-        let codex_rows = agent_models_from("codex", &catalog);
         assert_eq!(
-            model_context_window_in(&codex_rows, "gpt-6.2-astra"),
-            Some(400_000)
+            rows.iter()
+                .map(|row| (
+                    row.id.as_str(),
+                    row.display_name.as_str(),
+                    row.family.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "example-family-a-high",
+                    "Example Family A High",
+                    Some("example-family-a")
+                ),
+                (
+                    "example-family-b",
+                    "example-family-b",
+                    Some("example-family-b")
+                ),
+            ]
         );
-        assert_eq!(model_context_window_in(&codex_rows, "gpt-no-window"), None);
+        let harness = |agent: &str| {
+            &zerocode_core::agent::agent_spec(agent)
+                .expect("a row")
+                .harness
+        };
+        assert!(takes_a_model(harness("devin")));
+        assert!(takes_a_model(harness("kiro")));
+        assert!(!takes_a_model(harness("opencode")));
+        // Asked before any CLI is: OpenCode's answer is the empty one it was.
+        assert!(agent_models("opencode", Path::new("/nonexistent-home")).is_empty());
     }
 }

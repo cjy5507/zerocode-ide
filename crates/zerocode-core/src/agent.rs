@@ -902,15 +902,19 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             ])],
             vault_resume_carries_launch_args: true,
             // `devin --help` (3000.14.30821, 2026-11-21): `--model <MODEL>`
-            // (also `DEVIN_MODEL`), and no effort flag. `models.mdx` (:60-68)
-            // and `reference/commands.mdx` (:494): `/model [name]` switches
-            // models during a session (`/model opus`, `/model sonnet`, or bare
-            // `/model` for its picker). `models list --format json` — "List
-            // available models, organized by model family" — answered the same
-            // day (t-124593, 0.7 s): `{"families":[{"slug","aliases",
-            // "variants":[{"model_uid","label","max_context_tokens",…}]}]}`,
-            // 55 families and 1,302 models, no default named; an effort is
-            // part of a model's id (`…-high`, `…-max`), not a flag of its own.
+            // (also `DEVIN_MODEL`), and no effort flag. Its docs
+            // (docs.devin.ai/cli/reference/commands.md, read 2026-11-22):
+            // `/model [name]` — "Show or change the current model" — taking
+            // the same names `--model` does ("family slug, alias, or partial
+            // name"), so a pick from its own list types `/model <id>`
+            // (t-125261). `models list --format json` — "List available
+            // models, organized by model family" — answered (t-124593, 0.7 s;
+            // its shape recorded, names made up, in
+            // `tests/fixtures/devin-models-list-3000.14.json`):
+            // `{"families":[{"slug","aliases","variants":[{"model_uid","label",
+            // "max_context_tokens",…}]}]}`, 55 families and 1,302 models, no
+            // default named; an effort is part of a model's id, not a flag of
+            // its own.
             moves: TurnMoves {
                 model: Some(MoveRoad::Line("/model")),
                 ..TurnMoves::NONE
@@ -2753,8 +2757,8 @@ mod tests {
         assert!(!of("codex").model_command_takes_id);
         assert_eq!(of("zo").model_command, Some("/model"));
         assert!(of("zo").model_command_takes_id);
-        // Devin CLI docs (`models.mdx` :60-68, `reference/commands.mdx` :494):
-        // `/model [name]` switches models directly during a session.
+        // Devin's docs (reference/commands.md): `/model [name]` "Show or
+        // change the current model" (t-125261).
         assert_eq!(of("devin").model_command, Some("/model"));
         assert!(of("devin").model_command_takes_id);
         assert_eq!(of("aider").model_command, None);

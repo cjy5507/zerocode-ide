@@ -1020,11 +1020,13 @@ pub(super) async fn hook_loop(
                 say_pane_conversation(&app, report.term, word.word(), Some(&session.id), holder);
             }
         }
-        // For CLIs whose store settles only after a turn ends
-        // (`Format::settles_after_turn`), accumulate mid-turn hook facts
-        // (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) into the
-        // pane's provisional turn buffer so the conversation page shows what
-        // is running before the document flushes. One lock at a time.
+        // A CLI that writes its session once a turn has ended
+        // (`Format::settles_after_turn`) has its turn told by these hooks as
+        // they come — the prompt, each call and its result, the last answer —
+        // and the page shows it until the document holds it
+        // (`zerocode_core::live_hook_turns`, t-125261). Heard before the
+        // window is told below, so the read that telling starts finds it. One
+        // lock at a time.
         if zerocode_core::vault::turn_write_settle(report.agent.slug()).is_some() {
             let current_settled = app
                 .state::<AppState>()
@@ -1773,14 +1775,14 @@ pub(super) fn note_pane_state(
     let shown = crate::worker_question::heard(report, worktree, epoch_ms_now());
     // A CLI that writes its session once a turn has ended (Devin's ATIF
     // document, 29–34 ms after its Stop — t-124593) has not written this turn
-    // when the page reads at this event. Watch the bound document's metadata
-    // across `TURN_SETTLE_BACKOFF` (80 → 250 → 700 → 1500 ms) — never reading
-    // file bytes while unchanged — and tell the page once the file appears or
-    // moves, so even a large multi-turn document flushed past 340 ms lands
-    // promptly without polling at rest. Asked of the agent's store rows, never
-    // its name.
+    // when the page reads at this event. The file is looked at again at the
+    // store's waits (`TURN_WRITE_SETTLE`) — its size and time, never its bytes
+    // — and the page is told once, when it is new or moved since this event:
+    // a long document written late under a busy disk lands too, and a store
+    // that wrote nothing tells nothing (t-125261). Asked of the agent's store
+    // rows, never its name.
     if report.state == zerocode_core::hook::HookState::Done
-        && zerocode_core::vault::turn_write_settle(report.agent.slug()).is_some()
+        && let Some(looks) = zerocode_core::vault::turn_write_settle(report.agent.slug())
     {
         let term = report.term;
         // This report's place in the window's record of the pane, written
@@ -1797,7 +1799,7 @@ pub(super) fn note_pane_state(
         let app = app.clone();
         let again = shown.clone();
         tell_when_settled(
-            &TURN_SETTLE_BACKOFF,
+            looks,
             move || {
                 watching
                     .state::<AppState>()
@@ -1807,8 +1809,9 @@ pub(super) fn note_pane_state(
                     == told_at
             },
             move || {
-                // Drop a remembered "no file" so the first turn's newly
-                // created document can be bound without waiting out backoff.
+                // The binding remembers a first turn's "no file" for up to a
+                // minute — its document did not exist at the Stop — so it is
+                // let go before each look, and the disk is asked again.
                 if before_stamp.is_none() {
                     probing
                         .state::<AppState>()
@@ -1817,8 +1820,10 @@ pub(super) fn note_pane_state(
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .drop_pane(&term);
                 }
-                let now_stamp = transcript_file_stamp(&probing.state::<AppState>(), term);
-                now_stamp.is_some() && now_stamp != before_stamp
+                moved_since(
+                    before_stamp,
+                    transcript_file_stamp(&probing.state::<AppState>(), term),
+                )
             },
             move || {
                 tell_window(&app, again);
@@ -1836,43 +1841,39 @@ pub(super) fn note_pane_state(
     }
 }
 
-/// Backoff wait steps after a `Stop` hook for a store that writes its session
-/// document once a turn has ended (`Format::settles_after_turn`).
-///
-/// Small ATIF documents flush 29–34 ms after `Stop` (measured 2026-11-21), so
-/// the first 80 ms check catches normal turns faster than the old single 340 ms
-/// sleep, while 250 → 700 → 1,500 ms cover large multi-turn documents flushed
-/// under disk load without ever reading file contents while metadata is
-/// unchanged.
-pub(crate) const TURN_SETTLE_BACKOFF: [Duration; 4] = [
-    Duration::from_millis(80),
-    Duration::from_millis(250),
-    Duration::from_millis(700),
-    Duration::from_millis(1_500),
-];
+/// A pane's bound session file as its size and time, its bytes unread — what
+/// the looks after a turn's end compare ([`tell_when_settled`]).
+fn transcript_file_stamp(state: &AppState, term: TermId) -> Option<FileStamp> {
+    file_stamp(&crate::pane_transcript::pane_transcript(state, term).ok()?)
+}
 
-/// Cheap metadata stamp `(len, modified)` for a pane's bound transcript,
-/// reading zero file bytes.
-fn transcript_file_stamp(
-    state: &AppState,
-    term: TermId,
-) -> Option<(u64, Option<std::time::SystemTime>)> {
-    let path = crate::pane_transcript::pane_transcript(state, term).ok()?;
-    let meta = std::fs::metadata(&path).ok()?;
+/// A file's size and time of last write, or `None` while there is no file.
+pub(crate) type FileStamp = (u64, Option<std::time::SystemTime>);
+
+pub(crate) fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()))
 }
 
-/// Run `tell` at most once on a background thread as soon as `changed` reports
-/// the settled document appeared or moved across `schedule`, aborting early
-/// whenever `still_newest` says a newer hook arrived for the pane.
+/// Whether a file is there now and is not the one stamped `before` — written
+/// since, or first written since.
+pub(crate) fn moved_since(before: Option<FileStamp>, now: Option<FileStamp>) -> bool {
+    now.is_some() && now != before
+}
+
+/// Looks at a store that settles after a turn at each wait of `looks`
+/// ([`zerocode_core::vault::TURN_WRITE_SETTLE`]), on a thread of its own, and
+/// runs `tell` once, at the first look where `changed` says the file is new
+/// or moved — and not at all when `still_newest` says a newer word came for
+/// the pane first, or the last look found nothing.
 pub(crate) fn tell_when_settled(
-    schedule: &'static [Duration],
+    looks: &'static [Duration],
     still_newest: impl Fn() -> bool + Send + 'static,
     changed: impl Fn() -> bool + Send + 'static,
     tell: impl FnOnce() + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        for wait in schedule {
+        for wait in looks {
             std::thread::sleep(*wait);
             if !still_newest() {
                 return;
@@ -1881,24 +1882,6 @@ pub(crate) fn tell_when_settled(
                 tell();
                 return;
             }
-        }
-    });
-}
-
-/// Run `tell` once, `settle` from now, on a thread of its own, when
-/// `still_newest` says then that nothing newer has come — the second telling
-/// of a turn's end for a store that settles after it
-/// (`zerocode_core::vault::turn_write_settle`, t-124593).
-#[allow(dead_code)]
-pub(crate) fn tell_again_after(
-    settle: Duration,
-    still_newest: impl FnOnce() -> bool + Send + 'static,
-    tell: impl FnOnce() + Send + 'static,
-) {
-    std::thread::spawn(move || {
-        std::thread::sleep(settle);
-        if still_newest() {
-            tell();
         }
     });
 }

@@ -871,4 +871,64 @@ mod tests {
             Ran::NotStarted(_)
         ));
     }
+
+    /// Devin's own list (`devin models list --format json`, 3000.14.30821),
+    /// recorded 2026-11-22 with its shape kept and every name made up
+    /// (`tests/fixtures/devin-models-list-3000.14.json`): families with
+    /// `family_label`, `family_uid`, `slug`, `aliases` and `variants`, each
+    /// variant with `model_uid`, `label`, `description`, `cost_summary`,
+    /// `is_new`, `is_beta`, `max_context_tokens`, `max_output_tokens` and
+    /// `cost_tier` — of the 1,302 it listed, one had no `max_context_tokens`.
+    /// Read through Devin's catalog row, the one row this recording answers,
+    /// each model comes with the name it shows, its family and its window,
+    /// and the one with none has none (t-125261).
+    #[test]
+    fn devins_recorded_list_reads_through_its_rows_shape() {
+        let recorded = include_str!("../tests/fixtures/devin-models-list-3000.14.json");
+        let road = road_of("devin").expect("devin's row names its list");
+        let listed = read(road.shape, &ended(0, recorded, "")).listed().to_vec();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|one| (
+                    one.id.as_str(),
+                    one.name.as_deref(),
+                    one.family.as_deref(),
+                    one.context_window
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "example-family-a-high",
+                    Some("Example Family A High"),
+                    Some("example-family-a"),
+                    Some(1_000_000)
+                ),
+                (
+                    "example-family-a-max",
+                    Some("Example Family A Max"),
+                    Some("example-family-a"),
+                    Some(1_000_000)
+                ),
+                (
+                    "example-family-b-medium",
+                    Some("Example Family B Medium"),
+                    Some("example-family-b"),
+                    Some(262_000)
+                ),
+                (
+                    "example-family-b-low",
+                    Some("Example Family B Low"),
+                    Some("example-family-b"),
+                    None
+                ),
+                (
+                    "example-family-c-fast",
+                    Some("Example Family C Fast"),
+                    Some("example-family-c"),
+                    Some(128_000)
+                ),
+            ]
+        );
+    }
 }

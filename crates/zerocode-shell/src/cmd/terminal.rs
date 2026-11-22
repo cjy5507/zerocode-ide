@@ -349,23 +349,19 @@ pub(crate) fn pane_log(
         .get(&term)
         .map(|session| session.id.clone());
     let Ok(path) = crate::pane_transcript::pane_transcript(&state, term) else {
-        // Before a turn-settling CLI writes its first session document, return
-        // any hook-accumulated provisional turns so the first turn is visible
-        // mid-turn instead of showing "no transcript yet".
+        let mut log = SubagentLog::not_found(after.unwrap_or_default());
+        // A CLI that writes its session once a turn has ended has no file
+        // through its first turn: what its hooks told of that turn is the
+        // conversation until then (t-125261).
         if matches!(read, LogRead::Tail | LogRead::After(_)) {
-            let live_turns = state
+            log.live_turns = state
                 .pane_live_turns()
                 .get(&term)
-                .map(|buf| buf.turns().to_vec())
+                .map(|live| live.turns().to_vec())
                 .unwrap_or_default();
-            if !live_turns.is_empty() {
-                let mut log = SubagentLog::not_found(0);
-                log.found = true;
-                log.live_turns = live_turns;
-                return Ok(log);
-            }
+            log.found = !log.live_turns.is_empty();
         }
-        return Ok(SubagentLog::not_found(after.unwrap_or_default()));
+        return Ok(log);
     };
     let archive = archive.unwrap_or(false);
     if archive && state.agent_terms().get(&term).copied() != Some("zo") {
@@ -388,32 +384,39 @@ pub(crate) fn pane_log(
     }
     restart_nudge_runtime::mark_window_notes(log.turns.iter_mut().map(|one| &mut one.turn));
     if whole_doc && matches!(read, LogRead::Tail | LogRead::After(_)) {
-        let settled = usize::try_from(log.next).unwrap_or(usize::MAX);
-        state.pane_doc_steps().insert(term, settled);
-        let returned: Vec<&zerocode_core::transcript::TranscriptTurn> =
-            log.turns.iter().map(|one| &one.turn).collect();
-        let mut live = state.pane_live_turns();
-        if let Some(buf) = live.get_mut(&term) {
-            buf.reconcile_turns(settled, &returned);
-            log.live_turns = buf.turns().to_vec();
-        }
+        state
+            .pane_doc_steps()
+            .insert(term, usize::try_from(log.next).unwrap_or(usize::MAX));
+        settle_live_turns(&mut log, state.pane_live_turns().get_mut(&term));
     }
-    if let Some(model) = log.model.as_ref() {
-        state.pane_transcript_models().insert(term, model.clone());
-    }
-    if log.usage.as_ref().is_some_and(|usage| usage.window == 0) {
-        let slug = state.agent_terms().get(&term).copied();
-        let model = log
-            .model
-            .clone()
-            .or_else(|| state.pane_transcript_models().get(&term).cloned());
-        if let (Some(slug), Some(model), Some(usage)) = (slug, model.as_deref(), log.usage.as_mut())
-            && let Some(window) = crate::slash_catalog::cached_model_context_window(slug, model)
-        {
-            usage.window = window;
-        }
+    // A context its transcript counts but does not size is sized by the
+    // pane's model in its own CLI's list (Devin's `max_context_tokens`, the
+    // number its own screen draws); zo's catalog sizes no other CLI's window
+    // — its numbers are zo's own caps (t-125261).
+    let agent = state.agent_terms().get(&term).copied();
+    if let Some(usage) = log.usage.as_mut().filter(|usage| usage.window == 0)
+        && let (Some(agent), Some(model)) = (agent, log.model.as_deref())
+        && let Some(window) = crate::summon_lineup::own_listed_window(agent, model)
+    {
+        usage.window = window;
     }
     Ok(log)
+}
+
+/// The turn a pane's CLI is running beside a read of its session document:
+/// the document's rows let the turn go once they hold it, and what still
+/// stands of it rides the answer as `live_turns` (t-125261).
+pub(crate) fn settle_live_turns(
+    log: &mut SubagentLog,
+    live: Option<&mut zerocode_core::live_hook_turns::LiveTurnBuffer>,
+) {
+    let Some(live) = live else {
+        return;
+    };
+    let read: Vec<&zerocode_core::transcript::TranscriptTurn> =
+        log.turns.iter().map(|one| &one.turn).collect();
+    live.reconcile_turns(usize::try_from(log.next).unwrap_or(usize::MAX), &read);
+    log.live_turns = live.turns().to_vec();
 }
 
 /// The tail of a pane's own transcript, as lines joined for the readers

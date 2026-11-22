@@ -20874,7 +20874,7 @@ details[open] > .helper-cap::after {
   box-sizing: border-box;
   margin-bottom: var(--space-1);
   padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--edge-rule);
+  border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-sm);
   background: var(--surface-deck);
   color: var(--ink-chalk);

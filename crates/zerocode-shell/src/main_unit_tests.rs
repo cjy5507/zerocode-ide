@@ -35091,50 +35091,75 @@ fn a_long_session_document_folds_and_a_waiting_call_is_held_back() {
 }
 
 /// A CLI that writes its session once a turn has ended (Devin, 29–34 ms after
-/// its Stop) is read again once its store has settled: a turn written 50 ms
-/// after the Stop is in the conversation then, with no hook after it; a store
-/// that has written nothing by then passes without a word (t-124593).
+/// its Stop) is told to the page again once its file is new or moved since
+/// the Stop — at the first of the store's looks that finds it, however late
+/// in them, its size and time read and never its bytes — and a store that
+/// writes nothing tells nothing; a newer word in the wait keeps a late Done
+/// from being told at all (t-124593, t-125261).
 #[test]
-fn a_turn_written_after_its_stop_is_read_once_the_store_has_settled() {
-    use crate::cmd::terminal::{LogRead, document_log};
-    let settle = zerocode_core::vault::turn_write_settle("devin").expect("devin's store settles after a turn");
+fn a_turn_written_after_its_stop_is_told_once_at_the_stores_looks() {
+    use crate::pane_runtime::{file_stamp, moved_since, tell_when_settled};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+    // The looks are the store row's, asked of the row: one constant, in core.
+    assert_eq!(
+        zerocode_core::vault::turn_write_settle("devin"),
+        Some(&zerocode_core::vault::TURN_WRITE_SETTLE[..])
+    );
     assert_eq!(zerocode_core::vault::turn_write_settle("claude"), None, "a store written as the turn goes");
+    // A look: no file, the turn's first write, the same file again, the
+    // document written whole again as it grew.
     let dir = tempfile::tempdir().expect("transcript folder");
     let path = dir.path().join("example-session.json");
-    let (told, heard) = std::sync::mpsc::channel();
-    let at_stop = path.clone();
-    crate::pane_runtime::tell_again_after(settle, || true, move || {
-        let _ = told.send(document_log(&at_stop, LogRead::Tail, false));
-    });
-    assert!(document_log(&path, LogRead::Tail, false).is_err(), "nothing is written at the Stop");
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    let at_stop = file_stamp(&path);
+    assert!(at_stop.is_none() && !moved_since(at_stop, file_stamp(&path)), "no file is no news");
     std::fs::write(&path, atif_document(1, &[])).expect("the CLI writes the turn");
-    let again = heard.recv_timeout(settle * 4).expect("the second read").expect("the document");
-    assert_eq!(
-        again.turns.iter().map(|one| one.turn.text.as_str()).collect::<Vec<_>>(),
-        ["example question 0", "example answer 0"]
-    );
-    let never = dir.path().join("example-never.json");
+    let written = file_stamp(&path);
+    assert!(moved_since(at_stop, written), "a first write is news");
+    assert!(!moved_since(written, file_stamp(&path)), "the same file is no news again");
+    std::fs::write(&path, atif_document(2, &[])).expect("the CLI writes it whole again");
+    assert!(moved_since(written, file_stamp(&path)), "a document written whole again is news");
+
+    // The same looks, short, so the test waits on nothing but the thread.
+    static LOOKS: [Duration; 4] = [Duration::from_millis(5), Duration::from_millis(10), Duration::from_millis(20), Duration::from_millis(40)];
+    // Found at the third look: told then, once, and no fourth look is made.
+    let looked = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&looked);
     let (told, heard) = std::sync::mpsc::channel();
-    crate::pane_runtime::tell_again_after(settle, || true, move || {
-        let _ = told.send(document_log(&never, LogRead::Tail, false).is_err());
+    tell_when_settled(&LOOKS, || true, move || counted.fetch_add(1, Ordering::SeqCst) + 1 == 3, move || {
+        let _ = told.send(());
     });
-    assert!(heard.recv_timeout(settle * 4).expect("the second read"), "a store that wrote nothing says nothing");
-    // A newer word in the wait — a prompt that began the next turn — keeps
-    // the late Done from being told at all.
-    let record = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(1));
-    let told_at = record.load(std::sync::atomic::Ordering::SeqCst);
-    let seen = record.clone();
-    let (told, heard) = std::sync::mpsc::channel();
-    crate::pane_runtime::tell_again_after(
-        settle,
-        move || seen.load(std::sync::atomic::Ordering::SeqCst) == told_at,
-        move || {
-            let _ = told.send(());
-        },
-    );
-    record.store(2, std::sync::atomic::Ordering::SeqCst);
-    assert!(heard.recv_timeout(settle * 4).is_err(), "a late Done stood over a newer word");
+    assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Ok(()), "a write found at the third look was not told");
+    assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Err(RecvTimeoutError::Disconnected), "told twice");
+    assert_eq!(looked.load(Ordering::SeqCst), 3);
+    // Nothing written: every look made, nothing told.
+    let looked = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&looked);
+    let (told, heard) = std::sync::mpsc::channel::<()>();
+    tell_when_settled(&LOOKS, || true, move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        false
+    }, move || {
+        let _ = told.send(());
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Err(RecvTimeoutError::Disconnected), "a store that wrote nothing was told");
+    assert_eq!(looked.load(Ordering::SeqCst), LOOKS.len());
+    // A newer word before the first look: no look, nothing told.
+    let newer = std::sync::Arc::new(AtomicBool::new(true));
+    let still = std::sync::Arc::clone(&newer);
+    let looked = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&looked);
+    let (told, heard) = std::sync::mpsc::channel::<()>();
+    tell_when_settled(&LOOKS, move || !still.load(Ordering::SeqCst), move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        true
+    }, move || {
+        let _ = told.send(());
+    });
+    assert_eq!(heard.recv_timeout(Duration::from_secs(5)), Err(RecvTimeoutError::Disconnected), "a late Done stood over a newer word");
+    assert_eq!(looked.load(Ordering::SeqCst), 0);
+    newer.store(false, Ordering::SeqCst);
 }
 
 /// A document read while its CLI wrote it is nothing new, the cursor where it
@@ -35154,166 +35179,101 @@ fn a_session_document_mid_write_or_past_its_cap_reads_nothing_new() {
     assert!(big.found && big.skipped && big.turns.is_empty());
 }
 
-/// A store that writes its document late (past 340 ms) still announces once as
-/// soon as file metadata moves across `TURN_SETTLE_BACKOFF`, never emits when
-/// metadata stays unchanged, and stops immediately when a newer hook arrives.
+/// What the page holds of a Devin pane through a turn — the document's rows
+/// it read, and what `pane_log` hands beside them (`settle_live_turns`) —
+/// holds each step once at every read (t-125261): while the turn runs on its
+/// hooks, when its Stop comes before a call's result, once the CLI has written
+/// the document whole again, and when a hook of the written turn comes late,
+/// with its `prompt_id` or without one.
 #[test]
-fn a_late_written_document_notifies_once_across_backoff_and_skips_unchanged() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
-    const FAST_SCHEDULE: [std::time::Duration; 4] = [
-        std::time::Duration::from_millis(10),
-        std::time::Duration::from_millis(20),
-        std::time::Duration::from_millis(40),
-        std::time::Duration::from_millis(80),
-    ];
-    // Named production schedule holds the documented 80 → 250 → 700 → 1500 ms steps.
-    assert_eq!(
-        crate::pane_runtime::TURN_SETTLE_BACKOFF,
-        [
-            std::time::Duration::from_millis(80),
-            std::time::Duration::from_millis(250),
-            std::time::Duration::from_millis(700),
-            std::time::Duration::from_millis(1_500),
-        ]
-    );
-    // Changes on the third probe (simulating a >340 ms write): notifies once.
-    let probes = Arc::new(AtomicUsize::new(0));
-    let probes_in = Arc::clone(&probes);
-    let (tx, rx) = std::sync::mpsc::channel();
-    crate::pane_runtime::tell_when_settled(
-        &FAST_SCHEDULE,
-        || true,
-        move || probes_in.fetch_add(1, Ordering::SeqCst) + 1 >= 3,
-        move || {
-            let _ = tx.send(());
-        },
-    );
-    rx.recv_timeout(std::time::Duration::from_secs(2))
-        .expect("late write announced on third backoff step");
-    assert_eq!(probes.load(Ordering::SeqCst), 3);
-
-    // Unchanged file never notifies at all.
-    let (tx2, rx2) = std::sync::mpsc::channel();
-    crate::pane_runtime::tell_when_settled(
-        &FAST_SCHEDULE,
-        || true,
-        || false,
-        move || {
-            let _ = tx2.send(());
-        },
-    );
-    assert!(
-        rx2.recv_timeout(std::time::Duration::from_millis(220))
-            .is_err(),
-        "unchanged file must not notify"
-    );
-
-    // A newer hook cancels immediately before `changed` is checked again.
-    let still = Arc::new(AtomicBool::new(false));
-    let still_in = Arc::clone(&still);
-    let checked = Arc::new(AtomicUsize::new(0));
-    let checked_in = Arc::clone(&checked);
-    let (tx3, rx3) = std::sync::mpsc::channel();
-    crate::pane_runtime::tell_when_settled(
-        &FAST_SCHEDULE,
-        move || still_in.load(Ordering::SeqCst),
-        move || {
-            checked_in.fetch_add(1, Ordering::SeqCst);
-            true
-        },
-        move || {
-            let _ = tx3.send(());
-        },
-    );
-    assert!(
-        rx3.recv_timeout(std::time::Duration::from_millis(80))
-            .is_err()
-    );
-    assert_eq!(checked.load(Ordering::SeqCst), 0);
-}
-
-/// Multi-turn ATIF document rewritten whole across turns plus mid-turn
-/// provisional hook turns: provisional turns stay visible while the document
-/// holds only prior turns, then clear cleanly once the rewritten document
-/// arrives (0 duplicate turns).
-#[test]
-fn a_multi_turn_document_replaces_provisional_hook_turns_with_zero_duplicates() {
-    use crate::cmd::terminal::{LogRead, document_log};
+fn a_turn_shown_from_its_hooks_then_its_document_shows_each_step_once() {
+    use crate::cmd::terminal::{LogRead, document_log, settle_live_turns};
     use zerocode_core::live_hook_turns::LiveTurnBuffer;
     use zerocode_core::payload::HookPayload;
+    use zerocode_core::transcript::TranscriptTurn;
+    /// One read as the page makes it: on from its cursor, the live turns
+    /// settled beside it.
+    fn read(path: &std::path::Path, live: &mut LiveTurnBuffer, shown: &mut Vec<TranscriptTurn>, next: &mut Option<u64>) -> Vec<TranscriptTurn> {
+        let mut log = document_log(path, next.map_or(LogRead::Tail, LogRead::After), false).expect("a read");
+        settle_live_turns(&mut log, Some(live));
+        shown.extend(log.turns.iter().map(|one| one.turn.clone()));
+        *next = Some(log.next);
+        log.live_turns
+    }
+    /// The steps that stand twice among the read rows and the live ones.
+    fn twice(shown: &[TranscriptTurn], live: &[TranscriptTurn]) -> Vec<String> {
+        let mut seen = std::collections::BTreeMap::<String, usize>::new();
+        for turn in shown.iter().chain(live) {
+            let key = match turn.tool.as_ref() {
+                Some(tool) => format!("{} {}", turn.role, tool.call_id),
+                None => format!("{} {}", turn.role, turn.text),
+            };
+            *seen.entry(key).or_default() += 1;
+        }
+        seen.into_iter().filter(|(_, count)| *count > 1).map(|(key, _)| key).collect()
+    }
+    fn hook(live: &mut LiveTurnBuffer, event: &str, body: &serde_json::Value, settled: Option<u64>) {
+        let raw = body.to_string();
+        let settled = usize::try_from(settled.unwrap_or(0)).expect("steps");
+        live.note_hook(event, &HookPayload::of(&raw), Some("example-session"), settled, Some(1_000));
+    }
+    let roles = |turns: &[TranscriptTurn]| turns.iter().map(|turn| turn.role.clone()).collect::<Vec<_>>();
+    let call = serde_json::json!({"prompt_id": "p-2", "tool_name": "exec", "tool_input": {"command": "ls"}, "tool_use_id": "call-2"});
+    let mut result = call.clone();
+    result["tool_response"] = serde_json::json!({"success": true, "output": "a.rs", "error": null});
 
     let dir = tempfile::tempdir().expect("transcript folder");
     let path = dir.path().join("example-session.json");
-    // Turn 1 written.
     std::fs::write(&path, atif_document(1, &[])).expect("turn 1");
-    let first = document_log(&path, LogRead::Tail, false).expect("tail");
-    assert_eq!(first.next, 3);
+    let (mut live, mut shown, mut next) = (LiveTurnBuffer::default(), Vec::new(), None);
+    let now = read(&path, &mut live, &mut shown, &mut next);
+    assert!(now.is_empty() && shown.len() == 2);
 
-    // Turn 2 runs mid-turn: hooks accumulate prompt + tool + result + stop
-    // before the file is rewritten.
-    let mut live = LiveTurnBuffer::default();
-    let p_prompt = serde_json::json!({"prompt": "example question 1"}).to_string();
-    live.note_hook(
-        "UserPromptSubmit",
-        &HookPayload::of(&p_prompt),
-        Some("example-session"),
-        first.next as usize,
-        Some(1_000),
+    // Turn 2 runs on its hooks; the Stop comes before the call's result.
+    hook(&mut live, "UserPromptSubmit", &serde_json::json!({"prompt": "example question 1", "prompt_id": "p-2"}), next);
+    let mut steps = Vec::new();
+    steps.push(read(&path, &mut live, &mut shown, &mut next));
+    hook(&mut live, "PreToolUse", &call, next);
+    steps.push(read(&path, &mut live, &mut shown, &mut next));
+    hook(&mut live, "Stop", &serde_json::json!({"prompt_id": "p-2", "last_assistant_message": "example answer 1"}), next);
+    steps.push(read(&path, &mut live, &mut shown, &mut next));
+    hook(&mut live, "PostToolUse", &result, next);
+    steps.push(read(&path, &mut live, &mut shown, &mut next));
+    assert_eq!(
+        steps.iter().map(|live| roles(live)).collect::<Vec<_>>(),
+        [vec!["user"], vec!["user", "tool"], vec!["user", "tool", "assistant"], vec!["user", "tool", "tool_result", "assistant"]]
     );
-    let p_call = serde_json::json!({
-        "tool_name": "exec",
-        "tool_input": {"command": "echo hi"},
-        "tool_use_id": "call-2"
-    })
-    .to_string();
-    live.note_hook(
-        "PreToolUse",
-        &HookPayload::of(&p_call),
-        Some("example-session"),
-        first.next as usize,
-        Some(1_100),
-    );
-    let p_res = serde_json::json!({
-        "tool_name": "exec",
-        "tool_input": {"command": "echo hi"},
-        "tool_use_id": "call-2",
-        "tool_response": {"success": true, "output": "hi", "error": null}
-    })
-    .to_string();
-    live.note_hook(
-        "PostToolUse",
-        &HookPayload::of(&p_res),
-        Some("example-session"),
-        first.next as usize,
-        Some(1_200),
-    );
+    for live in &steps {
+        assert_eq!(twice(&shown, live), Vec::<String>::new(), "a step stood twice mid-turn");
+    }
+    assert_eq!(shown.len(), 2, "the document held nothing of turn 2 yet");
 
-    // Mid-turn read against unchanged file: document has 0 new turns,
-    // provisional buffer holds the 3 live turns.
-    let mid = document_log(&path, LogRead::After(first.next), false).expect("mid-turn");
-    assert!(mid.turns.is_empty());
-    let mid_refs: Vec<&zerocode_core::transcript::TranscriptTurn> =
-        mid.turns.iter().map(|one| &one.turn).collect();
-    live.reconcile_turns(mid.next as usize, &mid_refs);
-    assert_eq!(live.turns().len(), 3);
+    // The CLI writes the whole document again with turn 2: its rows stand
+    // for the turn, and the live ones go in the same read.
+    let turn_2 = [
+        serde_json::json!({"step_id": 4, "source": "user", "message": "example question 1"}),
+        serde_json::json!({"step_id": 5, "source": "agent", "model_name": "example-model", "message": "",
+            "tool_calls": [{"tool_call_id": "call-2", "function_name": "exec", "arguments": {"command": "ls"}}],
+            "observation": {"results": [{"source_call_id": "call-2", "content": "a.rs"}]}}),
+        serde_json::json!({"step_id": 6, "source": "agent", "model_name": "example-model", "message": "example answer 1"}),
+    ];
+    std::fs::write(&path, atif_document(1, &turn_2)).expect("turn 2 written");
+    let after = read(&path, &mut live, &mut shown, &mut next);
+    assert!(after.is_empty(), "live turns stood beside the document's: {:?}", roles(&after));
+    assert_eq!(roles(&shown[2..]), ["user", "tool", "tool_result", "assistant"]);
+    assert_eq!(twice(&shown, &after), Vec::<String>::new());
 
-    // Turn 2 finishes and rewrites the whole ATIF file with turns 1..6.
-    std::fs::write(&path, atif_document(6, &[])).expect("6 turns");
-    let grown = document_log(&path, LogRead::After(first.next), false).expect("grown");
-    assert_eq!(grown.next, 13);
-    assert_eq!(grown.turns.len(), 10);
-    let grown_refs: Vec<&zerocode_core::transcript::TranscriptTurn> =
-        grown.turns.iter().map(|one| &one.turn).collect();
-    live.reconcile_turns(grown.next as usize, &grown_refs);
-    assert!(
-        live.is_empty(),
-        "provisional turns must vanish once rewritten document lands"
-    );
+    // A hook of the written turn that comes late draws nothing.
+    hook(&mut live, "PostToolUse", &result, next);
+    let mut bare = result.clone();
+    bare.as_object_mut().expect("an object").remove("prompt_id");
+    hook(&mut live, "PostToolUse", &bare, next);
+    hook(&mut live, "Stop", &serde_json::json!({"prompt_id": "p-2", "last_assistant_message": "example answer 1"}), next);
+    let late = read(&path, &mut live, &mut shown, &mut next);
+    assert!(late.is_empty(), "a late hook stood a written step again: {:?}", roles(&late));
+    assert_eq!(shown.len(), 6);
+    assert_eq!(twice(&shown, &late), Vec::<String>::new());
 }
-
 
 /* ---- 만들기 흐름의 폴더 (2026-11-06, 사람: 「폴더 생성 막고있는 부분」) ---- */
 

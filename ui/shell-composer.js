@@ -208,15 +208,11 @@ function composerRoad(run, spec = null) {
     // 판에게는 출처가 둘이다. 제 전사가 말한 것이 먼저고(모든 CLI가
     // 남긴다), 그것이 없으면 zo 채널이 세션에 대해 말한 것. 셋째는 없다 —
     // 훅은 토큰을 나르지 않는다. 전사가 창 크기를 말하지 않으면 채널이 말한
-    // 창 크기, 그것도 없으면 이 판 모델의 카탈로그 창 크기를 함께 쓴다.
+    // 창 크기를 함께 쓴다(시안 C9 — zo의 session_status가 싣는다).
     usage: () => {
       const said = paneUsage.get(run.term);
       const session = sessionUsage.get(paneSessions.get(run.term)?.session?.id);
-      if (said && said.window === 0) {
-        if (session?.window > 0) return { ...said, window: session.window };
-        const window = catalogModelWindow(paneModels.get(run.term) ?? "", runModelList(run));
-        if (window > 0) return { ...said, window };
-      }
+      if (said && said.window === 0 && session?.window > 0) return { ...said, window: session.window };
       return said ?? session ?? null;
     },
   };
@@ -1420,15 +1416,6 @@ function catalogModelWords(said, models = null) {
   return known ? known.display_name : said;
 }
 
-/* The context window in tokens declared for `said` in `models`, or 0 when the
- * list does not know the id or declares no window. */
-function catalogModelWindow(said, models = null) {
-  if (!said || !Array.isArray(models)) return 0;
-  const known = models.find((row) => row.id === said);
-  const window = Number(known?.context_window ?? 0);
-  return Number.isFinite(window) && window > 0 ? window : 0;
-}
-
 /* The model list the window holds for a run's agent: the catalog road's,
  * else what the wire said it can switch to. */
 function runModelList(run) {
@@ -1656,30 +1643,38 @@ function standOpenComposerMenu(chip, menu) {
   const watch = new ResizeObserver(stand);
   watch.observe(chip.closest(".worker-composer") ?? chip);
   openMenu = { node: menu, chip, away, keys, stand, watch, frame: 0 };
-  // Searchable long model menus start focus in the filter field; ordinary
-  // short menus start focus on the ticked row.
+  // A menu with a search field opens on it; any other on its ticked row — a
+  // selector list answers in document order, which stood the focus on the
+  // first row whatever was ticked.
   (menu.querySelector(".composer-menu-search") ?? menu.querySelector('[aria-current="true"]') ?? menu.querySelector(".composer-menu-item"))?.focus();
 }
 
-/* Model lists past this size (e.g. a multi-vendor CLI listing hundreds of
- * family variants) get a sticky filter input and per-family preview so every
- * model stays reachable without building a thousand-row wall; smaller catalogs
- * (Claude, Codex, zo, Antigravity, Grok, Kimi) keep their flat menu verbatim. */
+/* A model list its CLI groups into families and that runs past
+ * `COMPOSER_MODEL_SEARCH_THRESHOLD` rows — Devin's `models list`: 55 families,
+ * 1,302 models (t-124593) — opens on a search field over its families, so
+ * every model is reached without a wall of a thousand rows (t-125261). A list
+ * with no families keeps its flat menu, however long: zo's own catalog lists
+ * 32 models with none (2026-11-22), and its menu stands as it did. With no
+ * words typed the menu shows the ticked model, then each family's first
+ * `COMPOSER_MODEL_PER_FAMILY` rows, `COMPOSER_MODEL_FIRST_ROWS` at most; a
+ * search shows `COMPOSER_MODEL_MATCH_ROWS` matches at most, and says how many
+ * more it holds. */
 const COMPOSER_MODEL_SEARCH_THRESHOLD = 30;
-const COMPOSER_MODEL_PER_FAMILY_PREVIEW = 6;
-const COMPOSER_MODEL_INITIAL_LIMIT = 120;
-const COMPOSER_MODEL_SEARCH_LIMIT = 80;
+const COMPOSER_MODEL_PER_FAMILY = 6;
+const COMPOSER_MODEL_FIRST_ROWS = 120;
+const COMPOSER_MODEL_MATCH_ROWS = 80;
 
-/* Appends model rows into `menu` for both the conversation composer and the
- * new-chat composer. Small lists render flat; lists past
- * `COMPOSER_MODEL_SEARCH_THRESHOLD` add a filter input and family grouping. */
+/* The model rows of a chip's menu — the conversation's composer and the
+ * 「새 대화」 start screen alike: flat, or behind a search field for a long
+ * grouped list (above). `defaultRow`, when given, stands first. */
 function appendComposerModelRows(menu, models, { current = "", onPick, defaultRow = null, showSub = true } = {}) {
   const addRow = (host, row) => {
     const words = row.display_name || row.id;
     const sub = showSub ? row.id : (words === row.id ? "" : row.id);
     return composerMenuItem(host, words, sub, () => onPick(row.id), { current: row.id === current });
   };
-  if (models.length <= COMPOSER_MODEL_SEARCH_THRESHOLD) {
+  const grouped = models.some((row) => Boolean(row.family));
+  if (!grouped || models.length <= COMPOSER_MODEL_SEARCH_THRESHOLD) {
     if (defaultRow) {
       composerMenuItem(menu, defaultRow.words, defaultRow.sub, defaultRow.on, { current: defaultRow.current });
     }
@@ -1713,13 +1708,13 @@ function appendComposerModelRows(menu, models, { current = "", onPick, defaultRo
       const familyCounts = new Map();
       for (const row of models) {
         if (seenIds.has(row.id)) continue;
-        if (visible.length >= COMPOSER_MODEL_INITIAL_LIMIT) {
+        if (visible.length >= COMPOSER_MODEL_FIRST_ROWS) {
           hidden += 1;
           continue;
         }
         const fam = row.family ?? "";
         const count = familyCounts.get(fam) ?? 0;
-        if (fam && count >= COMPOSER_MODEL_PER_FAMILY_PREVIEW) {
+        if (fam && count >= COMPOSER_MODEL_PER_FAMILY) {
           hidden += 1;
           continue;
         }
@@ -1733,7 +1728,7 @@ function appendComposerModelRows(menu, models, { current = "", onPick, defaultRo
         const hay = `${row.display_name ?? ""} ${row.id ?? ""} ${row.family ?? ""}`.toLowerCase();
         return terms.every((term) => hay.includes(term));
       });
-      visible = matched.slice(0, COMPOSER_MODEL_SEARCH_LIMIT);
+      visible = matched.slice(0, COMPOSER_MODEL_MATCH_ROWS);
       hidden = Math.max(0, matched.length - visible.length);
     }
     if (visible.length === 0) {
@@ -1788,9 +1783,6 @@ async function openComposerMenu(chip, run, spec) {
   if (held) void road.models();
   if (!latest()) return;
   paintComposerAgentChip(chip, run, models);
-  // Filling the model list may also supply a context window for a pane that
-  // previously only knew its token count.
-  if (run.term !== undefined && run.term !== null) paintComposerChipsFor(run.term);
   const current = road.model();
   const section = (words) => composerMenuSection(menu, words);
   const item = (words, sub, on, options = {}) => composerMenuItem(menu, words, sub, on, options);
@@ -2207,15 +2199,11 @@ function composerEffortChip(run) {
 }
 
 /* Shown once the backend has answered for a pane; the tip says the word's
- * witness and, when a press cannot move it, why. A CLI with no effort ladder
- * and no measured effort road (such as one encoding thinking levels in model
- * ids) hides the chip rather than showing an empty default pill. Every write
- * is guarded. */
+ * witness and, when a press cannot move it, why. Every write is guarded. */
 function paintComposerEffortChip(chip, run) {
   const said = composerEffortOf(run);
-  const emptyNoRoad = Boolean(said) && (said.ladder?.length ?? 0) === 0 && said.stuck === "no_road" && !said.current && !said.pending;
-  writeHidden(chip, !said || emptyNoRoad);
-  if (!said || emptyNoRoad) return;
+  writeHidden(chip, !said);
+  if (!said) return;
   writeTextContent(chip.querySelector(".worker-composer-pill-words"), effortWords(said));
   writeClass(chip, "is-stuck", effortRoadStuck(said.stuck));
   const why = said.stuck ? effortStuckWords(said) : t("composer.effort.tip", "노력 바꾸기 — 이 세션만");

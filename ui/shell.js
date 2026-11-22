@@ -10689,22 +10689,16 @@ listen("hook:activity", (event) => {
   // The file tree wears the files these name (t-24298) — the batch as it
   // came, never the ring: a file already lit is not lit again by a replay.
   noteTreeActivities(pane, activities);
-  // A helper's page — or a pane's own conversation whose CLI writes its file
-  // only after the turn ends — says what its card last did when no row is out
-  // to say it (`nowActivityOf`): the card's news is the foot line's, not the
-  // list's.
+  // A helper's page says what its own card last did when no row is out to say
+  // it (`nowActivityOf`): the card's news is the foot line's, not the list's.
   const page = activeHelperPage();
-  const term = Number(/^term:(\d+)$/.exec(pane)?.[1]);
-  if (
-    page &&
-    ((isHelperPage(page.worker) && helperCardOf(page.worker) === pane) ||
-      (Number.isInteger(term) && page.worker.helper?.id === PANE_LOG_ID && page.worker.term === term))
-  ) {
+  if (page && isHelperPage(page.worker) && helperCardOf(page.worker) === pane) {
     const status = helperStatusOf(page);
     if (status) updateHelperStatus(status, page.worker);
   }
   // A tool call is a line in the transcript already; the conversation view on
   // this pane, if it is up, reads it now (`pollHelperPages` is the one reader).
+  const term = Number(/^term:(\d+)$/.exec(pane)?.[1]);
   if (Number.isInteger(term) && paneChatOn(term) && activeHelperPage()?.worker.term === term) {
     void pollHelperPages();
   }
@@ -18014,7 +18008,9 @@ function syncHelperTurns(list, run) {
     // kind right above it (t-15682): one row for them, drawn once, its members
     // when it opens. The same rule stands what is read from above
     // (`standEarlierRows`).
-    const tail = streaming ?? helperListTail(list);
+    // Before the rows of a turn its CLI has not written yet, too
+    // (`syncProvisionalTurns`): a row of the document never joins one of them.
+    const tail = list.querySelector(":scope > .is-provisional") ?? streaming ?? helperListTail(list);
     const joined = joinTurnBeside(list, run, turn, tail ? tail.previousElementSibling : list.lastElementChild, tail, true, folded, spoken);
     if (joined) {
       if (joined.classList.contains("helper-group")) {
@@ -18048,7 +18044,7 @@ function syncHelperTurns(list, run) {
   // again — and only those, so a settled row is never touched; an open
   // pill's rows the same. The pills that took a turn, and those with a call
   // still out, say their words again: counted from their members' turns.
-  for (const row of list.querySelectorAll(":scope > .is-tool.is-live, :scope > .helper-group > .helper-group-body > .is-tool.is-live")) {
+  for (const row of list.querySelectorAll(":scope > .is-tool.is-live:not(.is-provisional), :scope > .helper-group > .helper-group-body > .is-tool.is-live")) {
     dressToolTurn(row, row.__turn, run, spoken);
     if (row.parentElement !== list) continue;
     // A shell step that came back shows its first lines, which the shelf
@@ -18256,6 +18252,36 @@ function standEarlierRows(list, run, earlier, folded, spoken, pills) {
   if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
 }
 
+/* The rows of a turn the pane's CLI is running and has not written yet
+ * (`live_turns`: what its hooks told — Devin writes its session once a turn
+ * has ended, t-125261): drawn as the document's rows are, its results folded
+ * into their calls (`holdHelperTurns`), after the document's rows and before
+ * the streaming ones, wearing `is-provisional` and no turn key, so the
+ * document's rows are laid before them and never join them
+ * (`syncHelperTurns`). Drawn again only when what the hooks told or the run's
+ * state moved; gone in the paint that brings the document's rows for them. */
+function syncProvisionalTurns(list, run) {
+  const sig = `${run.status}\n${run.helper?.liveSig ?? ""}`;
+  if (list.__provisionalSig === sig) return;
+  list.__provisionalSig = sig;
+  for (const stale of list.querySelectorAll(":scope > .is-provisional")) stale.remove();
+  const told = run.helper?.liveTurns;
+  if (!Array.isArray(told) || told.length === 0) return;
+  const batch = { turns: [], seq: 0 };
+  holdHelperTurns(batch, told);
+  const spoken = batch.turns.reduce(
+    (said, turn) => (turn.role === "user" || turn.role === "assistant" ? Math.max(said, turn.seq) : said),
+    -1,
+  );
+  const anchor = list.querySelector(":scope > .is-streaming") ?? helperListTail(list);
+  for (const turn of batch.turns) {
+    const row = helperTurnRowNode(run, turn, spoken, false);
+    delete row.dataset.turn;
+    row.classList.add("is-provisional");
+    list.insertBefore(row, anchor);
+  }
+}
+
 /* The words the agent is saying right now, under the last turn — the rows
  * Claude Code's own panel streams into. One row per voice, a thought and
  * then the answer, each updated in place as the wire's live text grows
@@ -18270,33 +18296,6 @@ function standEarlierRows(list, run, earlier, folded, spoken, pills) {
  * channel streams (`paneLive`, zo's frames) — the vendor writes its file a
  * turn at a time — and a pane with neither wire nor channel draws nothing
  * here. */
-/* Provisional turns accumulated from lifecycle hooks while a turn-settling CLI
- * has not yet flushed its session document (`more.live_turns`). Rendered with
- * the exact same row nodes and tool-result folding (`holdHelperTurns`), tagged
- * `.is-provisional` without `data-turn` so settled transcript rows never
- * collide with them; cleared in one paint once the authoritative document lands. */
-function syncProvisionalTurns(list, run) {
-  const sig = run.helper?.liveSig ?? "";
-  if (list.__provisionalSig === sig) return;
-  list.__provisionalSig = sig;
-  for (const stale of list.querySelectorAll(":scope > .is-provisional")) stale.remove();
-  const raw = run.helper?.liveTurns;
-  if (!Array.isArray(raw) || raw.length === 0) return;
-  const batch = { turns: [], seq: 0 };
-  holdHelperTurns(batch, raw);
-  const spoken = batch.turns.reduce(
-    (max, turn) => (turn.role === "user" || turn.role === "assistant" ? Math.max(max, turn.seq) : max),
-    -1,
-  );
-  const anchor = list.querySelector(":scope > .is-streaming") ?? helperListTail(list);
-  for (const turn of batch.turns) {
-    const row = helperTurnRowNode(run, turn, spoken, false);
-    delete row.dataset.turn;
-    row.classList.add("is-provisional");
-    list.insertBefore(row, anchor);
-  }
-}
-
 function syncStreamingTurns(list, run) {
   const live = (run.wire ? run.wireLog?.live ?? [] : paneLiveOf(run)).filter(liveWords);
   const rows = [...list.querySelectorAll(":scope > .is-streaming")];

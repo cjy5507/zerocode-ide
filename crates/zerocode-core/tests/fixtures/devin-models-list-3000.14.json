@@ -1,0 +1,73 @@
+{
+  "families": [
+    {
+      "family_label": "Example Family A",
+      "family_uid": "example-family-a",
+      "slug": "example-family-a",
+      "aliases": ["example-a"],
+      "variants": [
+        {
+          "model_uid": "example-family-a-high",
+          "label": "Example Family A High",
+          "description": "An example model, thinking hard.",
+          "cost_summary": "Example: 1.00 per million input tokens, 4.00 per million output",
+          "is_new": false,
+          "is_beta": false,
+          "max_context_tokens": 1000000,
+          "max_output_tokens": 64000,
+          "cost_tier": "High cost"
+        },
+        {
+          "model_uid": "example-family-a-max",
+          "label": "Example Family A Max",
+          "cost_summary": "Example: 2.00 per million input tokens, 8.00 per million output",
+          "is_new": true,
+          "is_beta": false,
+          "max_context_tokens": 1000000,
+          "cost_tier": "High cost"
+        }
+      ]
+    },
+    {
+      "family_label": "Example Family B",
+      "family_uid": "example-family-b",
+      "slug": "example-family-b",
+      "aliases": [],
+      "variants": [
+        {
+          "model_uid": "example-family-b-medium",
+          "label": "Example Family B Medium",
+          "description": "An example model, thinking some.",
+          "cost_summary": "Example: 0.50 per million input tokens, 2.00 per million output",
+          "is_new": false,
+          "is_beta": true,
+          "max_context_tokens": 262000,
+          "cost_tier": "Med cost"
+        },
+        {
+          "model_uid": "example-family-b-low",
+          "label": "Example Family B Low",
+          "is_new": false,
+          "is_beta": false
+        }
+      ]
+    },
+    {
+      "family_label": "Example Family C",
+      "family_uid": "example-family-c",
+      "slug": "example-family-c",
+      "aliases": ["example-c", "example-c-latest"],
+      "variants": [
+        {
+          "model_uid": "example-family-c-fast",
+          "label": "Example Family C Fast",
+          "cost_summary": "Example: free",
+          "is_new": false,
+          "is_beta": false,
+          "max_context_tokens": 128000,
+          "cost_tier": "Free"
+        }
+      ]
+    }
+  ]
+}

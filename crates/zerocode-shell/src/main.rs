@@ -1204,18 +1204,15 @@ struct ShellRuntime {
     /// the same question again does not walk the agent's store (herdr 4
     /// follow-up, t-42948). Forgotten when the pane closes.
     pane_memo: Mutex<zerocode_core::pane_transcript::Memo<TermId>>,
-    /// Provisional turns accumulated from lifecycle hooks while a CLI whose
-    /// store settles after each turn (`Format::settles_after_turn`) has not
-    /// yet flushed the current turn's document. Forgotten when the pane closes.
+    /// The turn each pane's CLI is running and has not written yet, told by
+    /// its hooks — for a CLI whose store settles after a turn
+    /// (`Format::settles_after_turn`, t-125261). Forgotten when the pane
+    /// closes.
     pane_live_turns: Mutex<HashMap<TermId, zerocode_core::live_hook_turns::LiveTurnBuffer>>,
-    /// Last settled document step count observed by `pane_log` per pane, so
-    /// incoming hooks know where the current turn begins without re-reading the
-    /// document file.
+    /// The settled steps of each pane's session document at the page's last
+    /// read of it (`pane_log`), so a hook knows where its turn begins without
+    /// reading the file. Forgotten when the pane closes.
     pane_doc_steps: Mutex<HashMap<TermId, usize>>,
-    /// Last model name observed in a pane's transcript, so subsequent `After`
-    /// reads that carry usage without repeating the model line can still
-    /// resolve its context window from the model catalog.
-    pane_transcript_models: Mutex<HashMap<TermId, String>>,
     /// What each pane's agent last reported, and when.
     ///
     /// The window is told every state change as it happens, so this is not how
@@ -1727,12 +1724,6 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn pane_transcript_models(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
-        self.pane_transcript_models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>> {
         self.pane_sessions
             .lock()
@@ -2013,7 +2004,6 @@ trait ShellStateExt {
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::live_hook_turns::LiveTurnBuffer>>;
     fn pane_doc_steps(&self) -> MutexGuard<'_, HashMap<TermId, usize>>;
-    fn pane_transcript_models(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
     fn pane_states(&self) -> MutexGuard<'_, HashMap<TermId, PaneState>>;
     fn last_statuses(&self) -> MutexGuard<'_, HashMap<String, last_status::LastStatus>>;
     fn last_status_seats(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
@@ -2247,10 +2237,6 @@ impl ShellStateExt for AppState {
 
     fn pane_doc_steps(&self) -> MutexGuard<'_, HashMap<TermId, usize>> {
         self.shell_runtime().pane_doc_steps()
-    }
-
-    fn pane_transcript_models(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
-        self.shell_runtime().pane_transcript_models()
     }
 
     fn pane_states(&self) -> MutexGuard<'_, HashMap<TermId, PaneState>> {
@@ -2594,7 +2580,6 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         pane_memo: Mutex::new(zerocode_core::pane_transcript::Memo::default()),
         pane_live_turns: Mutex::new(HashMap::new()),
         pane_doc_steps: Mutex::new(HashMap::new()),
-        pane_transcript_models: Mutex::new(HashMap::new()),
         pane_states: Mutex::new(HashMap::new()),
         last_statuses: Mutex::new(last_statuses),
         // 자리 지도는 늘 빈 손으로 시작한다: 하이드레이트로 올라온 행들은

@@ -205,25 +205,34 @@ pub enum Format {
     Unread,
 }
 
-/// How long a CLI that writes its session once a turn has ended takes to
-/// write it — the wait before the page reads that turn again (t-124593):
-/// Devin wrote its ATIF document 29 and 34 ms after its two `Stop`s
-/// (measured 2026-11-21), and this is ten times the longer, still short of
-/// what a person reads as a delay.
-pub const TURN_WRITE_SETTLE: std::time::Duration = std::time::Duration::from_millis(340);
+/// When the window looks again, after a turn's end, at the session file of a
+/// CLI that writes its session once a turn has ended — each wait counted
+/// from the one before (t-124593, t-125261). Devin wrote its ATIF document
+/// 29 and 34 ms after its two `Stop`s (measured 2026-11-21), so the first
+/// look at 80 ms finds a usual turn; the later ones are for a long session
+/// written under a busy disk (the 61-step document of 2026-11-22 is 1.6 MB),
+/// up to 2.53 s after the `Stop`. A look reads the file's size and time only,
+/// never its bytes, and the page is told once, at the first look that finds
+/// the file new or moved.
+pub const TURN_WRITE_SETTLE: [std::time::Duration; 4] = [
+    std::time::Duration::from_millis(80),
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_millis(700),
+    std::time::Duration::from_millis(1_500),
+];
 
-/// How long after a turn of `slug` ends its store settles
+/// The looks after a turn of `slug` ends at a store that settles then
 /// ([`Format::settles_after_turn`]) — the longest of its readable store
 /// rows, asked of the rows and never of the agent's name; `None` when every
 /// one is written as the turn goes. A turn's first write has no file to bind
 /// yet, so this asks the agent's store rows rather than a bound file.
 #[must_use]
-pub fn turn_write_settle(slug: &str) -> Option<std::time::Duration> {
+pub fn turn_write_settle(slug: &str) -> Option<&'static [std::time::Duration]> {
     AGENT_SOURCES
         .iter()
         .filter(|row| row.slug == slug && row.format.readable())
         .filter_map(|row| row.format.settles_after_turn())
-        .max()
+        .max_by_key(|looks| looks.iter().sum::<std::time::Duration>())
 }
 
 /// Where a session's id shows in its file, so a file can be matched to its
@@ -273,13 +282,12 @@ impl Format {
         matches!(self, Self::AtifDocument)
     }
 
-    /// How long after a turn's end its CLI finishes writing a session in this
-    /// shape, when it writes it once the turn has ended rather than as the
-    /// turn goes ([`TURN_WRITE_SETTLE`]); `None` for a shape written as the
-    /// turn goes.
-    pub const fn settles_after_turn(self) -> Option<std::time::Duration> {
+    /// When to look again after a turn's end at a session in this shape, when
+    /// its CLI writes it once the turn has ended rather than as the turn goes
+    /// ([`TURN_WRITE_SETTLE`]); `None` for a shape written as the turn goes.
+    pub const fn settles_after_turn(self) -> Option<&'static [std::time::Duration]> {
         match self {
-            Self::AtifDocument => Some(TURN_WRITE_SETTLE),
+            Self::AtifDocument => Some(&TURN_WRITE_SETTLE),
             _ => None,
         }
     }
@@ -4051,9 +4059,10 @@ mod tests {
         assert!(!Format::AtifDocument.carded() && !Format::Unread.carded());
         assert_eq!(
             Format::AtifDocument.settles_after_turn(),
-            Some(TURN_WRITE_SETTLE)
+            Some(&TURN_WRITE_SETTLE[..])
         );
-        assert_eq!(turn_write_settle("devin"), Some(TURN_WRITE_SETTLE));
+        assert_eq!(turn_write_settle("devin"), Some(&TURN_WRITE_SETTLE[..]));
+        assert_eq!(turn_write_settle("claude"), None);
         for format in [
             Format::ClaudeLines,
             Format::CodexRollout,

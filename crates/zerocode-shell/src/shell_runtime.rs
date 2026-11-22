@@ -2831,7 +2831,8 @@ pub(super) struct SubagentLog {
     pub(super) start: u64,
     /// How full the context was when this chunk's last answer was written —
     /// the composer's meter for a pane that has neither a wire nor a channel
-    /// to ask. The file knows no window, so only the count stands.
+    /// to ask. The file knows no window; the pane's model in its CLI's own
+    /// list may (`pane_log`), and otherwise only the count stands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) usage: Option<zerocode_core::transcript::TranscriptUsage>,
     /// What the vendor wrote beside a helper's transcript to say what the
@@ -2839,11 +2840,11 @@ pub(super) struct SubagentLog {
     /// pane's transcript has no such file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) about: Option<HelperAbout>,
-    /// Provisional turns accumulated from lifecycle hooks while a store that
-    /// settles after each turn (`Format::settles_after_turn`) has not yet
-    /// flushed the current turn to disk. Always empty for line-appended stores
-    /// and cleared the moment the authoritative document advances.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The turn the pane's CLI is running and has not written yet, as its
+    /// hooks told it — shown after `turns` until the document holds it
+    /// (`zerocode_core::live_hook_turns`). Only a store that settles after a
+    /// turn has one (`Format::settles_after_turn`); empty for every other.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) live_turns: Vec<zerocode_core::transcript::TranscriptTurn>,
 }
 
@@ -3163,7 +3164,6 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
         .drop_pane(&term);
     state.pane_live_turns().remove(&term);
     state.pane_doc_steps().remove(&term);
-    state.pane_transcript_models().remove(&term);
     // 그 판이 원장에서 앉아 있던 자리도 잊는다. 원장의 행 자체는 남는다 —
     // 재시작을 살아넘는 것이 그 행의 일이므로 — 잊는 것은 **번호에서 자리로
     // 가는 지도**뿐이다. 남겨 두면 다음에 이 번호를 물려받는 판이 지난

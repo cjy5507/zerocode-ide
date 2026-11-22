@@ -184,7 +184,6 @@ impl Report<'_> {
                 "supersededBy": self.tier(row).and_then(|tier| tier.successor.as_deref()),
                 "efforts": api::accepted_efforts(&row.id)
                     .map(|levels| levels.iter().map(|level| level.key()).collect::<Vec<_>>()),
-                "contextWindow": self.context_window(row),
             })).collect::<Vec<_>>(),
             "otherLogins": self.other_logins().iter().map(|model| json!({
                 "provider": model.provider,
@@ -328,18 +327,6 @@ impl Report<'_> {
             }
             _ => None,
         }
-    }
-
-    /// Context window in tokens when reported by discovery or declared in the
-    /// catalog; `None` when unknown so callers never fabricate a denominator.
-    fn context_window(&self, row: &CatalogRow) -> Option<u64> {
-        self.catalog
-            .models
-            .iter()
-            .find(|model| model.id == row.id)
-            .and_then(|model| model.context_window)
-            .filter(|tokens| *tokens > 0)
-            .or_else(|| api::declared_context_window(&row.id))
     }
 
     /// When the provider's list stopped naming the row — a discovered row a
@@ -799,10 +786,6 @@ mod tests {
                     assert_eq!(row["efforts"], serde_json::json!(words), "{id}");
                 }
                 None => assert!(row["efforts"].is_null(), "{id}"),
-            }
-            match api::declared_context_window(id) {
-                Some(window) => assert_eq!(row["contextWindow"], serde_json::json!(window), "{id}"),
-                None => assert!(row["contextWindow"].is_null(), "{id}"),
             }
         }
         assert!(banded > 0, "the shipped rows are classified");
