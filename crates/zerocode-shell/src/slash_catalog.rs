@@ -79,6 +79,10 @@ pub struct ModelRow {
     pub id: String,
     pub display_name: String,
     pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// How long an answer stands before the CLI is asked again. Announcing a
@@ -590,12 +594,68 @@ fn captured_lines_in(
 
 // ---- models -----------------------------------------------------------------
 
-/// The models `agent` can switch to, from zo's live catalog (`zo models
-/// --json`, the one place this machine merges every provider's list),
-/// filtered to the provider the agent drives, with withdrawn rows omitted and
-/// active generations ordered ahead of superseded ones.
+/// The models `agent` can switch to — from its own CLI's cached lineup when
+/// its catalog row names one (`ModelSource::OwnList`, `summon_lineup`), else
+/// from zo's live catalog (`zo models --json`), filtered to the provider the
+/// agent drives, with withdrawn rows omitted and active generations ordered
+/// ahead of superseded ones. One source per agent, chosen by the row's value.
 pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
+    use zerocode_core::capabilities::ModelSource;
+    if matches!(
+        zerocode_core::agent::agent_spec(agent).map(|spec| spec.harness.models),
+        Some(ModelSource::OwnList(_))
+    ) {
+        return agent_models_from_listed(agent, &crate::summon_lineup::own_list_models(agent));
+    }
     agent_models_from(agent, &zo_models_catalog(home))
+}
+
+/// Converts models listed by an agent's own CLI (`cli_models::Listed`) into the
+/// composer's [`ModelRow`] shape without branching on the agent's name.
+pub fn agent_models_from_listed(
+    agent: &str,
+    listed: &[zerocode_core::cli_models::Listed],
+) -> Vec<ModelRow> {
+    listed
+        .iter()
+        .map(|one| ModelRow {
+            id: one.id.clone(),
+            display_name: one.name.clone().unwrap_or_else(|| one.id.clone()),
+            provider: agent.to_string(),
+            family: one.family.clone(),
+            context_window: one.context_window,
+        })
+        .collect()
+}
+
+/// Looks up a model's declared context window in tokens from the agent's cached
+/// model list without starting any subprocess. Returns `None` when the list is
+/// not yet cached or the model names no context window.
+pub(crate) fn cached_model_context_window(agent: &str, model: &str) -> Option<u64> {
+    use zerocode_core::capabilities::ModelSource;
+    let rows = match zerocode_core::agent::agent_spec(agent)?.harness.models {
+        ModelSource::OwnList(_) => {
+            agent_models_from_listed(agent, &crate::summon_lineup::peek_own_list_models(agent))
+        }
+        ModelSource::ZoCatalog(_) | ModelSource::ZoCatalogAll | ModelSource::ZoOtherLogin(_) => {
+            let catalog = peek_zo_models_catalog()?;
+            agent_models_from(agent, &catalog)
+        }
+        ModelSource::Unknown => return None,
+    };
+    model_context_window_in(&rows, model)
+}
+
+/// Resolves `model`'s declared context window from `rows` (exact id match).
+pub(crate) fn model_context_window_in(rows: &[ModelRow], model: &str) -> Option<u64> {
+    let needle = model.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    rows.iter()
+        .find(|row| row.id == needle)
+        .and_then(|row| row.context_window)
+        .filter(|tokens| *tokens > 0)
 }
 
 fn band_rank(band: Option<&str>) -> u8 {
@@ -632,6 +692,11 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
                         .unwrap_or(id)
                         .to_string(),
                     provider: row_provider.to_string(),
+                    family: None,
+                    context_window: row
+                        .get("contextWindow")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|tokens| *tokens > 0),
                 })
             })
             .collect();
@@ -674,6 +739,11 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
                         .unwrap_or(id)
                         .to_string(),
                     provider: row_provider.to_string(),
+                    family: None,
+                    context_window: row
+                        .get("contextWindow")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|tokens| *tokens > 0),
                 },
             ))
         })
@@ -714,6 +784,8 @@ fn agent_models_from(agent: &str, catalog: &serde_json::Value) -> Vec<ModelRow> 
                     id: id.to_string(),
                     display_name,
                     provider: name.to_string(),
+                    family: None,
+                    context_window: None,
                 });
             }
         }
@@ -930,6 +1002,14 @@ fn credential_store(env: &[(String, String)]) -> String {
             || "keychain".to_string(),
             |(name, folder)| format!("{name}:{folder}"),
         )
+}
+
+/// Peeks the cached `zo models --json` catalog without starting a subprocess.
+fn peek_zo_models_catalog() -> Option<serde_json::Value> {
+    models_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.held.as_ref().map(|(_, value)| value.clone()))
 }
 
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
@@ -1773,5 +1853,49 @@ mod tests {
 
         let list = model_list_of(&catalog);
         assert_eq!(list["otherLogins"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn own_list_models_carry_family_and_context_window_and_lookup_resolves_them() {
+        use zerocode_core::cli_models::Listed;
+        let rows = agent_models_from_listed(
+            "devin",
+            &[
+                Listed {
+                    id: "swe-2-high".into(),
+                    name: Some("SWE-2 High".into()),
+                    family: Some("swe-2".into()),
+                    context_window: Some(262_000),
+                },
+                Listed {
+                    id: "adaptive".into(),
+                    name: None,
+                    family: Some("adaptive".into()),
+                    context_window: None,
+                },
+            ],
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].display_name, "SWE-2 High");
+        assert_eq!(rows[0].family.as_deref(), Some("swe-2"));
+        assert_eq!(rows[0].context_window, Some(262_000));
+        assert_eq!(rows[1].display_name, "adaptive");
+        assert_eq!(rows[1].context_window, None);
+        assert_eq!(model_context_window_in(&rows, "swe-2-high"), Some(262_000));
+        assert_eq!(model_context_window_in(&rows, "adaptive"), None);
+        assert_eq!(model_context_window_in(&rows, "unknown-model"), None);
+
+        let catalog = serde_json::json!({
+            "models": [
+                {"id": "gpt-6.2-astra", "provider": "openai", "displayName": "GPT-6.2-Astra", "band": "top", "contextWindow": 400_000},
+                {"id": "gpt-no-window", "provider": "openai", "displayName": "GPT No Window", "band": "rest"}
+            ]
+        });
+        let codex_rows = agent_models_from("codex", &catalog);
+        assert_eq!(
+            model_context_window_in(&codex_rows, "gpt-6.2-astra"),
+            Some(400_000)
+        );
+        assert_eq!(model_context_window_in(&codex_rows, "gpt-no-window"), None);
     }
 }

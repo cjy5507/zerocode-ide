@@ -230,6 +230,14 @@ fn the_model_roads_branch_on_no_agents_name() {
             block_after(&slash_catalog, "fn agent_models_from("),
         ),
         (
+            "agent_models_from_listed",
+            block_after(&slash_catalog, "pub fn agent_models_from_listed("),
+        ),
+        (
+            "cached_model_context_window",
+            block_after(&slash_catalog, "pub(crate) fn cached_model_context_window("),
+        ),
+        (
             "trust_flag_words",
             block_after(&backend, "fn trust_flag_words("),
         ),
@@ -280,12 +288,14 @@ fn the_model_roads_branch_on_no_agents_name() {
 #[test]
 fn the_document_road_branches_on_no_agents_name() {
     let branches = agent_name_branches();
+    let core_live = shipped_code(&core_source("live_hook_turns.rs"));
     let core_transcript = shipped_code(&core_source("transcript.rs"));
     let core_binding = shipped_code(&core_source("pane_transcript.rs"));
     let core_vault = shipped_code(&core_source("vault.rs"));
     let terminal = shipped_code(&shell_source("cmd/terminal.rs"));
     let binding = shipped_code(&shell_source("pane_transcript.rs"));
     let roads = [
+        ("live_hook_turns.rs", core_live.as_str()),
         (
             "document_read",
             block_after(&core_transcript, "pub fn document_read("),

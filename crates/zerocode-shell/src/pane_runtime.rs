@@ -1020,6 +1020,32 @@ pub(super) async fn hook_loop(
                 say_pane_conversation(&app, report.term, word.word(), Some(&session.id), holder);
             }
         }
+        // For CLIs whose store settles only after a turn ends
+        // (`Format::settles_after_turn`), accumulate mid-turn hook facts
+        // (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) into the
+        // pane's provisional turn buffer so the conversation page shows what
+        // is running before the document flushes. One lock at a time.
+        if zerocode_core::vault::turn_write_settle(report.agent.slug()).is_some() {
+            let current_settled = app
+                .state::<AppState>()
+                .pane_doc_steps()
+                .get(&report.term)
+                .copied()
+                .unwrap_or(0);
+            let session_id = report.session.as_ref().map(|session| session.id.as_str());
+            let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);
+            app.state::<AppState>()
+                .pane_live_turns()
+                .entry(report.term)
+                .or_default()
+                .note_hook(
+                    &report.event,
+                    &payload,
+                    session_id,
+                    current_settled,
+                    Some(epoch_ms_now()),
+                );
+        }
         // And what it is doing, stamped, and out to the window. A turn whose model
         // request failed tells the ledger so, and why, the road zo's own channel
         // takes (t-69010) — a worker that hit a wall did not merely go quiet.
@@ -1747,12 +1773,14 @@ pub(super) fn note_pane_state(
     let shown = crate::worker_question::heard(report, worktree, epoch_ms_now());
     // A CLI that writes its session once a turn has ended (Devin's ATIF
     // document, 29–34 ms after its Stop — t-124593) has not written this turn
-    // when the page reads at this event: the page hears the same news once
-    // more after its store has settled, and reads the turn then. A repeated
-    // state is news without a move to the page (`hook:agent`), so it asks
-    // nothing else again. Asked of the agent's store rows, never its name.
+    // when the page reads at this event. Watch the bound document's metadata
+    // across `TURN_SETTLE_BACKOFF` (80 → 250 → 700 → 1500 ms) — never reading
+    // file bytes while unchanged — and tell the page once the file appears or
+    // moves, so even a large multi-turn document flushed past 340 ms lands
+    // promptly without polling at rest. Asked of the agent's store rows, never
+    // its name.
     if report.state == zerocode_core::hook::HookState::Done
-        && let Some(settle) = zerocode_core::vault::turn_write_settle(report.agent.slug())
+        && zerocode_core::vault::turn_write_settle(report.agent.slug()).is_some()
     {
         let term = report.term;
         // This report's place in the window's record of the pane, written
@@ -1763,11 +1791,13 @@ pub(super) fn note_pane_state(
             .pane_states()
             .get(&term)
             .map(|held| held.at);
+        let before_stamp = transcript_file_stamp(&app.state::<AppState>(), term);
         let watching = app.clone();
+        let probing = app.clone();
         let app = app.clone();
         let again = shown.clone();
-        tell_again_after(
-            settle,
+        tell_when_settled(
+            &TURN_SETTLE_BACKOFF,
             move || {
                 watching
                     .state::<AppState>()
@@ -1777,14 +1807,20 @@ pub(super) fn note_pane_state(
                     == told_at
             },
             move || {
-                // The binding remembers the turn's "no file" — a first turn's
-                // document did not exist yet — for up to a minute; let go, the
-                // page's read asks the disk again.
-                app.state::<AppState>()
-                    .pane_memo()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .drop_pane(&term);
+                // Drop a remembered "no file" so the first turn's newly
+                // created document can be bound without waiting out backoff.
+                if before_stamp.is_none() {
+                    probing
+                        .state::<AppState>()
+                        .pane_memo()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .drop_pane(&term);
+                }
+                let now_stamp = transcript_file_stamp(&probing.state::<AppState>(), term);
+                now_stamp.is_some() && now_stamp != before_stamp
+            },
+            move || {
                 tell_window(&app, again);
             },
         );
@@ -1800,10 +1836,60 @@ pub(super) fn note_pane_state(
     }
 }
 
+/// Backoff wait steps after a `Stop` hook for a store that writes its session
+/// document once a turn has ended (`Format::settles_after_turn`).
+///
+/// Small ATIF documents flush 29–34 ms after `Stop` (measured 2026-11-21), so
+/// the first 80 ms check catches normal turns faster than the old single 340 ms
+/// sleep, while 250 → 700 → 1,500 ms cover large multi-turn documents flushed
+/// under disk load without ever reading file contents while metadata is
+/// unchanged.
+pub(crate) const TURN_SETTLE_BACKOFF: [Duration; 4] = [
+    Duration::from_millis(80),
+    Duration::from_millis(250),
+    Duration::from_millis(700),
+    Duration::from_millis(1_500),
+];
+
+/// Cheap metadata stamp `(len, modified)` for a pane's bound transcript,
+/// reading zero file bytes.
+fn transcript_file_stamp(
+    state: &AppState,
+    term: TermId,
+) -> Option<(u64, Option<std::time::SystemTime>)> {
+    let path = crate::pane_transcript::pane_transcript(state, term).ok()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    Some((meta.len(), meta.modified().ok()))
+}
+
+/// Run `tell` at most once on a background thread as soon as `changed` reports
+/// the settled document appeared or moved across `schedule`, aborting early
+/// whenever `still_newest` says a newer hook arrived for the pane.
+pub(crate) fn tell_when_settled(
+    schedule: &'static [Duration],
+    still_newest: impl Fn() -> bool + Send + 'static,
+    changed: impl Fn() -> bool + Send + 'static,
+    tell: impl FnOnce() + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        for wait in schedule {
+            std::thread::sleep(*wait);
+            if !still_newest() {
+                return;
+            }
+            if changed() {
+                tell();
+                return;
+            }
+        }
+    });
+}
+
 /// Run `tell` once, `settle` from now, on a thread of its own, when
 /// `still_newest` says then that nothing newer has come — the second telling
 /// of a turn's end for a store that settles after it
 /// (`zerocode_core::vault::turn_write_settle`, t-124593).
+#[allow(dead_code)]
 pub(crate) fn tell_again_after(
     settle: Duration,
     still_newest: impl FnOnce() -> bool + Send + 'static,

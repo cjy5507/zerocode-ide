@@ -578,6 +578,51 @@ fn ask_own_list(agent: &str, now_ms: i64) -> Option<cli_models::Snapshot> {
     ))
 }
 
+/// The models an agent's own CLI last listed, peeked from the held lineup
+/// without starting a subprocess (safe for hot paths like `pane_log`).
+pub(crate) fn peek_own_list_models(agent: &str) -> Vec<cli_models::Listed> {
+    let held = held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.answers
+        .get(agent)
+        .map(|heard| heard.answer.listed().to_vec())
+        .unwrap_or_default()
+}
+
+/// The models an agent's own CLI listed, from the window's one lineup cache —
+/// triggering a background refresh when stale, or asking the CLI once when
+/// nothing has been read yet (e.g. a composer menu opened right after boot).
+pub(crate) fn own_list_models(agent: &str) -> Vec<cli_models::Listed> {
+    let now_ms = crate::usage_runtime::epoch_ms_now();
+    let existing = {
+        let held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.answers.get(agent).cloned()
+    };
+    if let Some(heard) = existing {
+        if now_ms.saturating_sub(heard.read_at_ms) >= REFRESH_AFTER_MS {
+            let _ = snapshot();
+        }
+        return heard.answer.listed().to_vec();
+    }
+    let Some(answer) = ask_own_list(agent, now_ms) else {
+        return Vec::new();
+    };
+    let listed = answer.answer.listed().to_vec();
+    {
+        let mut held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(lineup) = listed_lineup(agent, Some(&answer)) {
+            held.snapshot.lineups.insert(agent.to_string(), lineup);
+        }
+        held.answers.insert(agent.to_string(), answer);
+    }
+    listed
+}
+
 /// What `agent`'s models were last read as, for `agent-list`: its own CLI's
 /// answer, or the lineup zo's catalog gave it, said the same way; `None`
 /// while nothing has been read. An old read sends one more, as every peek
@@ -607,6 +652,7 @@ pub(crate) fn models_of(agent: &str) -> Option<cli_models::Snapshot> {
                     id: model.id.clone(),
                     name: None,
                     family: None,
+                    context_window: None,
                 })
                 .collect(),
             default: None,

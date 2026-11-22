@@ -5012,6 +5012,16 @@ pub fn context_window_for_model(model: &str) -> u64 {
     context_window_with_source(model).value
 }
 
+/// The model's context window when declared in the catalog or read from a
+/// provider endpoint, or `None` when only a fallback guess exists.
+#[must_use]
+pub fn declared_context_window(model: &str) -> Option<u64> {
+    let capability = model_capability_for_model(model);
+    (capability.context_window_source != HarnessValueSource::Default)
+        .then_some(capability.context_window)
+        .flatten()
+}
+
 /// [`context_window_for_model`] with the source the same walk found it in.
 fn context_window_with_source(model: &str) -> custom_models::CapabilityValue<u64> {
     let capability = model_capability_for_model(model);

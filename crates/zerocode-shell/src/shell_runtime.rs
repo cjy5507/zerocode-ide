@@ -2839,6 +2839,12 @@ pub(super) struct SubagentLog {
     /// pane's transcript has no such file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) about: Option<HelperAbout>,
+    /// Provisional turns accumulated from lifecycle hooks while a store that
+    /// settles after each turn (`Format::settles_after_turn`) has not yet
+    /// flushed the current turn to disk. Always empty for line-appended stores
+    /// and cleared the moment the authoritative document advances.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) live_turns: Vec<zerocode_core::transcript::TranscriptTurn>,
 }
 
 impl SubagentLog {
@@ -2857,6 +2863,7 @@ impl SubagentLog {
             start: 0,
             usage: None,
             about: None,
+            live_turns: Vec::new(),
         }
     }
 }
@@ -3154,6 +3161,9 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .drop_pane(&term);
+    state.pane_live_turns().remove(&term);
+    state.pane_doc_steps().remove(&term);
+    state.pane_transcript_models().remove(&term);
     // 그 판이 원장에서 앉아 있던 자리도 잊는다. 원장의 행 자체는 남는다 —
     // 재시작을 살아넘는 것이 그 행의 일이므로 — 잊는 것은 **번호에서 자리로
     // 가는 지도**뿐이다. 남겨 두면 다음에 이 번호를 물려받는 판이 지난

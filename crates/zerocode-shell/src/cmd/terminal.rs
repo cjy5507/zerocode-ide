@@ -349,6 +349,22 @@ pub(crate) fn pane_log(
         .get(&term)
         .map(|session| session.id.clone());
     let Ok(path) = crate::pane_transcript::pane_transcript(&state, term) else {
+        // Before a turn-settling CLI writes its first session document, return
+        // any hook-accumulated provisional turns so the first turn is visible
+        // mid-turn instead of showing "no transcript yet".
+        if matches!(read, LogRead::Tail | LogRead::After(_)) {
+            let live_turns = state
+                .pane_live_turns()
+                .get(&term)
+                .map(|buf| buf.turns().to_vec())
+                .unwrap_or_default();
+            if !live_turns.is_empty() {
+                let mut log = SubagentLog::not_found(0);
+                log.found = true;
+                log.live_turns = live_turns;
+                return Ok(log);
+            }
+        }
         return Ok(SubagentLog::not_found(after.unwrap_or_default()));
     };
     let archive = archive.unwrap_or(false);
@@ -358,7 +374,8 @@ pub(crate) fn pane_log(
     // A store that writes its session as one document is read whole, by
     // step — asked of the store row that keeps the file, never of the
     // agent's name (t-124593).
-    let mut log = if crate::pane_transcript::written_whole(&state, term, &path) {
+    let whole_doc = crate::pane_transcript::written_whole(&state, term, &path);
+    let mut log = if whole_doc {
         document_log(&path, read, whole.unwrap_or(false))?
     } else {
         transcript_log_source(&path, read, whole.unwrap_or(false), archive)?
@@ -370,6 +387,32 @@ pub(crate) fn pane_log(
         turn.session_id.clone_from(&session_id);
     }
     restart_nudge_runtime::mark_window_notes(log.turns.iter_mut().map(|one| &mut one.turn));
+    if whole_doc && matches!(read, LogRead::Tail | LogRead::After(_)) {
+        let settled = usize::try_from(log.next).unwrap_or(usize::MAX);
+        state.pane_doc_steps().insert(term, settled);
+        let returned: Vec<&zerocode_core::transcript::TranscriptTurn> =
+            log.turns.iter().map(|one| &one.turn).collect();
+        let mut live = state.pane_live_turns();
+        if let Some(buf) = live.get_mut(&term) {
+            buf.reconcile_turns(settled, &returned);
+            log.live_turns = buf.turns().to_vec();
+        }
+    }
+    if let Some(model) = log.model.as_ref() {
+        state.pane_transcript_models().insert(term, model.clone());
+    }
+    if log.usage.as_ref().is_some_and(|usage| usage.window == 0) {
+        let slug = state.agent_terms().get(&term).copied();
+        let model = log
+            .model
+            .clone()
+            .or_else(|| state.pane_transcript_models().get(&term).cloned());
+        if let (Some(slug), Some(model), Some(usage)) = (slug, model.as_deref(), log.usage.as_mut())
+            && let Some(window) = crate::slash_catalog::cached_model_context_window(slug, model)
+        {
+            usage.window = window;
+        }
+    }
     Ok(log)
 }
 
@@ -668,6 +711,7 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
                     start,
                     usage: None,
                     about: None,
+                    live_turns: Vec::new(),
                 },
                 lines: start..start,
                 ended: false,
@@ -696,6 +740,7 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
             start,
             usage,
             about: None,
+            live_turns: Vec::new(),
         },
         lines: start..next,
         ended: true,
@@ -803,6 +848,7 @@ pub(crate) fn document_log_within(
         start: held,
         usage: None,
         about: None,
+        live_turns: Vec::new(),
     };
     let size = std::fs::metadata(path)
         .map_err(|error| error.to_string())?
@@ -874,6 +920,7 @@ pub(crate) fn document_log_within(
         start: from as u64,
         usage: document.usage,
         about: None,
+        live_turns: Vec::new(),
     })
 }
 
@@ -1053,6 +1100,7 @@ pub(crate) fn transcript_log_back<F: std::io::Read + std::io::Seek>(
         start,
         usage,
         about: None,
+        live_turns: Vec::new(),
     })
 }
 
@@ -1131,6 +1179,7 @@ fn transcript_log_window<F: std::io::Read + std::io::Seek>(
             start: base,
             usage,
             about: None,
+            live_turns: Vec::new(),
         },
         lines: base..base + whole,
         ended: chunk.start + chunk.bytes.len() > 0,

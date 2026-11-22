@@ -35154,6 +35154,166 @@ fn a_session_document_mid_write_or_past_its_cap_reads_nothing_new() {
     assert!(big.found && big.skipped && big.turns.is_empty());
 }
 
+/// A store that writes its document late (past 340 ms) still announces once as
+/// soon as file metadata moves across `TURN_SETTLE_BACKOFF`, never emits when
+/// metadata stays unchanged, and stops immediately when a newer hook arrives.
+#[test]
+fn a_late_written_document_notifies_once_across_backoff_and_skips_unchanged() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    const FAST_SCHEDULE: [std::time::Duration; 4] = [
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(40),
+        std::time::Duration::from_millis(80),
+    ];
+    // Named production schedule holds the documented 80 → 250 → 700 → 1500 ms steps.
+    assert_eq!(
+        crate::pane_runtime::TURN_SETTLE_BACKOFF,
+        [
+            std::time::Duration::from_millis(80),
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(700),
+            std::time::Duration::from_millis(1_500),
+        ]
+    );
+    // Changes on the third probe (simulating a >340 ms write): notifies once.
+    let probes = Arc::new(AtomicUsize::new(0));
+    let probes_in = Arc::clone(&probes);
+    let (tx, rx) = std::sync::mpsc::channel();
+    crate::pane_runtime::tell_when_settled(
+        &FAST_SCHEDULE,
+        || true,
+        move || probes_in.fetch_add(1, Ordering::SeqCst) + 1 >= 3,
+        move || {
+            let _ = tx.send(());
+        },
+    );
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .expect("late write announced on third backoff step");
+    assert_eq!(probes.load(Ordering::SeqCst), 3);
+
+    // Unchanged file never notifies at all.
+    let (tx2, rx2) = std::sync::mpsc::channel();
+    crate::pane_runtime::tell_when_settled(
+        &FAST_SCHEDULE,
+        || true,
+        || false,
+        move || {
+            let _ = tx2.send(());
+        },
+    );
+    assert!(
+        rx2.recv_timeout(std::time::Duration::from_millis(220))
+            .is_err(),
+        "unchanged file must not notify"
+    );
+
+    // A newer hook cancels immediately before `changed` is checked again.
+    let still = Arc::new(AtomicBool::new(false));
+    let still_in = Arc::clone(&still);
+    let checked = Arc::new(AtomicUsize::new(0));
+    let checked_in = Arc::clone(&checked);
+    let (tx3, rx3) = std::sync::mpsc::channel();
+    crate::pane_runtime::tell_when_settled(
+        &FAST_SCHEDULE,
+        move || still_in.load(Ordering::SeqCst),
+        move || {
+            checked_in.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+        move || {
+            let _ = tx3.send(());
+        },
+    );
+    assert!(
+        rx3.recv_timeout(std::time::Duration::from_millis(80))
+            .is_err()
+    );
+    assert_eq!(checked.load(Ordering::SeqCst), 0);
+}
+
+/// Multi-turn ATIF document rewritten whole across turns plus mid-turn
+/// provisional hook turns: provisional turns stay visible while the document
+/// holds only prior turns, then clear cleanly once the rewritten document
+/// arrives (0 duplicate turns).
+#[test]
+fn a_multi_turn_document_replaces_provisional_hook_turns_with_zero_duplicates() {
+    use crate::cmd::terminal::{LogRead, document_log};
+    use zerocode_core::live_hook_turns::LiveTurnBuffer;
+    use zerocode_core::payload::HookPayload;
+
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("example-session.json");
+    // Turn 1 written.
+    std::fs::write(&path, atif_document(1, &[])).expect("turn 1");
+    let first = document_log(&path, LogRead::Tail, false).expect("tail");
+    assert_eq!(first.next, 3);
+
+    // Turn 2 runs mid-turn: hooks accumulate prompt + tool + result + stop
+    // before the file is rewritten.
+    let mut live = LiveTurnBuffer::default();
+    let p_prompt = serde_json::json!({"prompt": "example question 1"}).to_string();
+    live.note_hook(
+        "UserPromptSubmit",
+        &HookPayload::of(&p_prompt),
+        Some("example-session"),
+        first.next as usize,
+        Some(1_000),
+    );
+    let p_call = serde_json::json!({
+        "tool_name": "exec",
+        "tool_input": {"command": "echo hi"},
+        "tool_use_id": "call-2"
+    })
+    .to_string();
+    live.note_hook(
+        "PreToolUse",
+        &HookPayload::of(&p_call),
+        Some("example-session"),
+        first.next as usize,
+        Some(1_100),
+    );
+    let p_res = serde_json::json!({
+        "tool_name": "exec",
+        "tool_input": {"command": "echo hi"},
+        "tool_use_id": "call-2",
+        "tool_response": {"success": true, "output": "hi", "error": null}
+    })
+    .to_string();
+    live.note_hook(
+        "PostToolUse",
+        &HookPayload::of(&p_res),
+        Some("example-session"),
+        first.next as usize,
+        Some(1_200),
+    );
+
+    // Mid-turn read against unchanged file: document has 0 new turns,
+    // provisional buffer holds the 3 live turns.
+    let mid = document_log(&path, LogRead::After(first.next), false).expect("mid-turn");
+    assert!(mid.turns.is_empty());
+    let mid_refs: Vec<&zerocode_core::transcript::TranscriptTurn> =
+        mid.turns.iter().map(|one| &one.turn).collect();
+    live.reconcile_turns(mid.next as usize, &mid_refs);
+    assert_eq!(live.turns().len(), 3);
+
+    // Turn 2 finishes and rewrites the whole ATIF file with turns 1..6.
+    std::fs::write(&path, atif_document(6, &[])).expect("6 turns");
+    let grown = document_log(&path, LogRead::After(first.next), false).expect("grown");
+    assert_eq!(grown.next, 13);
+    assert_eq!(grown.turns.len(), 10);
+    let grown_refs: Vec<&zerocode_core::transcript::TranscriptTurn> =
+        grown.turns.iter().map(|one| &one.turn).collect();
+    live.reconcile_turns(grown.next as usize, &grown_refs);
+    assert!(
+        live.is_empty(),
+        "provisional turns must vanish once rewritten document lands"
+    );
+}
+
 
 /* ---- 만들기 흐름의 폴더 (2026-11-06, 사람: 「폴더 생성 막고있는 부분」) ---- */
 
