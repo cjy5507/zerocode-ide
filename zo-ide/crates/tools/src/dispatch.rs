@@ -649,6 +649,23 @@ fn patched_file_paths(raw_output: &str) -> Vec<std::path::PathBuf> {
 /// True when the formatter changed the file's bytes: what is on disk is then
 /// not the text the tool was sent.
 fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<String>) -> bool {
+    enrich_written_file_with_formatter(ctx, path, enrichments, |target| {
+        runtime::auto_format::format_file_with_timeout(
+            target,
+            Duration::from_millis(AUTO_FORMAT_BUDGET_MS),
+        )
+    })
+}
+
+fn enrich_written_file_with_formatter<F>(
+    ctx: &ToolContext,
+    path: &str,
+    enrichments: &mut Vec<String>,
+    format_file: F,
+) -> bool
+where
+    F: FnOnce(&str) -> Option<runtime::auto_format::FormatOutcome>,
+{
     let mut reformatted = false;
     // Auto-format rewrites the file in place. While an instrumentation probe is
     // staged (debugger debug-mode), skip it: a reformat (e.g. rustfmt re-indenting
@@ -660,27 +677,33 @@ fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<Stri
     // diagnostics below only READ the file, so they still run.
     if !file_has_staged_probe(ctx) {
         let written = runtime::auto_format::formatter_for_path(Path::new(path)).and_then(|_| std::fs::read(path).ok());
-        if let Some(fmt_result) = runtime::auto_format::format_file_with_timeout(
-            path,
-            Duration::from_millis(AUTO_FORMAT_BUDGET_MS),
-        ) {
-            reformatted = written.is_some() && std::fs::read(path).ok() != written;
-            if reformatted {
-                enrichments.push(format!(
-                    "[auto-format] {fmt_result}: it changed the file, so the text on disk is not the text sent — {} it before you {} it",
-                    core_types::tool_names::CoreTool::Read.wire(),
-                    core_types::tool_names::CoreTool::Edit.wire(),
-                ));
-            } else {
-                enrichments.push(format!("[auto-format] {fmt_result}"));
+        match format_file(path) {
+            Some(runtime::auto_format::FormatOutcome::Finished(fmt_result)) => {
+                reformatted = written.is_some() && std::fs::read(path).ok() != written;
+                if reformatted {
+                    enrichments.push(format!(
+                        "[auto-format] {fmt_result}: it changed the file, so the text on disk is not the text sent — {} it before you {} it",
+                        core_types::tool_names::CoreTool::Read.wire(),
+                        core_types::tool_names::CoreTool::Edit.wire(),
+                    ));
+                } else {
+                    enrichments.push(format!("[auto-format] {fmt_result}"));
+                }
+                // 포맷터가 방금 파일을 재작성했다 — write/edit 성공 시점에 기록된
+                // read-registry 스냅샷이 즉시 stale해지므로 여기서 재기록한다.
+                // 이 재기록이 없으면 다음 edit_file마다 거짓 "외부 변경" 거부 →
+                // 재읽기 강제의 라이브락성 마찰이 생긴다 (CC의 "modified by a
+                // linter" 사이클과 같은 클래스). 무변경 포맷이어도 재기록은
+                // 멱등이라 무해하다.
+                file_tools::record_file_observation(&ctx.file_reads, path);
             }
-            // 포맷터가 방금 파일을 재작성했다 — write/edit 성공 시점에 기록된
-            // read-registry 스냅샷이 즉시 stale해지므로 여기서 재기록한다.
-            // 이 재기록이 없으면 다음 edit_file마다 거짓 "외부 변경" 거부 →
-            // 재읽기 강제의 라이브락성 마찰이 생긴다 (CC의 "modified by a
-            // linter" 사이클과 같은 클래스). 무변경 포맷이어도 재기록은
-            // 멱등이라 무해하다.
-            file_tools::record_file_observation(&ctx.file_reads, path);
+            Some(runtime::auto_format::FormatOutcome::TimedOut { formatter, budget }) => {
+                enrichments.push(format!(
+                    "[format-timeout] {formatter} timed out after {}ms; file left as sent",
+                    budget.as_millis(),
+                ));
+            }
+            None => {}
         }
     }
 
@@ -1273,6 +1296,73 @@ mod auto_format_guard_tests {
         );
         assert!(enriched.contains("plain text result"));
         assert!(enriched.contains("[auto-format] formatted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enrich_reports_format_timeout_without_auto_format_claim() {
+        use runtime::context_compression::{wire_tool_output, WireRewrite};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let root = unique_temp_path("format-timeout");
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let target = root.join("slow.rs");
+        let sent = "fn   slow( ){let x=1;}\n";
+        std::fs::write(&target, sent).expect("write target");
+        let script = root.join("slowfmt");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").expect("write slow formatter");
+        let mut perms = std::fs::metadata(&script).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod slow formatter");
+
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let mut enrichments = Vec::new();
+        let budget = Duration::from_millis(50);
+        let target_str = target.to_string_lossy().to_string();
+        let script_str = script.to_string_lossy().to_string();
+        let reformatted = super::enrich_written_file_with_formatter(
+            &ctx,
+            &target_str,
+            &mut enrichments,
+            |p| {
+                runtime::auto_format::format_file_with_command_timeout(
+                    p,
+                    runtime::auto_format::Formatter::Rustfmt,
+                    &script_str,
+                    budget,
+                )
+            },
+        );
+        let on_disk = std::fs::read_to_string(&target).expect("read target");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(!reformatted, "timed-out formatter must not mark file reformatted");
+        assert_eq!(on_disk, sent, "file must remain as sent");
+        assert_eq!(enrichments.len(), 1, "one timeout notice expected");
+        assert!(
+            !enrichments[0].contains("[auto-format]"),
+            "timeout must not claim [auto-format]: {}",
+            enrichments[0]
+        );
+        assert!(
+            enrichments[0].contains("timed out") && enrichments[0].contains("file left as sent"),
+            "timeout notice must say timed out and file left as sent: {}",
+            enrichments[0]
+        );
+
+        let raw = serde_json::json!({
+            "type": "create",
+            "filePath": target_str,
+            "content": sent,
+        })
+        .to_string();
+        let enriched = super::fold_enrichment_into_output(raw, &enrichments);
+        let shown = wire_tool_output(&enriched, "write_file", false, WireRewrite::Full);
+        assert!(shown.contains("· created · 1 lines"), "{shown}");
+        assert!(!shown.contains("before the formatter changed the file"), "{shown}");
+        assert!(!shown.contains("[auto-format]"), "{shown}");
+        assert!(shown.contains("timed out"), "{shown}");
     }
 
     /// Regression: a `read_file` result larger than the 30k ceiling must stay

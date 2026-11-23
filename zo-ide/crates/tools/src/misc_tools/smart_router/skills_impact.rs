@@ -70,11 +70,14 @@ fn replay(body: &str, counts: &Mutex<WireCounts>) -> String {
 fn estimated_tokens(bytes: usize) -> usize { bytes.div_ceil(4) }
 
 fn wait_for_suggestion(cwd: &Path, previous: usize) {
-    let until = Instant::now() + Duration::from_secs(5);
-    while super::jev_summary::read_rows(&skill_suggestion_path(cwd)).len() <= previous {
-        assert!(Instant::now() < until, "detached suggestion did not settle");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    let rows = super::jev_mock::wait_for_ledger_rows(
+        &skill_suggestion_path(cwd),
+        previous + 1,
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+        |_| true,
+    );
+    assert!(rows.len() > previous, "detached suggestion did not settle");
 }
 
 fn session(cwd: &Path, needed_percent: usize, counts: &Mutex<WireCounts>) -> Value {

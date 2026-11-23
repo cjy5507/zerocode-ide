@@ -374,6 +374,29 @@ fn machine_with<T>(words: &[(&str, &str)], wire: Option<&str>, body: impl FnOnce
     body(&cwd)
 }
 
+/// Wait up to `budget` for `ledger` to hold at least `wanted` rows matching
+/// `keep`, returning all matching rows read when the count is reached or
+/// `budget` elapses.
+pub(super) fn wait_for_ledger_rows(
+    ledger: &Path,
+    wanted: usize,
+    budget: Duration,
+    poll: Duration,
+    mut keep: impl FnMut(&serde_json::Value) -> bool,
+) -> Vec<serde_json::Value> {
+    let started = std::time::Instant::now();
+    loop {
+        let rows: Vec<serde_json::Value> = super::jev_summary::read_rows(ledger)
+            .into_iter()
+            .filter(|row| keep(row))
+            .collect();
+        if rows.len() >= wanted || started.elapsed() >= budget {
+            return rows;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::TcpStream;

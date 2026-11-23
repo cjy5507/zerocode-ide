@@ -844,14 +844,20 @@ fn the_suggestion_asks_nothing_where_its_person_turned_the_search_off() {
             assert_eq!(note, None, "a recording seat hands the turn nothing");
             let seated = turn_pending().lock().expect("pending lock").contains_key(cwd);
             let ledger = skill_suggestion_path(cwd);
-            let started = Instant::now();
             // The detached writer opens the ledger before it writes the first row.
             // Wait for the row we assert on while the fixture is still active.
-            let mut rows = super::super::jev_summary::read_rows(&ledger).len();
-            while seated && rows == 0 && started.elapsed() < Duration::from_secs(15) {
-                std::thread::sleep(Duration::from_millis(20));
-                rows = super::super::jev_summary::read_rows(&ledger).len();
-            }
+            let rows = if seated {
+                super::super::jev_mock::wait_for_ledger_rows(
+                    &ledger,
+                    1,
+                    Duration::from_secs(15),
+                    Duration::from_millis(20),
+                    |_| true,
+                )
+                .len()
+            } else {
+                super::super::jev_summary::read_rows(&ledger).len()
+            };
             finish_turn_suggestion(cwd, &[]);
             (seated, mock.requests().len(), rows)
         })
@@ -887,12 +893,13 @@ fn a_refused_suggestions_row_keeps_what_the_server_said() {
         let asked = judge.suggest("draft the quarterly report as a Word file".to_string());
         assert_eq!(api::sync_bridge::run_blocking(asked), None, "a recording seat hands nothing");
         let ledger = skill_suggestion_path(cwd);
-        let started = Instant::now();
-        let mut rows = super::super::jev_summary::read_rows(&ledger);
-        while rows.is_empty() && started.elapsed() < Duration::from_secs(15) {
-            std::thread::sleep(Duration::from_millis(20));
-            rows = super::super::jev_summary::read_rows(&ledger);
-        }
+        let rows = super::super::jev_mock::wait_for_ledger_rows(
+            &ledger,
+            1,
+            Duration::from_secs(15),
+            Duration::from_millis(20),
+            |_| true,
+        );
         finish_turn_suggestion(cwd, &[]);
         let refused = SystemOneFailure::Http(502).ledger_token();
         let row = rows.iter().find(|row| row["outcome"] == refused.as_str());
@@ -923,18 +930,16 @@ fn a_suggestion_whose_catalog_was_cut_waits_a_rest_to_ask_again() {
         .expect("a skill");
         let judge = SkillSuggestionJudge::at(cwd);
         let ledger = skill_suggestion_path(cwd);
-        let asked = |rows: Vec<Value>| -> Vec<Value> {
-            rows.into_iter().filter(|row| row.get("outcome").is_some()).collect()
-        };
         let suggest = |task: &str, wanted: usize| -> Vec<Value> {
             let handed = api::sync_bridge::run_blocking(judge.suggest(task.to_string()));
             assert_eq!(handed, None, "a recording seat hands nothing");
-            let started = Instant::now();
-            let mut rows = asked(super::super::jev_summary::read_rows(&ledger));
-            while rows.len() < wanted && started.elapsed() < Duration::from_secs(15) {
-                std::thread::sleep(Duration::from_millis(20));
-                rows = asked(super::super::jev_summary::read_rows(&ledger));
-            }
+            let rows = super::super::jev_mock::wait_for_ledger_rows(
+                &ledger,
+                wanted,
+                Duration::from_secs(15),
+                Duration::from_millis(20),
+                |row| row.get("outcome").is_some(),
+            );
             finish_turn_suggestion(cwd, &[]);
             rows
         };

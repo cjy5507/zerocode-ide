@@ -2216,8 +2216,8 @@ fn a_write_the_formatter_changed_says_so_and_not_as_sent() {
     let _ = fs::remove_dir_all(&root);
     let [messy_shown, tidy_shown] =
         results.map(|result| wire_tool_output(&result, "write_file", false, WireRewrite::Full));
-    if !tidy_shown.contains("[auto-format]") {
-        eprintln!("no formatter ran here, nothing to check: {tidy_shown}");
+    if !messy_shown.contains("[auto-format]") || !tidy_shown.contains("[auto-format]") {
+        eprintln!("formatter did not complete for both files, nothing to check: messy={messy_shown}, tidy={tidy_shown}");
         return;
     }
     assert_ne!(on_disk[0], sent_messy, "rustfmt changed the first file");
