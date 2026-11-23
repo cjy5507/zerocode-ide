@@ -845,10 +845,13 @@ fn the_suggestion_asks_nothing_where_its_person_turned_the_search_off() {
             let seated = turn_pending().lock().expect("pending lock").contains_key(cwd);
             let ledger = skill_suggestion_path(cwd);
             let started = Instant::now();
-            while seated && !ledger.exists() && started.elapsed() < Duration::from_secs(15) {
+            // The detached writer opens the ledger before it writes the first row.
+            // Wait for the row we assert on while the fixture is still active.
+            let mut rows = super::super::jev_summary::read_rows(&ledger).len();
+            while seated && rows == 0 && started.elapsed() < Duration::from_secs(15) {
                 std::thread::sleep(Duration::from_millis(20));
+                rows = super::super::jev_summary::read_rows(&ledger).len();
             }
-            let rows = super::super::jev_summary::read_rows(&ledger).len();
             finish_turn_suggestion(cwd, &[]);
             (seated, mock.requests().len(), rows)
         })
