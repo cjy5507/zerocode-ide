@@ -18948,6 +18948,277 @@ await test("a list that grows above the setting a person scrolled down to leaves
   return `field ${before.top}px from the frame's top at scroll ${before.scrollTop}, ${grown.top}px at ${grown.scrollTop} with ${grown.rows} rows, ${shrunk.top}px at ${shrunk.scrollTop}`;
 });
 
+await test("automations owed strip, paused fold, inline failure reasons, lazy calendar local-date outcomes, keyboard and axe", async () => {
+  const savedAutos = backend.automations;
+  const savedRuns = backend.automationRuns;
+  const baseJob = (id, name, extra = {}) => ({
+    id,
+    name,
+    prompt: "Check repo",
+    workspace: BOOT_BASE.project_root,
+    workspace_mode: "existing",
+    base_branch: null,
+    schedule: { cadence: "daily", time: "01:30", day_of_week: 1, custom: "" },
+    cron: "30 1 * * *",
+    command: "",
+    agent: "codex",
+    flow: null,
+    reuse_session: false,
+    missed_run_grace_minutes: 0,
+    precheck: "",
+    precheck_timeout_seconds: 15,
+    close_when_done: false,
+    evidence: "prompt",
+    leaves_evidence: false,
+    enabled: true,
+    next_run_at: 29_900_000,
+    last_run_at: 29_899_000,
+    runs: 3,
+    overdue_since: null,
+    last_verdict: null,
+    asked: null,
+    flow_changed: false,
+    flow_stands: null,
+    ...extra,
+  });
+  // Pick a local-time 01:30 timestamp inside the current month so UTC+ zones
+  // fall on the previous UTC day — proves the calendar keys by local date.
+  const now = new Date();
+  const localDayAt0130 = new Date(now.getFullYear(), now.getMonth(), Math.max(2, Math.min(27, now.getDate())), 1, 30, 0, 0);
+  const targetDateKey = `${localDayAt0130.getFullYear()}-${String(localDayAt0130.getMonth() + 1).padStart(2, "0")}-${String(localDayAt0130.getDate()).padStart(2, "0")}`;
+  const prevDate = new Date(localDayAt0130.getFullYear(), localDayAt0130.getMonth(), localDayAt0130.getDate() - 1);
+  const prevDateKey = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, "0")}-${String(prevDate.getDate()).padStart(2, "0")}`;
+  backend.automations = [
+    baseJob("ux-approve", "Wallet QA", {
+      flow: "wallet-qa",
+      asked: { pane: "term:1", approved_at_ms: localDayAt0130.getTime() - 3600_000 },
+      flow_changed: true,
+      flow_stands: "sha256:fresh",
+    }),
+    baseJob("ux-fail", "Release gate", { last_verdict: false }),
+    baseJob("ux-ok", "Daily review"),
+    baseJob("ux-paused", "Dormant audit", { enabled: false }),
+  ];
+  backend.automationRuns = [
+    {
+      id: "r-ok",
+      automation_id: "ux-fail",
+      scheduled_for_epoch_minutes: 29_000_000,
+      at_epoch_ms: localDayAt0130.getTime() - 86_400_000 * 2,
+      root: BOOT_BASE.project_root,
+      term: null,
+      made_worktree: null,
+      skipped: null,
+      failure: null,
+      ended_at_epoch_ms: localDayAt0130.getTime() - 86_400_000 * 2 + 5000,
+      exit_code: 0,
+      completed_at_epoch_ms: null,
+      result: null,
+      evidence_dir: null,
+      evidence_files: 0,
+      verdict: null,
+      report: null,
+    },
+    {
+      id: "r-skip",
+      automation_id: "ux-fail",
+      scheduled_for_epoch_minutes: 29_000_001,
+      at_epoch_ms: localDayAt0130.getTime(),
+      root: BOOT_BASE.project_root,
+      term: null,
+      made_worktree: null,
+      skipped: { command: "git diff --quiet", exit_code: 1, timed_out: false, output: "M ui/shell.css" },
+      failure: null,
+      ended_at_epoch_ms: null,
+      exit_code: null,
+      completed_at_epoch_ms: null,
+      result: null,
+      evidence_dir: null,
+      evidence_files: 0,
+      verdict: null,
+      report: null,
+    },
+    {
+      id: "r-fail",
+      automation_id: "ux-fail",
+      scheduled_for_epoch_minutes: 29_000_002,
+      at_epoch_ms: localDayAt0130.getTime() + 60_000,
+      root: BOOT_BASE.project_root,
+      term: null,
+      made_worktree: null,
+      skipped: null,
+      failure: { stage: "worktree_create", error: "branch already checked out", worktree_cleanup_error: null },
+      ended_at_epoch_ms: null,
+      exit_code: null,
+      completed_at_epoch_ms: null,
+      result: null,
+      evidence_dir: null,
+      evidence_files: 0,
+      verdict: null,
+      report: null,
+    },
+    {
+      id: "r-exit",
+      automation_id: "ux-ok",
+      scheduled_for_epoch_minutes: 29_000_003,
+      at_epoch_ms: localDayAt0130.getTime() + 120_000,
+      root: BOOT_BASE.project_root,
+      term: null,
+      made_worktree: null,
+      skipped: null,
+      failure: null,
+      ended_at_epoch_ms: localDayAt0130.getTime() + 130_000,
+      exit_code: 1,
+      completed_at_epoch_ms: null,
+      result: null,
+      evidence_dir: null,
+      evidence_files: 0,
+      verdict: null,
+      report: null,
+    },
+  ];
+  try {
+    await setQualityLocale(pageA, "en");
+    const beforeOpen = backend.calls.length;
+    await pageA.evaluate(() => {
+      autoViewMode = "list";
+      autoFilter = "all";
+      autoSelectedId = null;
+      setAutoOpen(true);
+      setAutoPage("schedules");
+    });
+    await backend.waitForCall("A", "list_automations", beforeOpen);
+    await renderSettled(pageA);
+
+    // 1) Opening list mode never fires N+1 list_automation_runs IPC.
+    const runsOnOpen = backend.calls.slice(beforeOpen).filter((c) => c.command === "list_automation_runs").length;
+    assertEqual(runsOnOpen, 0, "list mode fetched all automation runs eagerly (N+1)");
+
+    // 2) Owed strip names both attention items and paused row folds behind one button.
+    const listSnap = await pageA.evaluate(() => ({
+      owedHidden: document.getElementById("auto-owed").hidden,
+      owedChips: [...document.querySelectorAll("#auto-owed .auto-owed-chip")].map((n) => [n.dataset.autoId, n.dataset.tone]),
+      visibleRows: [...document.querySelectorAll("#auto-list > .auto-row")].map((n) => n.dataset.autoId),
+      foldText: document.querySelector("#auto-list .auto-paused-fold")?.textContent ?? "",
+    }));
+    assertEqual(listSnap.owedHidden, false, "owed strip stayed hidden");
+    assertEqual(listSnap.owedChips, [["ux-approve", "you"], ["ux-fail", "halt"]], "owed strip chips/tones");
+    assertEqual(listSnap.visibleRows, ["ux-approve", "ux-fail", "ux-ok"], "paused row was not folded");
+    assert(listSnap.foldText.includes("1"), "paused fold count missing", listSnap.foldText);
+
+    // DOM identity survives repaint (reconcileElementOrder).
+    const sameNode = await pageA.evaluate(() => {
+      const first = document.querySelector('#auto-list .auto-row[data-auto-id="ux-approve"]');
+      paintAutomations();
+      return first === document.querySelector('#auto-list .auto-row[data-auto-id="ux-approve"]');
+    });
+    assertEqual(sameNode, true, "paintAutomations rebuilt row DOM instead of reusing keyed nodes");
+
+    // Expanding paused fold reveals the paused row; searching reveals it too; attention filter narrows to 2.
+    await pageA.click("#auto-list .auto-paused-fold");
+    assertEqual(await pageA.locator("#auto-list > .auto-row").count(), 4, "clicking paused fold did not expand paused row");
+    await pageA.click("#auto-list .auto-paused-fold");
+    assertEqual(await pageA.locator("#auto-list > .auto-row").count(), 3, "clicking paused fold again did not collapse it");
+    await pageA.fill("#auto-search", "Dormant");
+    assertEqual(await pageA.locator('#auto-list > .auto-row[data-auto-id="ux-paused"]').count(), 1, "search did not reveal folded paused row");
+    await pageA.fill("#auto-search", "");
+    await pageA.click('[data-auto-filter="attention"]');
+    assertEqual(await pageA.locator("#auto-list > .auto-row").count(), 2, "attention filter did not isolate owed schedules");
+    await pageA.click('[data-auto-filter="all"]');
+
+    // Keyboard j/k moves focus across rows.
+    await pageA.locator('#auto-list > .auto-row[data-auto-id="ux-approve"]').focus();
+    await pageA.keyboard.press("j");
+    assertEqual(await pageA.evaluate(() => document.activeElement?.dataset.autoId), "ux-fail", "j did not move to next row");
+    await pageA.keyboard.press("k");
+    assertEqual(await pageA.evaluate(() => document.activeElement?.dataset.autoId), "ux-approve", "k did not move to previous row");
+
+    // 3) Owed chips open the right tab (approval -> overview, failure -> runs), Escape returns to list.
+    await pageA.click('#auto-owed .auto-owed-chip[data-auto-id="ux-approve"]');
+    await renderSettled(pageA);
+    assert(await pageA.locator("#auto-overview").isVisible(), "approval chip did not open overview tab");
+    await pageA.keyboard.press("Escape");
+    await renderSettled(pageA);
+    assert(await pageA.locator("#auto-list-page").isVisible(), "Escape did not return from detail to list");
+
+    const beforeRuns = backend.calls.length;
+    await pageA.click('#auto-owed .auto-owed-chip[data-auto-id="ux-fail"]');
+    await backend.waitForCall("A", "list_automation_runs", beforeRuns);
+    await renderSettled(pageA);
+    assert(await pageA.locator("#auto-runs").isVisible(), "failed chip did not open runs tab");
+
+    // 4) Inline failure & skipped reasons + precheck output + result filter.
+    const runsSnap = await pageA.evaluate(() => ({
+      whys: [...document.querySelectorAll("#auto-runs-list .auto-run-why")].map((n) => n.textContent),
+      skipOut: document.querySelector("#auto-runs-list .auto-run-skip-out pre")?.textContent ?? "",
+      copyButtons: document.querySelectorAll("#auto-runs-list .auto-run-copy").length,
+      total: document.querySelectorAll("#auto-runs-list .auto-run-row").length,
+    }));
+    assertEqual(runsSnap.total, 3, "expected 3 runs for ux-fail");
+    assert(runsSnap.whys.some((w) => w.includes("worktree_create") && w.includes("branch already checked out")), "failure reason missing inline", runsSnap);
+    assert(runsSnap.whys.some((w) => w.includes("git diff --quiet") && w.includes("exit 1")), "skipped reason missing inline", runsSnap);
+    assertEqual(runsSnap.skipOut, "M ui/shell.css", "precheck output missing inline");
+    assertEqual(runsSnap.copyButtons, 2, "copy-reason buttons missing");
+
+    await pageA.click('[data-auto-run-filter="issue"]');
+    assertEqual(await pageA.locator("#auto-runs-list .auto-run-row").count(), 2, "issue filter did not hide ok run");
+    await pageA.click('[data-auto-run-filter="ok"]');
+    assertEqual(await pageA.locator("#auto-runs-list .auto-run-row").count(), 1, "ok filter did not isolate ok run");
+    await pageA.click('[data-auto-run-filter="all"]');
+
+    // Axe WCAG AA on both detail runs and list (dark & light).
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#auto-runs"), [], `en/${theme} automation runs accessibility`);
+    }
+    await pageA.keyboard.press("Escape");
+    await renderSettled(pageA);
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#auto-list-page"), [], `en/${theme} automation list accessibility`);
+    }
+    await setQualityTheme(pageA, "dark");
+
+    // 5) Calendar loads lazily on switch, uses local date (not UTC) and classifies exit 1/skipped as fail/missed (never success).
+    const beforeCal = backend.calls.length;
+    await pageA.click("#auto-view-cal-btn");
+    await backend.waitForCall("A", "list_automation_runs", beforeCal);
+    await pageA.waitForFunction(() => autoAllRuns.length >= 4, undefined, { timeout: UI_TIMEOUT });
+    await renderSettled(pageA);
+    const calSnap = await pageA.evaluate(({ target, prev }) => {
+      const cell = document.querySelector(`#auto-cal-days .auto-cal-cell[data-date="${target}"]`);
+      const prevCell = document.querySelector(`#auto-cal-days .auto-cal-cell[data-date="${prev}"]`);
+      return {
+        weekdays: document.querySelectorAll("#auto-cal-weekdays [role='columnheader']").length,
+        tz: document.getElementById("auto-cal-tz")?.textContent ?? "",
+        targetDots: cell ? [...cell.querySelectorAll(".auto-cal-dot")].map((d) => [...d.classList].find((c) => c.startsWith("is-"))) : [],
+        prevDots: prevCell ? [...prevCell.querySelectorAll(".auto-cal-dot")].map((d) => [...d.classList].find((c) => c.startsWith("is-"))) : [],
+        cellTabIndex: cell?.tabIndex ?? -1,
+      };
+    }, { target: targetDateKey, prev: prevDateKey });
+    assertEqual(calSnap.weekdays, 7, "calendar did not render 7 localized weekdays");
+    assert(calSnap.tz.length > 0 && !calSnap.tz.includes("{{tz}}"), "calendar tz badge not populated", calSnap.tz);
+    assertEqual(calSnap.targetDots.includes("is-fail"), true, "local-date failure/exit-1 dot missing on target date");
+    assertEqual(calSnap.targetDots.includes("is-missed"), true, "local-date skipped dot missing on target date");
+    assertEqual(calSnap.targetDots.includes("is-success"), false, "exit-1/skipped misclassified as success dot");
+    assertEqual(calSnap.prevDots.length, 0, "local 01:30 run leaked onto previous UTC date cell");
+    assertEqual(calSnap.cellTabIndex, 0, "calendar cells not keyboard focusable");
+
+    return "owed strip + paused fold + inline reasons + lazy calendar local-date/outcome + j/k/Esc + axe dark/light";
+  } finally {
+    await setQualityLocale(pageA, "ko");
+    await setQualityTheme(pageA, "dark");
+    backend.automations = savedAutos;
+    backend.automationRuns = savedRuns;
+    await pageA.evaluate(() => {
+      autoViewMode = "list";
+      autoFilter = "all";
+      autoSelectedId = null;
+      setAutoOpen(false);
+    });
+  }
+});
+
 await test("the stateful backend refused every command the fixture did not define", async () => {
   assertEqual(backend.unknown, [], "unknown IPC was treated as success");
 });

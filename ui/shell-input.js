@@ -422,7 +422,7 @@ function rearmKeySink(event) {
   // A screen is covering the terminal, so the sink is not what these keys
   // are for — pulling focus back to it would take the arrow keys away from
   // the screen the person is actually reading.
-  if (!settingsView.hidden || tasksInFront() || workspaceBoardInFront()) return;
+  if (!settingsView.hidden || !autoView.hidden || tasksInFront() || workspaceBoardInFront()) return;
   // The task board's tab covers the stage the same way, and its blocks, rows and cards are buttons: a focused
   // one that lost the focus to the sink on its Enter never saw the press (t-84799 ③). The board that is a window of its
   // own (`isPopout`) has no tab list, so it is asked by the window. And only while the keys have no other owner: a floating
@@ -465,7 +465,7 @@ function rearmKeySink(event) {
  * would send. */
 function sinkLetterToConversation(event) {
   if (!typedCharacter(event) || modalTop()) return;
-  if (!settingsView.hidden || tasksInFront() || workspaceBoardInFront()) return;
+  if (!settingsView.hidden || !autoView.hidden || tasksInFront() || workspaceBoardInFront()) return;
   const front = frontKeyboardTarget();
   if (front !== null || typingHold(front) !== undefined) return;
   frontConversationBox()?.focus();

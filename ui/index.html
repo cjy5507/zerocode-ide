@@ -2262,6 +2262,7 @@
             </div>
 
             <div class="auto-catalog" id="auto-catalog" hidden>
+              <div class="auto-owed" id="auto-owed" role="region" data-i18n-aria="auto.owedRegion" aria-label="확인 필요한 예약" hidden></div>
               <div class="auto-toolbar">
                 <label class="auto-search">
                   <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
@@ -2269,6 +2270,7 @@
                 </label>
                 <div class="auto-filter" role="group" data-i18n-aria="auto.filter" aria-label="자동화 필터">
                   <button class="is-active" type="button" data-auto-filter="all" data-i18n="auto.filterAll">전체</button>
+                  <button type="button" data-auto-filter="attention" data-i18n="auto.filterAttention">확인 필요</button>
                   <button type="button" data-auto-filter="enabled" data-i18n="auto.filterEnabled">활성</button>
                   <button type="button" data-auto-filter="paused" data-i18n="auto.filterPaused">일시정지</button>
                 </div>
@@ -2285,18 +2287,19 @@
               </div>
               <div class="auto-table" id="auto-table" role="table" data-i18n-aria="view.automations" aria-label="자동화">
                 <div class="auto-table-head" role="row">
-                  <button type="button" data-auto-sort="name" data-i18n="auto.name">이름</button>
-                  <span data-i18n="auto.scheduleColumn">일정</span>
-                  <span data-i18n="auto.whatColumn">실행</span>
-                  <span data-i18n="auto.projectColumn">프로젝트</span>
-                  <span data-i18n="auto.nextRunColumn">다음 실행</span>
-                  <button type="button" data-auto-sort="last" data-i18n="auto.lastRunColumn">최근 실행</button>
-                  <span data-i18n="auto.statusColumn">상태</span>
-                  <span class="sr" data-i18n="auto.actionsColumn">동작</span>
+                  <div class="auto-table-sort" role="columnheader"><button type="button" data-auto-sort="name" data-i18n="auto.name">이름</button></div>
+                  <span role="columnheader" data-i18n="auto.scheduleColumn">일정</span>
+                  <span role="columnheader" data-i18n="auto.whatColumn">실행</span>
+                  <span role="columnheader" data-i18n="auto.projectColumn">프로젝트</span>
+                  <span role="columnheader" data-i18n="auto.nextRunColumn">다음 실행</span>
+                  <div class="auto-table-sort" role="columnheader"><button type="button" data-auto-sort="last" data-i18n="auto.lastRunColumn">최근 실행</button></div>
+                  <span role="columnheader" data-i18n="auto.statusColumn">상태</span>
+                  <span class="sr" role="columnheader" data-i18n="auto.actionsColumn">동작</span>
                 </div>
                 <div class="auto-list" id="auto-list" role="rowgroup"></div>
-                <p class="auto-no-match" id="auto-no-match" data-i18n="auto.noMatch" hidden>일치하는 자동화가 없습니다.</p>
               </div>
+              <p class="auto-no-match" id="auto-no-match" data-i18n="auto.noMatch" hidden>일치하는 자동화가 없습니다.</p>
+              <p class="auto-keys" id="auto-keys" data-i18n="auto.keys" hidden>j/k 이동 · Enter 열기 · Esc 목록</p>
               <div class="auto-calendar" id="auto-calendar" hidden>
                 <div class="auto-cal-nav">
                   <div class="auto-cal-nav-left">
@@ -2305,29 +2308,21 @@
                     </button>
                     <h3 class="auto-cal-title" id="auto-cal-title"></h3>
                     <button class="auto-icon-button" id="auto-cal-next" type="button" data-i18n-aria="auto.nextMonth" aria-label="다음 달">
-                      <svg class="icon" style="transform: rotate(180deg);" aria-hidden="true"><use href="#i-arrow-left"></use></svg>
+                      <svg class="icon auto-cal-next-icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg>
                     </button>
                     <button class="btn btn--secondary auto-cal-today-btn" id="auto-cal-today" type="button" data-i18n="auto.today">오늘</button>
                   </div>
                   <div class="auto-cal-tz-info">
-                    <span class="auto-cal-tz-badge" data-i18n="auto.localTzNotice">로컬 시간 기준 (KST)</span>
+                    <span class="auto-cal-tz-badge" id="auto-cal-tz"></span>
                   </div>
                 </div>
-                <div class="auto-cal-grid" role="grid" aria-label="자동화 달력">
-                  <div class="auto-cal-weekdays" role="row">
-                    <span role="columnheader">일</span>
-                    <span role="columnheader">월</span>
-                    <span role="columnheader">화</span>
-                    <span role="columnheader">수</span>
-                    <span role="columnheader">목</span>
-                    <span role="columnheader">금</span>
-                    <span role="columnheader">토</span>
-                  </div>
+                <div class="auto-cal-grid" role="grid" data-i18n-aria="auto.calendarLabel" aria-label="자동화 달력">
+                  <div class="auto-cal-weekdays" id="auto-cal-weekdays" role="row"></div>
                   <div class="auto-cal-days" id="auto-cal-days" role="rowgroup"></div>
                 </div>
                 <div class="auto-cal-selected-panel" id="auto-cal-selected-panel">
                   <div class="auto-cal-selected-head">
-                    <h4 class="auto-cal-selected-title" id="auto-cal-selected-title">선택한 날짜 일정</h4>
+                    <h4 class="auto-cal-selected-title" id="auto-cal-selected-title"></h4>
                   </div>
                   <div class="auto-cal-selected-list" id="auto-cal-selected-list"></div>
                 </div>
@@ -2378,8 +2373,16 @@
             </div>
             <section class="auto-runs" id="auto-runs" hidden aria-labelledby="auto-runs-title">
               <h3 class="sr" id="auto-runs-title" data-i18n="auto.runsTitle">실행</h3>
+              <div class="auto-runs-toolbar" id="auto-runs-toolbar" hidden>
+                <div class="auto-filter" role="group" data-i18n-aria="auto.runsFilter" aria-label="실행 결과 필터">
+                  <button class="is-active" type="button" data-auto-run-filter="all" data-i18n="auto.filterAll">전체</button>
+                  <button type="button" data-auto-run-filter="issue" data-i18n="auto.runsFilterIssue">문제</button>
+                  <button type="button" data-auto-run-filter="ok" data-i18n="auto.runsFilterOk">완료</button>
+                </div>
+              </div>
               <div class="auto-runs-list" id="auto-runs-list"></div>
               <p class="auto-runs-empty" id="auto-runs-empty" data-i18n="auto.runsEmpty">아직 실행 기록이 없습니다.</p>
+              <p class="auto-runs-empty" id="auto-runs-no-match" data-i18n="auto.runsNoMatch" hidden>조건에 맞는 실행 기록이 없습니다.</p>
             </section>
           </section>
 

@@ -11875,14 +11875,52 @@ let autoRunsRequest = 0;
 let autoRefreshGeneration = 0;
 let autoViewMode = "list";
 let autoAllRuns = [];
+let autoPausedOpen = false;
+const autoJustToggledIds = new Set();
+let autoRunsFilter = "all";
 /* Which side of the page is up: the schedules, or the Flows they can run. */
 let autoPage = "schedules";
 /* What the job in the editor runs: a prompt handed to an agent, or a saved Flow. */
 let autoKind = "agent";
+function autoLocalDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+function autoRunOutcome(run) {
+  if (!run) return "ok";
+  if (run.failure) return "fail";
+  if (run.verdict && !run.verdict.pass) return "fail";
+  if (typeof run.exit_code === "number" && run.exit_code !== 0) return "fail";
+  if (run.skipped || run.missed) return "warn";
+  if (run.completed_at_epoch_ms && run.evidence_dir && !(run.evidence_files > 0)) return "warn";
+  return "ok";
+}
+function autoNeedsAttention(row) {
+  if (!row?.enabled) return null;
+  if (row.flow_changed) {
+    return {
+      kind: "you",
+      word: row.flow_stands
+        ? t("auto.needsApproval", "다시 승인 필요")
+        : t("auto.needsFlow", "Flow 문서 확인 필요"),
+    };
+  }
+  if (row.last_verdict === false) {
+    return { kind: "halt", word: t("auto.lastFailed", "직전 불합격") };
+  }
+  return null;
+}
+function autoLocalTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
+  } catch {
+    return "Local";
+  }
+}
 const _calInitial = new Date();
 let autoCalYear = _calInitial.getFullYear();
 let autoCalMonth = _calInitial.getMonth();
-let autoCalSelectedDate = _calInitial.toISOString().slice(0, 10);
+let autoCalSelectedDate = autoLocalDateKey(_calInitial);
 
 const AUTO_TEMPLATES = {
   "repo-audit": () => ({
@@ -12017,7 +12055,7 @@ async function refreshAutomations() {
     paintFlowDetail(flowBySlug(flowSelected));
   }
   if (selectedAutomation()) void refreshAutomationRuns();
-  void refreshAllAutomationRuns();
+  if (autoViewMode === "calendar") void refreshAllAutomationRuns();
 }
 
 async function refreshAllAutomationRuns() {
@@ -12113,6 +12151,7 @@ function automationAgentLabel(row) {
 function autoVisibleRows() {
   const query = el("auto-search").value.trim().toLocaleLowerCase();
   const rows = automations.filter((row) => {
+    if (autoFilter === "attention" && !autoNeedsAttention(row)) return false;
     if (autoFilter === "enabled" && !row.enabled) return false;
     if (autoFilter === "paused" && row.enabled) return false;
     if (!query) return true;
@@ -12129,12 +12168,69 @@ function autoVisibleRows() {
   });
 }
 
+function paintAutoOwed() {
+  const strip = el("auto-owed");
+  if (!strip) return;
+  const owed = automations
+    .map((row) => ({ row, attention: autoNeedsAttention(row) }))
+    .filter((one) => one.attention !== null);
+  const attentionBtn = document.querySelector('[data-auto-filter="attention"]');
+  if (attentionBtn) attentionBtn.classList.toggle("is-quiet", owed.length === 0);
+  if (owed.length === 0) {
+    strip.hidden = true;
+    if (strip.childElementCount > 0) strip.replaceChildren();
+    return;
+  }
+  strip.hidden = false;
+  const title = document.createElement("span");
+  title.className = "auto-owed-title";
+  title.textContent = t("auto.owedCount", "확인 필요 {{count}}", { count: owed.length });
+  const nodes = [title];
+  for (const { row, attention } of owed.slice(0, 4)) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "auto-owed-chip";
+    chip.dataset.tone = attention.kind;
+    chip.dataset.autoId = row.id;
+    const dot = document.createElement("span");
+    dot.className = "auto-owed-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "auto-owed-name";
+    name.textContent = row.name || t("auto.untitled", "이름 없음");
+    const why = document.createElement("span");
+    why.className = "auto-owed-why";
+    why.textContent = `· ${attention.word}`;
+    chip.append(dot, name, why);
+    chip.addEventListener("click", () => {
+      selectAutomation(row.id, { tab: attention.kind === "halt" ? "runs" : "overview" });
+    });
+    nodes.push(chip);
+  }
+  if (owed.length > 4) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "auto-owed-more";
+    more.textContent = t("auto.owedMore", "+{{count}}", { count: owed.length - 4 });
+    more.addEventListener("click", () => {
+      autoFilter = "attention";
+      for (const held of document.querySelectorAll("[data-auto-filter]")) {
+        held.classList.toggle("is-active", held.dataset.autoFilter === "attention");
+      }
+      paintAutomations();
+    });
+    nodes.push(more);
+  }
+  strip.replaceChildren(...nodes);
+}
+
 function paintAutomations() {
   const initialLoading = autoLoading && automations.length === 0;
   el("auto-loading").hidden = !initialLoading;
   el("auto-refresh").classList.toggle("is-loading", autoLoading);
   el("auto-empty").hidden = initialLoading || automations.length > 0;
   el("auto-catalog").hidden = initialLoading || automations.length === 0;
+  paintAutoOwed();
 
   const isCal = autoViewMode === "calendar";
   const tableEl = el("auto-table");
@@ -12151,33 +12247,96 @@ function paintAutomations() {
   }
 
   const list = el("auto-list");
-  list.replaceChildren();
+  const heldRows = new Map([...list.querySelectorAll(":scope > .auto-row")].map((node) => [node.dataset.autoId, node]));
+  const heldFoldRow = list.querySelector(":scope > .auto-paused-fold-row");
   const rows = autoVisibleRows();
+  const query = el("auto-search").value.trim();
+  const canFoldPaused = autoFilter === "all" && query === "" && !autoSort
+    && rows.some((row) => row.enabled);
+  const standing = [];
+  const paused = [];
   for (const row of rows) {
-    const item = document.createElement("div");
-    item.className = "auto-row";
-    item.setAttribute("role", "row");
-    item.tabIndex = 0;
-    item.setAttribute("aria-selected", row.id === autoSelectedId ? "true" : "false");
+    if (canFoldPaused && !row.enabled && !autoJustToggledIds.has(row.id)) paused.push(row);
+    else standing.push(row);
+  }
+  const paintRow = (row) => {
+    let item = heldRows.get(row.id);
+    if (!item) {
+      item = document.createElement("div");
+      item.className = "auto-row";
+      item.dataset.autoId = row.id;
+      item.setAttribute("role", "row");
+      item.tabIndex = 0;
+      item.innerHTML =
+        '<span class="auto-row-name" role="cell"></span>' +
+        // The five cells that say when and what: columns of the row while the
+        // table is wide, one wrapping line under the name when it is not.
+        '<span class="auto-row-meta" role="presentation">' +
+        '<span class="auto-row-schedule" role="cell"></span>' +
+        '<span class="auto-row-agent" role="cell"></span>' +
+        '<span class="auto-row-project" role="cell"></span>' +
+        '<span class="auto-row-when" role="cell"></span>' +
+        '<span class="auto-row-last" role="cell"></span>' +
+        '</span>' +
+        '<span class="auto-row-switch-cell" role="cell"><button class="auto-row-toggle" type="button" role="switch" data-person-only></button></span>' +
+        '<span class="auto-row-actions" role="cell"></span>';
+      const toggle = item.querySelector(".auto-row-toggle");
+      toggle.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const current = item.__autoRow;
+        if (!current) return;
+        toggle.disabled = true;
+        if (current.enabled) autoJustToggledIds.add(current.id);
+        else autoJustToggledIds.delete(current.id);
+        invoke("enable_automation", { id: current.id, enabled: !current.enabled }, { hand: handNow() })
+          .then((updated) => {
+            automations = updated;
+            paintAutomations();
+            paintAutomationDetail();
+          })
+          .catch(showError)
+          .finally(() => { toggle.disabled = false; });
+      });
+      const actions = item.querySelector(".auto-row-actions");
+      const run = document.createElement("button");
+      run.className = "auto-row-action auto-row-run";
+      run.type = "button";
+      // Running a job now is the person's (`run_automation`).
+      run.dataset.personOnly = "";
+      run.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg>';
+      run.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (item.__autoRow) void runAutomationNow(item.__autoRow);
+      });
+      const edit = document.createElement("button");
+      edit.className = "auto-row-action auto-row-edit";
+      edit.type = "button";
+      edit.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-pencil"></use></svg>';
+      edit.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (item.__autoRow) editAutomation(item.__autoRow);
+      });
+      actions.append(run, edit);
+      const open = () => { if (item.__autoRow) selectAutomation(item.__autoRow.id); };
+      item.addEventListener("click", open);
+      item.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open();
+        }
+      });
+    }
+    item.__autoRow = row;
+    const attention = autoNeedsAttention(row);
+    writeAttribute(item, "aria-selected", row.id === autoSelectedId ? "true" : "false");
     item.classList.toggle("is-active", row.id === autoSelectedId);
     item.classList.toggle("is-off", !row.enabled);
-    item.innerHTML =
-      '<span class="auto-row-name" role="cell"></span>' +
-      // The five cells that say when and what: columns of the row while the
-      // table is wide, one wrapping line under the name when it is not.
-      '<span class="auto-row-meta" role="presentation">' +
-      '<span class="auto-row-schedule" role="cell"></span>' +
-      '<span class="auto-row-agent" role="cell"></span>' +
-      '<span class="auto-row-project" role="cell"></span>' +
-      '<span class="auto-row-when" role="cell"></span>' +
-      '<span class="auto-row-last" role="cell"></span>' +
-      '</span>' +
-      '<button class="auto-row-toggle" type="button" role="switch" data-person-only></button>' +
-      '<span class="auto-row-actions" role="cell"></span>';
-    item.querySelector(".auto-row-name").textContent = row.name || t("auto.untitled", "이름 없음");
-    item.querySelector(".auto-row-schedule").textContent = automationScheduleText(row);
-    item.querySelector(".auto-row-project").textContent = basename(row.workspace);
-    item.querySelector(".auto-row-when").textContent = whenNext(row);
+    if (attention) writeAttribute(item, "data-needs", attention.kind);
+    else item.removeAttribute("data-needs");
+    writeTextContent(item.querySelector(".auto-row-name"), row.name || t("auto.untitled", "이름 없음"));
+    writeTextContent(item.querySelector(".auto-row-schedule"), automationScheduleText(row));
+    writeTextContent(item.querySelector(".auto-row-project"), basename(row.workspace));
+    writeTextContent(item.querySelector(".auto-row-when"), whenNext(row));
     const last = item.querySelector(".auto-row-last");
     last.textContent = autoLastRun(row);
     const runs = document.createElement("span");
@@ -12213,57 +12372,55 @@ function paintAutomations() {
       what.replaceChildren(chip);
     }
     const toggle = item.querySelector(".auto-row-toggle");
-    toggle.setAttribute("aria-checked", row.enabled ? "true" : "false");
-    toggle.setAttribute("aria-label", row.enabled
+    writeAttribute(toggle, "aria-checked", row.enabled ? "true" : "false");
+    writeAttribute(toggle, "aria-label", row.enabled
       ? t("auto.pause", "일시정지")
       : t("auto.resume", "다시 시작"));
-    toggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggle.disabled = true;
-      invoke("enable_automation", { id: row.id, enabled: !row.enabled }, { hand: handNow() })
-        .then((rows) => {
-          automations = rows;
-          paintAutomations();
-          paintAutomationDetail();
-        })
-        .catch(showError)
-        .finally(() => { toggle.disabled = false; });
-    });
-    const actions = item.querySelector(".auto-row-actions");
-    const run = document.createElement("button");
-    run.className = "auto-row-action";
-    run.type = "button";
-    // Running a job now is the person's (`run_automation`).
-    run.dataset.personOnly = "";
-    run.dataset.tip = t("auto.runNow", "지금 실행");
-    run.setAttribute("aria-label", run.dataset.tip);
-    run.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg>';
-    run.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void runAutomationNow(row);
-    });
-    const edit = document.createElement("button");
-    edit.className = "auto-row-action";
-    edit.type = "button";
-    edit.dataset.tip = t("app.edit", "편집");
-    edit.setAttribute("aria-label", edit.dataset.tip);
-    edit.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-pencil"></use></svg>';
-    edit.addEventListener("click", (event) => {
-      event.stopPropagation();
-      editAutomation(row);
-    });
-    actions.append(run, edit);
-    const open = () => selectAutomation(row.id);
-    item.addEventListener("click", open);
-    item.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        open();
-      }
-    });
-    list.appendChild(item);
+    const runBtn = item.querySelector(".auto-row-run");
+    const runTip = t("auto.runNow", "지금 실행");
+    runBtn.dataset.tip = runTip;
+    writeAttribute(runBtn, "aria-label", runTip);
+    const editBtn = item.querySelector(".auto-row-edit");
+    const editTip = t("app.edit", "편집");
+    editBtn.dataset.tip = editTip;
+    writeAttribute(editBtn, "aria-label", editTip);
+    return item;
+  };
+  const wanted = standing.map(paintRow);
+  if (paused.length > 0) {
+    let foldRow = heldFoldRow;
+    let fold = foldRow?.querySelector(".auto-paused-fold");
+    if (!foldRow) {
+      foldRow = document.createElement("div");
+      foldRow.className = "auto-paused-fold-row";
+      foldRow.setAttribute("role", "row");
+      const cell = document.createElement("div");
+      cell.className = "auto-paused-fold-cell";
+      cell.setAttribute("role", "cell");
+      fold = document.createElement("button");
+      fold.type = "button";
+      fold.className = "auto-paused-fold";
+      fold.addEventListener("click", () => {
+        autoPausedOpen = !autoPausedOpen;
+        paintAutomations();
+      });
+      cell.appendChild(fold);
+      foldRow.appendChild(cell);
+    }
+    writeAttribute(fold, "aria-expanded", String(autoPausedOpen));
+    writeTextContent(
+      fold,
+      autoPausedOpen
+        ? t("auto.pausedUnfold", "일시정지 {{count}}개 — 접기", { count: paused.length })
+        : t("auto.pausedFold", "일시정지 {{count}}개 — 펼치기", { count: paused.length }),
+    );
+    wanted.push(foldRow);
+    if (autoPausedOpen) wanted.push(...paused.map(paintRow));
   }
-  el("auto-no-match").hidden = rows.length > 0 || automations.length === 0;
+  reconcileElementOrder(list, wanted);
+  el("auto-no-match").hidden = isCal || rows.length > 0 || automations.length === 0;
+  const keys = el("auto-keys");
+  if (keys) keys.hidden = isCal || rows.length === 0;
 }
 
 function paintAutomationCalendar() {
@@ -12275,11 +12432,26 @@ function paintAutomationCalendar() {
     year: autoCalYear,
     month: autoCalMonth + 1,
   });
+  const tzEl = el("auto-cal-tz");
+  if (tzEl) {
+    writeTextContent(tzEl, t("auto.localTzNotice", "로컬 시간 기준 ({{tz}})", { tz: autoLocalTimeZone() }));
+  }
+  const weekdaysEl = el("auto-cal-weekdays");
+  if (weekdaysEl) {
+    const names = Array.from({ length: WEEKDAY_COUNT }, (_, day) => weekdayName(day));
+    if (weekdaysEl.childElementCount !== WEEKDAY_COUNT) {
+      weekdaysEl.replaceChildren(...names.map((name) => {
+        const span = document.createElement("span");
+        span.setAttribute("role", "columnheader");
+        span.textContent = name;
+        return span;
+      }));
+    } else {
+      names.forEach((name, idx) => writeTextContent(weekdaysEl.children[idx], name));
+    }
+  }
 
-  const today = new Date();
-  const todayMonthPadded = String(today.getMonth() + 1).padStart(2, "0");
-  const todayDayPadded = String(today.getDate()).padStart(2, "0");
-  const todayStr = [today.getFullYear(), todayMonthPadded, todayDayPadded].join("-");
+  const todayStr = autoLocalDateKey(new Date());
 
   const firstDay = new Date(autoCalYear, autoCalMonth, 1).getDay(); // 0: Sun ... 6: Sat
   const daysInMonth = new Date(autoCalYear, autoCalMonth + 1, 0).getDate();
@@ -12289,11 +12461,19 @@ function paintAutomationCalendar() {
 
   const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
   const activeRows = autoVisibleRows();
+  const runsByDate = new Map();
+  for (const run of autoAllRuns) {
+    if (!run.at_epoch_ms) continue;
+    const key = autoLocalDateKey(run.at_epoch_ms);
+    if (!runsByDate.has(key)) runsByDate.set(key, []);
+    runsByDate.get(key).push(run);
+  }
 
   for (let i = 0; i < totalCells; i++) {
     const cell = document.createElement("div");
     cell.className = "auto-cal-cell";
     cell.setAttribute("role", "gridcell");
+    cell.tabIndex = 0;
 
     let cellYear = autoCalYear;
     let cellMonth = autoCalMonth;
@@ -12322,7 +12502,10 @@ function paintAutomationCalendar() {
     const cellMonthPadded = String(cellMonth + 1).padStart(2, "0");
     const cellDayPadded = String(dayNum).padStart(2, "0");
     const dateStr = [cellYear, cellMonthPadded, cellDayPadded].join("-");
-    const dayOfWeek = (firstDay + (i - firstDay)) % 7; // 0: Sun ... 6: Sat
+    const dayOfWeek = i % 7; // 0: Sun ... 6: Sat
+    cell.dataset.date = dateStr;
+    cell.setAttribute("aria-selected", dateStr === autoCalSelectedDate ? "true" : "false");
+    cell.setAttribute("aria-label", `${dateStr} (${weekdayName(dayOfWeek)})`);
 
     if (dateStr === todayStr) {
       cell.classList.add("is-today");
@@ -12338,22 +12521,16 @@ function paintAutomationCalendar() {
     numSpan.textContent = String(dayNum);
     head.appendChild(numSpan);
 
-    // 실행 이력 히트맵 점 표시 (해당 날짜에 실행된 이력)
-    const historyRunsOnDate = autoAllRuns.filter((run) => {
-      if (!run.at_epoch_ms) return false;
-      const rd = new Date(run.at_epoch_ms);
-      const rMonthPadded = String(rd.getUTCMonth() + 1).padStart(2, "0");
-      const rDayPadded = String(rd.getUTCDate()).padStart(2, "0");
-      const rDateStr = [rd.getUTCFullYear(), rMonthPadded, rDayPadded].join("-");
-      return rDateStr === dateStr;
-    });
+    // 실행 이력 히트맵 점 표시 (로컬 날짜 + 단일 결과 판정기)
+    const historyRunsOnDate = runsByDate.get(dateStr) ?? [];
 
     if (historyRunsOnDate.length > 0) {
       const dots = document.createElement("div");
       dots.className = "auto-cal-dots";
-      const hasSuccess = historyRunsOnDate.some((r) => !r.failure && !r.missed);
-      const hasFail = historyRunsOnDate.some((r) => r.failure);
-      const hasMissed = historyRunsOnDate.some((r) => r.missed);
+      const hasSuccess = historyRunsOnDate.some((r) => autoRunOutcome(r) === "ok");
+      const hasFail = historyRunsOnDate.some((r) => autoRunOutcome(r) === "fail");
+      const hasMissed = historyRunsOnDate.some((r) => Boolean(r.missed));
+      const hasSkipped = historyRunsOnDate.some((r) => Boolean(r.skipped) || (autoRunOutcome(r) === "warn" && !r.missed));
       if (hasSuccess) {
         const dot = document.createElement("span");
         dot.className = "auto-cal-dot is-success";
@@ -12366,10 +12543,12 @@ function paintAutomationCalendar() {
         dot.dataset.tip = t("auto.hasFail", "실패한 실행 있음");
         dots.appendChild(dot);
       }
-      if (hasMissed) {
+      if (hasMissed || hasSkipped) {
         const dot = document.createElement("span");
         dot.className = "auto-cal-dot is-missed";
-        dot.dataset.tip = t("auto.hasMissed", "놓친 실행 있음");
+        dot.dataset.tip = hasMissed
+          ? t("auto.hasMissed", "놓친 실행 있음")
+          : t("auto.hasSkipped", "건너뛴 실행 있음");
         dots.appendChild(dot);
       }
       head.appendChild(dots);
@@ -12434,9 +12613,16 @@ function paintAutomationCalendar() {
 
     cell.appendChild(chipsContainer);
 
-    cell.addEventListener("click", () => {
+    const selectCell = () => {
       autoCalSelectedDate = dateStr;
       paintAutomationCalendar();
+    };
+    cell.addEventListener("click", selectCell);
+    cell.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectCell();
+      }
     });
 
     // 빈 셀 더블클릭 시 해당 요일/일정으로 새 자동화 작성 폼 열기
@@ -12501,8 +12687,7 @@ function paintCalendarSelectedPanel(rows) {
 
   if (matching.length === 0) {
     const empty = document.createElement("p");
-    empty.className = "auto-no-match";
-    empty.style.padding = "var(--space-3) 0";
+    empty.className = "auto-no-match auto-cal-empty-note";
     empty.textContent = t("auto.noScheduledOnDate", "선택한 날짜에 예정된 자동화가 없습니다.");
     list.appendChild(empty);
   } else {
@@ -12544,14 +12729,10 @@ function paintCalendarSelectedPanel(rows) {
     }
   }
 
-  // 과거 실행 이력 목록 표시
+  // 과거 실행 이력 목록 표시 (로컬 날짜 기준)
   const historyRunsOnSelected = autoAllRuns.filter((run) => {
     if (!run.at_epoch_ms) return false;
-    const rd = new Date(run.at_epoch_ms);
-    const rMonthPadded = String(rd.getUTCMonth() + 1).padStart(2, "0");
-    const rDayPadded = String(rd.getUTCDate()).padStart(2, "0");
-    const rDateStr = [rd.getUTCFullYear(), rMonthPadded, rDayPadded].join("-");
-    return rDateStr === autoCalSelectedDate;
+    return autoLocalDateKey(run.at_epoch_ms) === autoCalSelectedDate;
   });
 
   if (historyRunsOnSelected.length > 0) {
@@ -12564,8 +12745,9 @@ function paintCalendarSelectedPanel(rows) {
 
     for (const run of historyRunsOnSelected) {
       const parentAuto = automations.find((a) => a.id === run.automation_id);
-      const isFail = Boolean(run.failure);
-      const isMissed = Boolean(run.missed);
+      const outcome = autoRunOutcome(run);
+      const isFail = outcome === "fail";
+      const isWarn = outcome === "warn";
       const hItem = document.createElement("div");
       hItem.className = "auto-cal-selected-item";
 
@@ -12573,10 +12755,7 @@ function paintCalendarSelectedPanel(rows) {
       left.className = "auto-cal-selected-left";
 
       const dot = document.createElement("span");
-      dot.className = `auto-cal-dot ${isFail ? "is-fail" : isMissed ? "is-missed" : "is-success"}`;
-      dot.style.width = "8px";
-      dot.style.height = "8px";
-      dot.style.flex = "none";
+      dot.className = `auto-cal-dot auto-cal-dot--lg ${isFail ? "is-fail" : isWarn ? "is-missed" : "is-success"}`;
 
       const info = document.createElement("div");
       info.className = "auto-cal-selected-info";
@@ -12587,11 +12766,17 @@ function paintCalendarSelectedPanel(rows) {
 
       const subSpan = document.createElement("span");
       subSpan.className = "auto-cal-selected-sub";
-      const verdict = isFail
-        ? t("auto.runError", "실행 실패")
-        : isMissed
-          ? t("auto.runMissed", "놓침 — 그 시각에 창이 돌지 않음")
-          : t("auto.runSuccess", "실행 완료");
+      const verdict = run.verdict && !run.verdict.pass
+        ? t("flow.fail", "불합격")
+        : run.failure
+          ? t("auto.runError", "실행 실패")
+          : typeof run.exit_code === "number" && run.exit_code !== 0
+            ? t("auto.runFailed", "실패 — exit {{code}}", { code: run.exit_code })
+            : run.skipped
+              ? t("auto.runSkipped", "건너뜀 — precheck 실패")
+              : run.missed
+                ? t("auto.runMissed", "놓침 — 그 시각에 창이 돌지 않음")
+                : t("auto.runSuccess", "실행 완료");
       subSpan.textContent = `${verdict} · ${basename(run.root || "")}`;
 
       info.append(nameSpan, subSpan);
@@ -12602,7 +12787,7 @@ function paintCalendarSelectedPanel(rows) {
       openBtn.type = "button";
       openBtn.textContent = t("auto.runOpen", "보기");
       openBtn.addEventListener("click", () => {
-        if (run.automation_id) selectAutomation(run.automation_id);
+        if (run.automation_id) selectAutomation(run.automation_id, { tab: "runs" });
       });
 
       hItem.append(left, openBtn);
@@ -12612,9 +12797,10 @@ function paintCalendarSelectedPanel(rows) {
   }
 }
 
-function selectAutomation(id) {
+function selectAutomation(id, { tab = "overview" } = {}) {
   autoSelectedId = id;
-  autoDetailTab = "overview";
+  autoDetailTab = tab === "runs" ? "runs" : "overview";
+  autoRunsFilter = "all";
   autoRuns = [];
   paintAutomations();
   paintAutomationDetail();
@@ -12732,36 +12918,69 @@ async function refreshAutomationRuns() {
 
 function paintAutomationRuns() {
   const list = el("auto-runs-list");
-  list.replaceChildren();
   el("auto-runs-empty").hidden = autoRuns.length > 0;
-  for (const run of autoRuns) {
+  const toolbar = el("auto-runs-toolbar");
+  const issues = autoRuns.filter((run) => autoRunOutcome(run) !== "ok").length;
+  if (toolbar) {
+    toolbar.hidden = autoRuns.length === 0;
+    for (const button of toolbar.querySelectorAll("[data-auto-run-filter]")) {
+      const kind = button.dataset.autoRunFilter;
+      button.classList.toggle("is-active", kind === autoRunsFilter);
+      if (kind === "issue") button.classList.toggle("is-quiet", issues === 0);
+    }
+  }
+  const shown = autoRuns.filter((run) => {
+    if (autoRunsFilter === "issue") return autoRunOutcome(run) !== "ok";
+    if (autoRunsFilter === "ok") return autoRunOutcome(run) === "ok";
+    return true;
+  });
+  const noMatch = el("auto-runs-no-match");
+  if (noMatch) noMatch.hidden = autoRuns.length === 0 || shown.length > 0;
+  const held = new Map([...list.querySelectorAll(":scope > .auto-run-row")].map((node) => [node.dataset.runKey, node]));
+  const wanted = [];
+  for (const run of shown) {
+    const runKey = `${run.automation_id ?? ""}:${run.id ?? run.at_epoch_ms}`;
+    const signature = JSON.stringify([
+      locale, run.at_epoch_ms, run.root, run.ended_at_epoch_ms, run.completed_at_epoch_ms,
+      run.exit_code, run.unwitnessed, run.failure, run.skipped, run.missed, run.verdict,
+      run.result, run.report, run.evidence_dir, run.evidence_files, run.made_worktree,
+      Boolean(run.skipped || run.missed || run.failure ? null : tabOfTerm(run.term)),
+    ]);
+    const existing = held.get(runKey);
+    if (existing && existing.dataset.runSig === signature) {
+      wanted.push(existing);
+      continue;
+    }
     const item = document.createElement("div");
     item.className = "auto-run-row";
+    item.dataset.runKey = runKey;
+    item.dataset.runSig = signature;
     item.innerHTML = '<span class="auto-run-when"></span><span class="auto-run-where"></span><span class="auto-run-state"></span>';
     item.querySelector(".auto-run-when").textContent = runClock(run.at_epoch_ms);
     item.querySelector(".auto-run-where").textContent = basename(run.root);
     const state = item.querySelector(".auto-run-state");
+    let inlineWhy = null;
+    let skipOutput = null;
     if (run.failure) {
       state.className = "auto-run-ended auto-run-failed";
       state.textContent = t("auto.runError", "실행 실패");
-      state.dataset.tip = [
+      const parts = [
         run.failure.stage,
         run.failure.error,
         run.failure.worktree_cleanup_error,
-      ]
-        .filter(Boolean)
-        .join("\n");
+      ].filter(Boolean);
+      state.dataset.tip = parts.join("\n");
+      inlineWhy = parts.join(" · ") || null;
     } else if (run.skipped) {
       const why = state;
       why.className = "auto-run-skipped";
       why.textContent = t("auto.runSkipped", "건너뜀 — precheck 실패");
-      why.dataset.tip = [
-        run.skipped.command,
-        run.skipped.timed_out
-          ? t("auto.runSkippedTimeout", "시간 초과")
-          : `exit ${run.skipped.exit_code ?? "?"}`,
-        run.skipped.output,
-      ].filter(Boolean).join("\n");
+      const code = run.skipped.timed_out
+        ? t("auto.runSkippedTimeout", "시간 초과")
+        : `exit ${run.skipped.exit_code ?? "?"}`;
+      why.dataset.tip = [run.skipped.command, code, run.skipped.output].filter(Boolean).join("\n");
+      inlineWhy = [run.skipped.command, code].filter(Boolean).join(" · ") || null;
+      skipOutput = run.skipped.output?.trim() ? run.skipped.output : null;
     } else if (run.missed) {
       // Nights the window was not running for (t-77376). The row is dated at
       // the last of them; the first is in the tip.
@@ -12854,16 +13073,42 @@ function paintAutomationRuns() {
     }
     let detail = null;
     const failedWhy = judged && !run.verdict.pass && run.verdict.reason ? run.verdict.reason : null;
-    if (run.result || run.evidence_dir || failedWhy) {
+    const shownWhy = failedWhy ?? inlineWhy;
+    if (run.result || run.evidence_dir || shownWhy || skipOutput) {
       detail = document.createElement("div");
       detail.className = "auto-run-detail";
     }
-    // Why it failed, under the row: the state column is a word wide.
-    if (failedWhy) {
+    // Why it failed or was skipped, under the row: the state column is a word wide.
+    if (shownWhy) {
       const why = document.createElement("p");
       why.className = "auto-run-result auto-run-why";
-      why.textContent = failedWhy;
+      why.textContent = shownWhy;
       detail.appendChild(why);
+      if (inlineWhy) {
+        const copyText = [inlineWhy, skipOutput].filter(Boolean).join("\n");
+        const copy = document.createElement("button");
+        copy.className = "btn auto-run-copy";
+        copy.type = "button";
+        copy.textContent = t("auto.copyWhy", "원인 복사");
+        copy.addEventListener("click", () => {
+          void clipboardText.write(copyText);
+          copy.textContent = t("auto.copied", "복사됨");
+          setTimeout(() => {
+            if (copy.isConnected) copy.textContent = t("auto.copyWhy", "원인 복사");
+          }, 1200);
+        });
+        actions.appendChild(copy);
+      }
+    }
+    if (skipOutput) {
+      const out = document.createElement("details");
+      out.className = "auto-run-skip-out";
+      const summary = document.createElement("summary");
+      summary.textContent = t("auto.skipOutput", "사전 점검 출력");
+      const pre = document.createElement("pre");
+      pre.textContent = skipOutput;
+      out.append(summary, pre);
+      detail.appendChild(out);
     }
     if (run.result) {
       const result = document.createElement("p");
@@ -12930,8 +13175,9 @@ function paintAutomationRuns() {
     }
     item.appendChild(actions);
     if (detail) item.appendChild(detail);
-    list.appendChild(item);
+    wanted.push(item);
   }
+  reconcileElementOrder(list, wanted);
 }
 
 /* " · 증거 N개" after a state word, or nothing when the run left none. */
@@ -13778,6 +14024,28 @@ el("auto-view-list-btn")?.addEventListener("click", () => {
 el("auto-view-cal-btn")?.addEventListener("click", () => {
   autoViewMode = "calendar";
   paintAutomations();
+  void refreshAllAutomationRuns();
+});
+for (const button of document.querySelectorAll("[data-auto-run-filter]")) {
+  button.addEventListener("click", () => {
+    autoRunsFilter = button.dataset.autoRunFilter;
+    paintAutomationRuns();
+  });
+}
+autoView.addEventListener("keydown", (event) => {
+  if (autoView.hidden || !el("auto-editor-scrim").hidden) return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const tag = event.target?.tagName;
+  const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable;
+  if (typing || autoPage !== "schedules" || autoSelectedId !== null || autoViewMode !== "list") return;
+  if (event.key !== "j" && event.key !== "k" && event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const rows = [...el("auto-list").querySelectorAll(":scope > .auto-row")];
+  if (rows.length === 0) return;
+  event.preventDefault();
+  const at = rows.indexOf(document.activeElement);
+  const step = event.key === "j" || event.key === "ArrowDown" ? 1 : -1;
+  const next = at < 0 ? (step > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, at + step));
+  rows[next].focus();
 });
 el("auto-cal-prev")?.addEventListener("click", () => {
   autoCalMonth--;
@@ -14389,7 +14657,13 @@ function setAutoOpen(on) {
     recordNavVisit(activeWorktreePath);
   }
   autoView.hidden = !on;
-  if (!on) closeAutoForm();
+  if (!on) {
+    closeAutoForm();
+    autoAllRuns = [];
+    autoJustToggledIds.clear();
+    autoPausedOpen = false;
+    autoRunsFilter = "all";
+  }
   paintRouteWidth();
   paintNavCurrent();
   if (!on && termFloat.hidden) keySink.focus();
