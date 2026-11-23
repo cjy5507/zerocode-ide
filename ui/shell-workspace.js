@@ -2202,6 +2202,9 @@ let guideCountsAsked = "";
  * paths rather than indices, so the choice survives the list being rebuilt
  * around it. */
 const expandedWorktrees = new Set();
+/* Kanban lanes whose resting cards the person opened back up — folded by
+ * default like the inbox's old notices, never erased. */
+const workspaceBoardRestOpen = new Set();
 /* Open a workspace out, or fold it back to its summary. The sidebar's twist
  * and the board card's 「+N」 flip this one set through this one function, so
  * the two surfaces never disagree about whether a workspace is opened out. */
@@ -8830,6 +8833,12 @@ function workspaceBoardCardNode(worktree, index, animate) {
   // nothing to say, and a narrow row lifts its doors into an empty git line.
   node.dataset.git = landing || review || offer ? "facts" : worktree.is_folder !== false ? "none" : "empty";
   node.dataset.agents = rowsAt.length > 0 ? "some" : liveState === "active" ? "shell" : "none";
+  // What waits on the person wears the view's edge — 「이 뷰가 고른 것」, not
+  // a state colour (the state still reads in the activity cell's own signal).
+  if (workspaceBoardChipOf(worktree).you) node.dataset.needs = "you";
+  // A resting card says its hour twice — the age chip and 「쉬는 중 · N시간 전」.
+  // The kanban keeps the sentence and folds the chip; the row keeps both cells.
+  if (liveState === "empty" && rowsAt.length === 0) node.dataset.resting = "1";
 
   // The doors stay in sight, quiet words at the row's end (NN/g: a hidden
   // menu is found a fifth less often).
@@ -9078,6 +9087,46 @@ function workspaceBoardEmptyRow(held = null) {
   return row;
 }
 
+/* A card with nothing to say: the checkout is empty of work, no agent row
+ * stands in it, nothing is unread or selected, and git has no word for it.
+ * In the kanban these fold under one 「쉬는 중 N」 line (the inbox's old-
+ * notice fold, same grammar); a search or a press opens them again. */
+function workspaceBoardResting(worktree) {
+  return workspaceBoardWorktreeState(worktree) === "empty"
+    && (workspaceBoardAgentRows.get(worktree.path) ?? []).length === 0
+    && !workspaceBoardUnread(worktree.path)
+    && !workspaceBoardSelected.has(worktree.path)
+    && !boardReviews.has(worktree.path)
+    && workspaceBoardLandingChip(worktree) === null;
+}
+
+/* The lane's cards, split into what stands and what rests — a search or an
+ * open fold puts every card back in the standing half. */
+function workspaceBoardLaneShown(group) {
+  const open = workspaceBoardQuery.trim() !== "" || workspaceBoardRestOpen.has(group.status.id);
+  const standing = [];
+  const resting = [];
+  for (const worktree of group.shown) {
+    (open || !workspaceBoardResting(worktree) ? standing : resting).push(worktree);
+  }
+  return { standing, resting };
+}
+
+function workspaceBoardRestfoldNode(status, count) {
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.className = "workspace-board-restfold";
+  fold.dataset.restfold = status.id;
+  fold.textContent = t("workspaceBoard.restFold", "쉬는 중 {{count}}개 — 펼치기", { count });
+  fold.setAttribute("aria-expanded", "false");
+  fold.dataset.tip = t("workspaceBoard.restFoldTip", "일이 비어 있는 워크스페이스 {{count}}개가 접혀 있습니다", { count });
+  fold.onclick = () => {
+    workspaceBoardRestOpen.add(status.id);
+    paintWorkspaceBoard();
+  };
+  return fold;
+}
+
 function workspaceBoardLaneNode(group, animate) {
   const { status, all, shown } = group;
   const lane = document.createElement("section");
@@ -9141,9 +9190,13 @@ function workspaceBoardLaneNode(group, animate) {
   if (shown.length === 0) {
     cards.appendChild(workspaceBoardEmptyRow());
   } else {
-    shown.forEach((worktree, index) => {
+    const parts = workspaceBoardLaneShown(group);
+    parts.standing.forEach((worktree, index) => {
       cards.appendChild(workspaceBoardCardNode(worktree, index, animate));
     });
+    if (parts.resting.length > 0) {
+      cards.appendChild(workspaceBoardRestfoldNode(status, parts.resting.length));
+    }
   }
   const bottomAdd = document.createElement("button");
   bottomAdd.type = "button";
@@ -9193,7 +9246,8 @@ function reconcileWorkspaceBoardLane(lane, group, animate) {
       .filter((node) => node.classList.contains("workspace-board-card"))
       .map((node) => [node.dataset.worktreePath, node]),
   );
-  const wanted = shown.map((worktree, index) => {
+  const parts = workspaceBoardLaneShown(group);
+  const wanted = parts.standing.map((worktree, index) => {
     const signature = workspaceBoardCardPaintSignature(worktree);
     const held = existing.get(worktree.path);
     const card = held?.dataset.paintSignature === signature
@@ -9202,6 +9256,16 @@ function reconcileWorkspaceBoardLane(lane, group, animate) {
     card.style.setProperty("--workspace-card-index", String(index));
     return card;
   });
+  if (parts.resting.length > 0) {
+    const held = cards.querySelector(":scope > .workspace-board-restfold");
+    if (held?.dataset.restfold === group.status.id) {
+      writeTextContent(held, t("workspaceBoard.restFold", "쉬는 중 {{count}}개 — 펼치기", { count: parts.resting.length }));
+      writeAttribute(held, "data-tip", t("workspaceBoard.restFoldTip", "일이 비어 있는 워크스페이스 {{count}}개가 접혀 있습니다", { count: parts.resting.length }));
+      wanted.push(held);
+    } else {
+      wanted.push(workspaceBoardRestfoldNode(group.status, parts.resting.length));
+    }
+  }
   if (shown.length === 0) {
     wanted.push(workspaceBoardEmptyRow(cards.querySelector(":scope > .workspace-board-empty")));
   }
@@ -9476,6 +9540,50 @@ function paintWorkspaceBoardSummary(counts, total) {
   }
 }
 
+/* 「확인 필요」 chip counts how many; this strip says WHO, so the question
+ * the board answers — 지금 누가 나를 필요로 하는가 — is read off the head
+ * before any lane is scanned. A chip opens its workspace; past four names a
+ * 「+N」 press is the same filter the count chip already was. */
+function paintWorkspaceBoardOwed(worktrees) {
+  const strip = el("workspace-board-owed");
+  const owed = worktrees.filter((worktree) => workspaceBoardChipOf(worktree).you);
+  strip.hidden = owed.length === 0;
+  strip.replaceChildren();
+  if (owed.length === 0) return;
+  const word = document.createElement("strong");
+  word.className = "workspace-board-owed-word";
+  word.textContent = `${t("workspaceBoard.needsYou", "확인 필요")} ${owed.length}`;
+  strip.appendChild(word);
+  const LIMIT = 4;
+  for (const worktree of owed.slice(0, LIMIT)) {
+    const state = workspaceBoardWorktreeState(worktree);
+    const mark = worktreeMark(worktree.path, state);
+    const lane = workspaceStateWord(mark.indicator);
+    const who = document.createElement("button");
+    who.type = "button";
+    who.className = "workspace-board-owed-who";
+    who.textContent = lane ? `${worktreeDisplayName(worktree)} · ${lane}` : worktreeDisplayName(worktree);
+    const tip = worktreeStateLabel(mark.said, mark.phase);
+    who.dataset.tip = tip;
+    who.setAttribute("aria-label", `${who.textContent} — ${tip}`);
+    who.onclick = () => void activateWorktree(worktree);
+    strip.appendChild(who);
+  }
+  if (owed.length > LIMIT) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "workspace-board-owed-more";
+    more.textContent = `+${owed.length - LIMIT}`;
+    more.setAttribute("aria-label", t("workspaceBoard.owedMore", "나머지 {{count}}개 — 확인 필요만 봅니다", { count: owed.length - LIMIT }));
+    more.dataset.tip = more.getAttribute("aria-label");
+    more.onclick = () => {
+      workspaceBoardChip = "you";
+      paintWorkspaceBoard();
+    };
+    strip.appendChild(more);
+  }
+}
+
 function paintWorkspaceBoard({ animate = false } = {}) {
   if (!workspaceBoardShowing()) return;
   paintWorkbenchNavigation(el("workspace-board"), "workspaces");
@@ -9567,6 +9675,7 @@ function paintWorkspaceBoard({ animate = false } = {}) {
   const shown = groups.reduce((total, group) => total + group.shown.length, 0);
   const total = groups.reduce((sum, group) => sum + group.all.length, 0);
   paintWorkspaceBoardSummary(counts, total);
+  paintWorkspaceBoardOwed(boardWorktrees);
   const count = el("workspace-board-search-count");
   count.hidden = workspaceBoardQuery.trim() === "" && !workbenchScopes.workspaces && workspaceBoardChip === null;
   count.textContent = count.hidden ? "" : `${shown} / ${total}`;

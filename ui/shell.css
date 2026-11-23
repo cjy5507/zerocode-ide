@@ -35762,6 +35762,57 @@ input[type="search"]::-webkit-search-cancel-button {
   margin: 0;
 }
 
+/* 「답할 일」 띠 — the chips count it above; here the names stand, each a
+ * door into its workspace. The one blue is spent because this is what waits
+ * on the person reading the screen. */
+.workspace-board-owed {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--signal-you-ground);
+  box-shadow: var(--shadow-border);
+}
+
+.workspace-board-owed[hidden] {
+  display: none;
+}
+
+.workspace-board-owed-word {
+  flex: none;
+  padding: 0 var(--space-1);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.workspace-board-owed-who,
+.workspace-board-owed-more {
+  display: inline-flex;
+  align-items: center;
+  max-width: 32ch;
+  min-height: calc(var(--control-height-sm) - var(--space-1));
+  padding: 0 var(--space-2);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-owed-who:hover,
+.workspace-board-owed-more:hover {
+  background: var(--row-hover);
+}
+
 .workspace-board-total {
   margin-right: var(--space-1);
   color: var(--ink-label);
@@ -36681,6 +36732,42 @@ input[type="search"]::-webkit-search-cancel-button {
   display: block;
   justify-self: end;
   grid-area: age;
+}
+
+/* A resting card's hour is said once — the activity cell's 「쉬는 중 · N시간
+ * 전」 carries it, so the age chip folds away in the kanban (the list row
+ * keeps both of its own cells). */
+.workspace-board[data-view="kanban"] .workspace-board-card[data-resting] .workspace-board-card-age {
+  display: none;
+}
+
+/* What waits on the person wears the view's edge — 「이 뷰가 고른 것」. The
+ * state itself still reads in the activity cell's own signal word+shape. */
+.workspace-board[data-view="kanban"] .workspace-board-card[data-needs="you"] {
+  box-shadow: var(--shadow-border-small), 0 0 0 var(--rule-width) var(--workbench-edge);
+}
+
+/* The resting fold — quiet cards under one line, pressed to stand again.
+ * Same grammar as the inbox's old-notice fold. */
+.workspace-board-restfold {
+  display: flex;
+  min-height: var(--control-height-sm);
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-glyph);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-restfold:hover {
+  background: var(--row-hover);
+  color: var(--ink-mist);
 }
 
 .workspace-board[data-view="kanban"] .workspace-board-card:not([data-git="facts"]) .workspace-board-card-git,

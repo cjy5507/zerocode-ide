@@ -65,6 +65,23 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     // The board is one of the stage's tabs (2026-11-08): it stands on the
     // strip with its name, its door is pressed, and nothing of its own closes
     // it — the tab's ×, ⌘W and the door do, as for every page.
+    // 「답할 일」 띠 — the 「확인 필요」 chip counts it; the strip says WHO:
+    // acme/0 holds a needs-attention pane, so its chip stands with the lane's
+    // own word, and pressing it activates that workspace.
+    const owed = await page.evaluate(() => {
+      const strip = document.getElementById("workspace-board-owed");
+      const chip = strip.querySelector(".workspace-board-owed-who");
+      return {
+        hidden: strip.hidden,
+        word: strip.querySelector(".workspace-board-owed-word")?.textContent ?? null,
+        who: chip?.textContent ?? null,
+        tip: chip?.dataset.tip ?? null,
+      };
+    });
+    ok("the owed strip names whose turn it is beside the count",
+      owed.hidden === false && owed.word?.includes("1") &&
+      Boolean(owed.who) && Boolean(owed.tip),
+      JSON.stringify(owed));
     const asTab = await page.evaluate(() => {
       const tab = tabs.find((held) => held.id === "workspaces");
       return {
@@ -185,11 +202,31 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     })));
     const emptyLanes = lanes.filter((lane) => lane.empty === "true");
     const fullLanes = lanes.filter((lane) => lane.empty === "false");
+    // A lane's resting cards — empty checkout, no agent, nothing unread, no
+    // git word — fold under one 「쉬는 중 N」 line (the inbox's old-notice
+    // fold): three stand (a working agent, a needs-attention pane, an open
+    // PR), eighteen rest. Pressing the line stands them again, and a search
+    // never leaves a match folded.
+    const restfolds = await page.evaluate(() => ({
+      standing: document.querySelectorAll(".workspace-board-card").length,
+      folds: [...document.querySelectorAll(".workspace-board-restfold")].map((fold) => fold.textContent),
+      needs: [...document.querySelectorAll('.workspace-board-card[data-needs="you"]')].map((card) => card.dataset.worktreePath),
+    }));
+    ok("quiet cards fold under 「쉬는 중 N」 and a waiting card keeps the view's edge",
+      restfolds.standing === 3 && restfolds.folds.length === 1 &&
+      restfolds.folds.every((word) => word.includes("쉬는 중")) &&
+      restfolds.needs.length === 1 && restfolds.needs[0] === "/projects/acme/0",
+      JSON.stringify(restfolds));
+    for (const fold of await page.locator(".workspace-board-restfold").all()) await fold.click();
+    ok("pressing a resting fold stands its cards again",
+      await page.locator(".workspace-board-card").count() === 21,
+      String(await page.locator(".workspace-board-card").count()));
+    await page.evaluate(() => { workspaceBoardRestOpen.clear(); paintWorkspaceBoard(); });
     ok("kanban keeps every stage as a destination, folds the empty ones and keeps the saved planning assignments",
       lanes.length === 4 && emptyLanes.length === 2 && fullLanes.length === 2 &&
       emptyLanes.every((lane) => lane.add > 0 && lane.cards === "none") &&
       fullLanes.every((lane) => lane.cards !== "none") &&
-      await page.locator(".workspace-board-card").count() === 21, JSON.stringify(lanes));
+      await page.locator(".workspace-board-card").count() === 3, JSON.stringify(lanes));
     ok("the born stages speak the window's language",
       lanes.map((lane) => lane.name).join(",") === "할 일,진행 중,검토 중,완료", JSON.stringify(lanes.map((lane) => lane.name)));
 
@@ -449,6 +486,15 @@ export async function testWorkspaceBoard(browser, origin, ok) {
         return "feature/agent-board";
       };
     });
+    // An owed chip activates the workspace it names — the same road the
+    // card's own press takes (set_active_worktree with its path).
+    await page.click("#workspace-board-owed .workspace-board-owed-who");
+    const owedTarget = await page.evaluate(() => window.__WORKSPACE_CHANGE_TARGET__ ?? null);
+    ok("an owed chip opens its workspace", owedTarget === "/projects/acme/0", owedTarget);
+    // The chip moved the stage to the workspace's pane; stand the board's
+    // tab back in front for the next door's press.
+    await page.evaluate(() => setWorkspaceBoardOpen(true));
+    await page.waitForSelector("#workspace-board:not([hidden]) .workspace-board-card");
     await page.click('[data-worktree-path="/projects/zerocode/1"] .workspace-board-changes');
     await page.waitForSelector("#activity-scm", { state: "visible" });
     const target = await page.evaluate(() => ({ path: window.__WORKSPACE_CHANGE_TARGET__,
