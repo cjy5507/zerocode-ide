@@ -71,6 +71,7 @@ tools-test:
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
     t tools/release/tests/test_lock_answer.py; \
+    t tools/release/tests/test_link_node_modules.py; \
     t tools/release/tests/test_workspace_units.py; \
     t tools/release/tests/test_changed_crates.py; \
     t tools/release/tests/test_zo_ide_touched.py; \
@@ -387,6 +388,8 @@ pre-handin suites='':
     done
     hint='the lines above name the file and the rule; take the value out or mask it, then just pii-check'
     step pii just pii-check
+    # Use the main checkout's Node dependencies if this worktree has none.
+    python3 tools/release/link_node_modules.py
     hint='fix the failed Node checks above; install the pinned dependencies with npm ci if they are missing'
     step package-runner just package-runner-test
     hint='fix the failed real-runner policy checks above (these contact no provider)'

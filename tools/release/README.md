@@ -22,9 +22,12 @@ maxfiles`, 256). What lane.sh exports to its gates goes along too — the
 table's `CARGO_INCREMENTAL` (0) and `WINDOW_SHARDS`, and the repository's own
 `node_modules` as `NODE_PATH` — unless the caller set its own; so does a caller's
 `CARGO_TARGET_DIR`. `NODE_PATH` reaches only `require`: the harnesses' ES
-`import`s need a `node_modules` beside the code, so a worktree without one
-links the repository's, as the lane links its scratch's. A test red in the lane and green in a pane is
-run this way first. `tests/test_lane.py LaneEnv` pins it.
+`import`s need a `node_modules` beside the code. Before the Node checks,
+`just pre-handin` links the main checkout's `node_modules` into a worktree
+with no entry there. It reports the result and leaves any existing entry
+in place, including a broken link. The lane links its own scratch checkout.
+A test red in the lane and green in a pane is run this way first.
+`tests/test_lane.py LaneEnv` pins the lane environment.
 
 ## The window harness, split (2026-11-12)
 

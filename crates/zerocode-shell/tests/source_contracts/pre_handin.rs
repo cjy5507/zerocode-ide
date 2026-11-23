@@ -107,6 +107,27 @@ fn stage_one_runs_quick_checks_before_the_source_contract_build() {
     );
 }
 
+#[test]
+fn pre_handin_prepares_node_modules_between_privacy_and_the_first_node_check() {
+    let body = body();
+    let position = |command: &str| {
+        body.lines()
+            .position(|line| line.trim() == command)
+            .unwrap_or_else(|| panic!("no command {command}\n{body}"))
+    };
+    let setup = "python3 tools/release/link_node_modules.py";
+    let privacy = position("step pii just pii-check");
+    let link = position(setup);
+    let package_runner = position("step package-runner just package-runner-test");
+    assert!(privacy < link && link < package_runner, "{body}");
+    assert!(
+        steps(&body)
+            .iter()
+            .all(|(_, command)| !command.contains(setup)),
+        "the dependency link must stay out of the stage summary:\n{body}"
+    );
+}
+
 /// The workspaces the script names (its `WORKSPACES = (...)` line, the one
 /// place that knows them): the root and the others.
 fn script_workspaces() -> Vec<String> {
