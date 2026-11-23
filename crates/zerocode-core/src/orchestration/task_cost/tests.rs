@@ -9,6 +9,8 @@ mod boundaries;
 const MINUTE: i64 = 60_000;
 const OPUS: &str = "claude-opus-5-5";
 const SOL: &str = "gpt-5.6-sol";
+const SESSION_START: &str = "2026-09-26T00:00:00Z";
+const SESSION_END: &str = "2026-09-26T01:00:00Z";
 
 fn task_cost(run: &Run, task_id: &str, sessions: &SessionBook, jev: JevTally) -> TaskCost {
     super::task_cost(
@@ -107,10 +109,23 @@ fn deviated(attempt: &str) -> Value {
 
 fn claude_session(id: &str, model: &str, tokens: [i64; 4]) -> usage_stats::Session {
     let [input, output, cache_read, cache_write] = tokens;
+    let cost_usd = usage_stats::cost_of_turn(&usage_stats::SourceTurn {
+        session_id: id.to_owned(),
+        timestamp: SESSION_START.to_owned(),
+        model: Some(model.to_owned()),
+        cwd: None,
+        git_branch: None,
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+        cache_write_1h_tokens: 0,
+        dedupe_key: None,
+    });
     usage_stats::Session {
         session_id: id.to_string(),
-        first_timestamp: "2026-09-26T00:00:00Z".to_string(),
-        last_timestamp: "2026-09-26T01:00:00Z".to_string(),
+        first_timestamp: SESSION_START.to_owned(),
+        last_timestamp: SESSION_END.to_owned(),
         model: Some(model.to_string()),
         last_cwd: Some("/Users/dev/repo".to_string()),
         last_git_branch: Some("wt/t-1".to_string()),
@@ -121,13 +136,7 @@ fn claude_session(id: &str, model: &str, tokens: [i64; 4]) -> usage_stats::Sessi
         total_cache_write_tokens: cache_write,
         location_breakdown: Vec::new(),
         cost: model_prices::CostTotal {
-            cost_usd: usage_stats::estimate_cost_usd(
-                Some(model),
-                input,
-                output,
-                cache_read,
-                cache_write,
-            ),
+            cost_usd,
             unpriced_requests: 0,
         },
     }
@@ -151,8 +160,8 @@ fn codex_session(
 ) -> usage_ledger::Session {
     usage_ledger::Session {
         session_id: id.to_string(),
-        first_timestamp: "2026-09-26T00:00:00Z".to_string(),
-        last_timestamp: "2026-09-26T01:00:00Z".to_string(),
+        first_timestamp: SESSION_START.to_owned(),
+        last_timestamp: SESSION_END.to_owned(),
         model: models.last().map(|model| (*model).to_string()),
         last_cwd: Some("/Users/dev/repo".to_string()),
         event_count: 2,
@@ -170,12 +179,15 @@ fn codex_session(
                 total_tokens: input + output,
             })
             .collect(),
-        estimated_cost_usd: usage_stats_codex::estimate_cost_usd(
-            models.last().copied(),
-            input,
-            cached,
-            output,
-        ),
+        estimated_cost_usd: models.last().and_then(|model| {
+            usage_stats_codex::request_cost(
+                model,
+                model_prices::pricing_day(SESSION_START)?,
+                u64::try_from(input).ok()?,
+                u64::try_from(cached).ok()?,
+                u64::try_from(output).ok()?,
+            )
+        }),
         unpriced_requests: 0,
     }
 }
@@ -465,14 +477,8 @@ fn each_conversation_is_priced_at_its_own_model_and_the_task_sums_them() {
     assert_eq!(generation.output_tokens, 20_000 + 7_000, "{cost:?}");
     assert_eq!(generation.cache_read_tokens, 300_000 + 30_000, "{cost:?}");
     assert_eq!(generation.cache_write_tokens, 40_000, "{cost:?}");
-    let claude_usd = usage_stats::estimate_cost_usd(Some(OPUS), 1_000, 20_000, 300_000, 40_000)
-        .expect("opus is priced");
-    let codex_usd = usage_stats_codex::estimate_cost_usd(Some(SOL), 50_000, 30_000, 7_000)
-        .expect("sol is priced");
-    assert!(
-        close(generation.usd, claude_usd + codex_usd),
-        "{cost:?} against {claude_usd} + {codex_usd}"
-    );
+    // The September 26 catalog prices these conversations at $0.664 and $0.232.
+    assert!(close(generation.usd, 0.664 + 0.232), "{cost:?}");
     assert_eq!(generation.usd_reason, None);
 }
 

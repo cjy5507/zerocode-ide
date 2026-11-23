@@ -20,6 +20,32 @@ pub struct ZoRequestUsage {
     pub ttl: String,
 }
 
+impl ZoRequestUsage {
+    /// Price a ledger row on its UTC date using the reported cache durations.
+    #[must_use]
+    pub fn cost_usd(&self) -> Option<f64> {
+        let cache_write = u64::try_from(self.cache_creation).ok()?;
+        let cache_write_1h = match self.cache_creation_1h {
+            Some(tokens) if tokens <= cache_write => tokens,
+            None if cache_write == 0 || matches!(self.ttl.as_str(), "" | "5m") => 0,
+            // Older rows with mixed cache writes did not record the split.
+            _ => return None,
+        };
+        model_prices::request_cost(
+            &self.model,
+            model_prices::day_at_millis(self.ts_unix_ms),
+            model_prices::RequestTokens {
+                input: u64::try_from(self.input_uncached).ok()?,
+                output: u64::try_from(self.output).ok()?,
+                cache_read: u64::try_from(self.cache_read).ok()?,
+                cache_write,
+                cache_write_1h,
+            },
+        )
+        .map(model_prices::Cost::total_cost_usd)
+    }
+}
+
 /// What a request journal's reader could not hand over whole (t-79891): a
 /// journal longer than the read limit is read from its end, and a line that
 /// is not a usage row is skipped rather than dropping every row beside it.
@@ -89,7 +115,7 @@ impl SessionBook {
                 }
             }
             total_usd = total_usd
-                .zip(price(row))
+                .zip(row.cost_usd())
                 .map(|(total, cost)| total + cost)
                 .filter(|cost| cost.is_finite());
         }
@@ -101,28 +127,6 @@ impl SessionBook {
             (first <= last).then_some((first, last)),
         );
     }
-}
-
-fn price(row: &ZoRequestUsage) -> Option<f64> {
-    let cache_write = u64::try_from(row.cache_creation).ok()?;
-    let cache_write_1h = match row.cache_creation_1h {
-        Some(tokens) if tokens <= cache_write => tokens,
-        None if cache_write == 0 || matches!(row.ttl.as_str(), "" | "5m") => 0,
-        // Older rows with mixed cache writes did not record the split.
-        _ => return None,
-    };
-    model_prices::request_cost(
-        &row.model,
-        model_prices::day_at_millis(row.ts_unix_ms),
-        model_prices::RequestTokens {
-            input: u64::try_from(row.input_uncached).ok()?,
-            output: u64::try_from(row.output).ok()?,
-            cache_read: u64::try_from(row.cache_read).ok()?,
-            cache_write,
-            cache_write_1h,
-        },
-    )
-    .map(model_prices::Cost::total_cost_usd)
 }
 
 #[cfg(test)]
@@ -147,7 +151,7 @@ mod tests {
         book.read_zo_usage("session", &rows, ReadGaps::default(), 20);
         let measured = book.spend(UsageSource::Zo, "session").unwrap();
         assert_eq!(measured.counters(), Some([200, 50, 100, 0]));
-        assert_eq!(measured.usd, price(&row));
+        assert_eq!(measured.usd, row.cost_usd());
         assert!(measured.usd.is_some_and(|cost| cost > 0.0));
         let mut changed = row.clone();
         changed.output += 1;

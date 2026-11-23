@@ -465,15 +465,26 @@ mod pricing_contract {
             ("typesafe", &["typesafe.ai"][..]),
         ] {
             for row in data[key].as_array().unwrap() {
-                let host = row["source"]
-                    .as_str()
-                    .and_then(|url| url.strip_prefix("https://"))
-                    .and_then(|url| url.split('/').next())
-                    .unwrap();
-                assert!(domains.contains(&host), "{row}");
+                for source in std::iter::once(&row["source"]).chain(row.get("effective_source")) {
+                    let host = source
+                        .as_str()
+                        .and_then(|url| url.strip_prefix("https://"))
+                        .and_then(|url| url.split('/').next())
+                        .unwrap();
+                    assert!(domains.contains(&host), "{row}");
+                }
                 let effective = pricing_day(row["effective_from"].as_str().unwrap()).unwrap();
                 let verified = pricing_day(row["verified_on"].as_str().unwrap()).unwrap();
-                assert!(effective <= verified);
+                assert!(
+                    effective <= verified || row.get("effective_source").is_some(),
+                    "{row}"
+                );
+                if let Some(end) = row.get("effective_through") {
+                    assert!(
+                        effective <= pricing_day(end.as_str().unwrap()).unwrap(),
+                        "{row}"
+                    );
+                }
             }
         }
     }
@@ -506,6 +517,59 @@ mod pricing_contract {
             ..RequestTokens::default()
         };
         assert!((cost("claude-sonnet-4-6", "2026-11-23", writes) - 0.00975).abs() < 1e-10);
+    }
+
+    #[test]
+    fn gemini_pro_keeps_historical_rates_and_follows_announced_flash_rates() {
+        let tokens = RequestTokens {
+            input: 200_000,
+            cache_read: 1_000,
+            output: 1_000,
+            ..RequestTokens::default()
+        };
+        for (date, expected_usd) in [
+            ("2026-11-30", 0.51525),
+            ("2026-12-01", 0.153_825),
+            ("2026-12-31", 0.153_825),
+            ("2027-01-01", 0.30765),
+        ] {
+            let cost = request_cost("gemini-2.5-pro", pricing_day(date).unwrap(), tokens)
+                .unwrap()
+                .total_cost_usd();
+            assert!((cost - expected_usd).abs() < 1e-10, "{date}: {cost}");
+        }
+    }
+
+    #[test]
+    fn fable_and_mythos_are_priced_from_their_release_day() {
+        let tokens = RequestTokens {
+            input: 1_000,
+            ..RequestTokens::default()
+        };
+        for model in ["claude-fable-5-1", "claude-mythos-5-1"] {
+            assert!(request_cost(model, days_from_civil(2026, 8, 31), tokens).is_none());
+            assert!(request_cost(model, days_from_civil(2026, 9, 1), tokens).is_some());
+        }
+    }
+
+    #[test]
+    fn haiku_three_prices_verified_cache_usage_and_leaves_hour_writes_unknown() {
+        let tokens = RequestTokens {
+            input: 1_000,
+            cache_read: 1_000,
+            cache_write: 1_000,
+            ..RequestTokens::default()
+        };
+        let day = days_from_civil(2026, 4, 19);
+        let cost = request_cost("claude-3-haiku-20240307", day, tokens)
+            .unwrap()
+            .total_cost_usd();
+        assert!((cost - 0.000_587_5).abs() < 1e-10);
+        let hour_write = RequestTokens {
+            cache_write_1h: 1_000,
+            ..tokens
+        };
+        assert!(request_cost("claude-3-haiku-20240307", day, hour_write).is_none());
     }
 
     #[test]

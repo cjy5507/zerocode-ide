@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
+use zerocode_core::orchestration::task_cost::ZoRequestUsage;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct PlanUsage {
@@ -58,15 +59,20 @@ fn price_requests(rows: &[api::RequestLedgerRow], attempt: &str, work_model: &st
     let mut usage = PlanUsage::default();
     let mut efforts = std::collections::BTreeSet::new();
     for row in unique.values() {
-        let price = api::model_price(&row.model)?;
-        if row.cache_creation > 0 && !matches!(row.ttl.as_str(), "" | "5m") { return None; }
+        let request_usage = ZoRequestUsage {
+            seq: row.seq,
+            ts_unix_ms: i64::try_from(row.ts_unix_ms).ok()?,
+            model: row.model.clone(),
+            input_uncached: i64::from(row.input_uncached),
+            cache_read: i64::from(row.cache_read),
+            cache_creation: i64::from(row.cache_creation),
+            cache_creation_1h: row.cache_creation_1h.map(u64::from),
+            output: i64::from(row.output),
+            ttl: row.ttl.clone(),
+        };
+        usage.usd += request_usage.cost_usd()?;
         let input = u64::from(row.input_uncached) + u64::from(row.cache_read) + u64::from(row.cache_creation);
-        if input > 200_000 { return None; }
         usage.tokens = usage.tokens.checked_add(input + u64::from(row.output))?;
-        usage.usd += (f64::from(row.input_uncached) * price.input
-            + f64::from(row.cache_read) * price.cache_read
-            + f64::from(row.cache_creation) * price.cache_write
-            + f64::from(row.output) * price.output) / 1_000_000.0;
         usage.requests += 1;
         if api::resolve_model_alias(&row.model) == api::resolve_model_alias(work_model) {
             efforts.insert(row.effort.clone());
@@ -82,8 +88,9 @@ mod tests {
     use super::*;
 
     fn request() -> api::RequestLedgerRow {
+        // July 20, 2026 UTC, before the model's promotional price started.
         serde_json::from_value(serde_json::json!({
-            "seq": 1, "ts_unix_ms": 10, "model": "gpt-5.6-sol", "provider": "openai",
+            "seq": 1, "ts_unix_ms": 1_784_505_600_000_u64, "model": "gpt-5.6-sol", "provider": "openai",
             "cache_creation": 0, "cache_read": 100, "input_uncached": 200,
             "output": 50, "message_count": 2, "broke": false,
             "attempt": "session@1", "effort": "high"
@@ -97,10 +104,23 @@ mod tests {
         unrelated.attempt = "session@2".into();
         let usage = price_requests(&[row.clone(), row, unrelated], "session@1", "gpt-5.6-sol").unwrap();
         assert_eq!((usage.tokens, usage.requests), (350, 1));
-        let price = api::model_price("gpt-5.6-sol").unwrap();
-        let expected = (200.0 * price.input + 100.0 * price.cache_read + 50.0 * price.output) / 1_000_000.0;
-        assert!((usage.usd - expected).abs() < 1e-10);
+        assert!((usage.usd - 0.00255).abs() < 1e-10);
         assert_eq!(usage.work_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn long_request_uses_its_model_rates_and_reported_cache_split() {
+        let mut row = request();
+        row.ts_unix_ms = 1_795_392_000_000; // November 23, 2026 UTC.
+        row.model = "claude-haiku-5-5".into();
+        row.provider = "anthropic".into();
+        row.input_uncached = 100_000;
+        row.cache_creation = 200;
+        row.cache_creation_1h = Some(100);
+        row.ttl = "5m+1h".into();
+        let usage = price_requests(&[row], "session@1", "claude-haiku-5-5").unwrap();
+        assert_eq!((usage.tokens, usage.requests), (100_350, 1));
+        assert!((usage.usd - 0.050_292_5).abs() < 1e-10);
     }
 
     #[test]
