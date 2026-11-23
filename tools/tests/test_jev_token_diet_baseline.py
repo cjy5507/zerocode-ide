@@ -10,6 +10,7 @@ import importlib.util
 import json
 import sys
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -228,6 +229,21 @@ class Arithmetic(unittest.TestCase):
         self.assertEqual(september.row("gpt-5.6-sol")[1]["effective_from"], "2026-08-21")
         self.assertEqual(july.row("claude-opus-5-5"), (None, None), "not yet in force on that day")
         self.assertIsNone(july.cost("claude-opus-5-5", 1, 1, 1))
+
+    def test_a_row_ends_on_its_last_day_and_a_request_is_priced_on_its_own_day(self):
+        prices = diet.Prices(diet.PRICE_TABLE)
+        last = prices.row("gpt-5.6-sol", "2026-08-20")[1]
+        self.assertEqual(last["effective_through"], "2026-08-20")
+        self.assertEqual(prices.row("gpt-5.6-sol", "2026-08-21")[1]["effective_from"], "2026-08-21")
+        ended = prices.row("gpt-5.6-sol", "2026-08-21")[1]["effective_through"]
+        after = (date.fromisoformat(ended) + timedelta(days=1)).isoformat()
+        self.assertEqual(prices.row("gpt-5.6-sol", after), (None, None), "no row is in force after the last one ends")
+        session = build([user("go"), assistant(text("s"), read=0, uncached=1_000_000, output=0, model="gpt-5.6-sol")])
+        session.requests[0].day = "2026-07-20"
+        carry = diet.Carry(session, prices)
+        self.assertAlmostEqual(carry.request(0).usd, last["rates"]["input"])
+        session.requests[0].day = "2026-09-01"
+        self.assertAlmostEqual(carry.request(0).usd, prices.row("gpt-5.6-sol", "2026-09-01")[1]["rates"]["input"])
 
 
 if __name__ == "__main__":

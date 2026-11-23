@@ -374,32 +374,39 @@ class Prices:
     Only the matching this corpus needs: an Anthropic id matches a row whose
     model or alias it equals or extends with a date; an OpenAI id, a tier from
     the table's `reasoning_tiers` dropped from its end, a row whose model or
-    alias it equals. Of a model's dated rows the one in force on `day` (today,
-    UTC, unless given) prices it. Anything else, or a rate the table leaves
-    unknown for tokens the request spent, is unpriced — never free — and the
-    report says how much of the sample that leaves out.
+    alias it equals. A request is priced by the row in force on its own UTC
+    day — from `effective_from` through `effective_through` when the row has
+    one — and a request with no stamp by the row in force on `day` (today, UTC,
+    unless given). Anything else, or a rate the table leaves unknown for tokens
+    the request spent, is unpriced — never free — and the report says how much
+    of the sample that leaves out.
     """
 
     MILLION = 1_000_000
 
     def __init__(self, path: Path, day: str | None = None):
         table = json.loads(path.read_text(encoding="utf-8"))
-        day = day or time.strftime("%Y-%m-%d", time.gmtime())
+        self.day = day or time.strftime("%Y-%m-%d", time.gmtime())
         self.tiers = tuple(table.get("reasoning_tiers", ()))
-        self.rows: dict[str, dict] = {}
-        for row in sorted(table["rows"], key=lambda one: one["effective_from"]):
-            if row["effective_from"] <= day:  # a later row in force replaces an earlier one
-                for name in (row["model"], *row.get("aliases", ())):
-                    self.rows[name] = row
+        self.rows: dict[str, list[dict]] = defaultdict(list)
+        for row in table["rows"]:
+            for name in (row["model"], *row.get("aliases", ())):
+                self.rows[name].append(row)
         self.jev = {row_id: row for row in table["typesafe"] for row_id in row["ids"]}
 
-    def row(self, model: str | None):
+    def in_force(self, name: str, day: str | None) -> dict | None:
+        day = day or self.day
+        live = [row for row in self.rows.get(name, ())
+                if row["effective_from"] <= day and (row.get("effective_through") is None or day <= row["effective_through"])]
+        return max(live, key=lambda row: row["effective_from"], default=None)
+
+    def row(self, model: str | None, day: str | None = None):
         name = re.sub(r"\[[^\]]*\]$", "", (model or "").lower())
         if name.startswith("claude-"):
-            row = self.rows.get(name) or self.rows.get(re.sub(r"-\d{8}$", "", name))
+            row = self.in_force(name, day) or self.in_force(re.sub(r"-\d{8}$", "", name), day)
             return ("anthropic", row) if row else (None, None)
         if name.startswith("gpt-"):
-            row = self.rows.get(name) or self.rows.get(self.untiered(name))
+            row = self.in_force(name, day) or self.in_force(self.untiered(name), day)
             return ("openai", row) if row else (None, None)
         return None, None
 
@@ -409,8 +416,9 @@ class Prices:
                 return name[: -len(tier) - 1]
         return name
 
-    def cost(self, model: str | None, fresh: float, read: float, output: float) -> float | None:
-        kind, row = self.row(model)
+    def cost(self, model: str | None, fresh: float, read: float, output: float,
+             day: str | None = None) -> float | None:
+        kind, row = self.row(model, day)
         if row is None:
             return None
         rates = row["rates"]
@@ -498,6 +506,7 @@ class Request:
     output: int
     thinking: int | None
     in_window: bool = True
+    day: str | None = None  # the UTC day of its message stamp, which prices it
     effort: str | None = None
     ttl: str | None = None
     ledger_broke: bool = False
@@ -851,7 +860,8 @@ class SessionBuilder:
         request = Request(index=index, model=model, family=provider_family(model), turn=turn.index,
                           read=values[0], write=values[1], uncached=values[2], output=values[3],
                           thinking=details.get("thinking_tokens") if isinstance(details, dict) else None,
-                          in_window=stamp is None or since_ms <= stamp <= until_ms, calls=new_calls)
+                          in_window=stamp is None or since_ms <= stamp <= until_ms, calls=new_calls,
+                          day=time.strftime("%Y-%m-%d", time.gmtime(stamp / 1000)) if stamp else None)
         if row:
             request.effort = row.get("effort")
             request.ttl = row.get("ttl")
@@ -1213,8 +1223,8 @@ class Carry:
         self.request_indices = [r.index for r in session.requests]
         self.breaks = [n for n, r in enumerate(session.requests) if r.brk]
 
-    def priced(self, model: str, fresh: float, read: float, output: float) -> Cost:
-        usd = self.prices.cost(model, fresh, read, output)
+    def priced(self, request: Request, fresh: float, read: float, output: float) -> Cost:
+        usd = self.prices.cost(request.model, fresh, read, output, request.day)
         return Cost(fresh=fresh, read=read, output=output, usd=usd or 0.0)
 
     def block(self, tokens: float, index: int, *, cleared: bool = False, within_turn: bool = False,
@@ -1237,11 +1247,11 @@ class Carry:
         carrying = end - start + 1
         fresh = tokens * (1 + len(breaks))
         read = tokens * max(0, carrying - 1 - len(breaks))
-        return self.priced(requests[start].model, fresh, read, 0.0)
+        return self.priced(requests[start], fresh, read, 0.0)
 
     def request(self, number: int) -> Cost:
         request = self.session.requests[number]
-        return self.priced(request.model, request.write + request.uncached, request.read, request.output)
+        return self.priced(request, request.write + request.uncached, request.read, request.output)
 
 
 def result_tokens(session: Session, fits: dict, call: Call) -> float:
@@ -1264,7 +1274,7 @@ def baseline(sessions: list[Session], fits: dict, prices: Prices, links: AgentLi
     out: dict = {}
 
     families = Counter(r.family for _, r in requests)
-    priced = sum(1 for _, r in requests if prices.row(r.model)[1])
+    priced = sum(1 for _, r in requests if prices.row(r.model, r.day)[1])
     out["sample"] = {
         "sessions": len(mains), "subagent_sessions": len(agents), "turns": len(turns),
         "turn_kinds": dict(Counter(t.kind for _, t in turns)),
@@ -1272,7 +1282,7 @@ def baseline(sessions: list[Session], fits: dict, prices: Prices, links: AgentLi
         "families": dict(families.most_common()),
         "models": dict(Counter(r.model for _, r in requests).most_common()),
         "priced_request_share": round(share(priced, len(requests)) or 0.0, 3),
-        "priced_input_share": round(share(sum(r.total_in for _, r in requests if prices.row(r.model)[1]),
+        "priced_input_share": round(share(sum(r.total_in for _, r in requests if prices.row(r.model, r.day)[1]),
                                           sum(r.total_in for _, r in requests)) or 0.0, 3),
         "compactions": sum(len(s.compactions) for s in mains),
         "effort_joined_requests": sum(1 for _, r in requests if r.effort),
@@ -1624,7 +1634,7 @@ def seats(sessions: list[Session], fits: dict, prices: Prices, jev: dict, links:
                 saved = request.thinking * max(0.0, 1 - lowest / levels[request.effort])
                 if saved:
                     counts["tool_free_requests_above_lowest_effort"] += 1
-                    a.claim(f"{session.key}:thinking:{number}", carry.priced(request.model, 0.0, 0.0, saved))
+                    a.claim(f"{session.key}:thinking:{number}", carry.priced(request, 0.0, 0.0, saved))
     think_table = {f"{m}/{e}": v for (m, e), v in sorted(think_p50.items())}
     ceiling = 0.0
     for session in sessions:
