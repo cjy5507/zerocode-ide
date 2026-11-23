@@ -16924,8 +16924,14 @@ ok(
 /* 워크스페이스 보드는 에이전트 상태판과 다른 표면이다. 사람의 상태 배치가
  * 저장되고, 검색·고정·열 편집·키보드 너비 조절이 한 정본을 따라가는지 실제
  * 레이아웃과 HTML drag payload로 걷는다. */
+await installHarnessWaits(page);
 const workspaceBoard = await page.evaluate(async () => {
   const seen = {};
+  const until = window.__UNTIL__;
+  const workPath = "/r/work";
+  const defaultStatus = DEFAULT_WORKSPACE_BOARD_STATUSES[0].id;
+  const reviewStatus = "in-review";
+  const openedLanes = [];
   // The project-list default and fit mode have their own coverage. Exercise
   // the manual-width kanban's existing drag/pin/resize settings contract here.
   const initialMode = workspaceBoardMode;
@@ -16943,7 +16949,7 @@ const workspaceBoard = await page.evaluate(async () => {
       shown: 0, hidden: [], prompt: false, inbox: [] },
     worktrees: [
       bare("/r/main", "main", true, true, 40),
-      bare("/r/work", "feature/work", false, false, 30),
+      bare(workPath, "feature/work", false, false, 30),
       bare("/r/review", "feature/review", false, false, 20),
       bare("/r/done", "feature/done", false, false, 10),
     ],
@@ -16952,7 +16958,7 @@ const workspaceBoard = await page.evaluate(async () => {
     statuses: DEFAULT_WORKSPACE_BOARD_STATUSES.map((status) => ({ ...status })),
     cards: {
       "/r/main": { status: "todo", pinned: true },
-      "/r/review": { status: "in-review", pinned: false },
+      "/r/review": { status: reviewStatus, pinned: false },
       "/r/done": { status: "completed", pinned: false },
     },
     column_width: 308,
@@ -17005,16 +17011,32 @@ const workspaceBoard = await page.evaluate(async () => {
     window.__WBOARD_WIDTH__ = width;
     return snapshot();
   };
+  const waitForSave = async (act, label) => {
+    const revision = settingsRevision;
+    act();
+    await until(() => settingsRevision > revision && settingsMutationsInFlight === 0, label);
+  };
   applySettingsSnapshot(snapshot());
   await refreshWorktrees();
-  document.getElementById("nav-board").click();
-  await new Promise((done) => setTimeout(done, 120));
   const board = document.getElementById("workspace-board");
+  const lane = (status) => board.querySelector(`.workspace-board-lane[data-workspace-status="${status}"]`);
+  const lanePaths = (status) => [...lane(status).querySelectorAll(".workspace-board-card")]
+    .map((card) => card.dataset.worktreePath);
+  const workCard = (status) => lane(status)?.querySelector(`.workspace-board-card[data-worktree-path="${workPath}"]`);
+  const revealWorkCard = async (status) => {
+    const fold = lane(status)?.querySelector(".workspace-board-restfold");
+    if (!workCard(status) && fold) {
+      fold.click();
+      openedLanes.push(status);
+    }
+    await until(() => workCard(status), `workspace card in ${status}`);
+    return workCard(status);
+  };
+  const boardReady = () => !board.hidden && lane(defaultStatus);
+  document.getElementById("nav-board").click();
+  await until(boardReady, "workspace board lanes");
   const labels = () => [...board.querySelectorAll(".workspace-board-lane-name")]
     .map((node) => node.textContent);
-  const lanePaths = (status) => [...board.querySelectorAll(
-    `.workspace-board-lane[data-workspace-status="${status}"] .workspace-board-card`,
-  )].map((card) => card.dataset.worktreePath);
   seen.open = !board.hidden && document.getElementById("nav-board").getAttribute("aria-pressed");
   seen.agentSeparate = document.getElementById("nav-agents") !== null;
   // The four born stages are said in the language the window speaks here
@@ -17027,17 +17049,15 @@ const workspaceBoard = await page.evaluate(async () => {
   };
   seen.born = born;
   seen.labels = labels();
-  // A card with no status of its own lands in the FIRST stage, not a fixed
-  // "in-progress" — the board's default was rectified there to stop every
-  // unstatused card crowding one lane (c769c50a). /r/main shares that stage
-  // but is pinned, so it sits in the pin zone, leaving /r/work alone in it.
-  seen.defaultLane = lanePaths(DEFAULT_WORKSPACE_BOARD_STATUSES[0].id);
+  // A card without an assigned status lands in the first stage. Reveal the
+  // resting card there before checking its placement and node identity.
+  const steadyCard = await revealWorkCard(defaultStatus);
+  const steadyLane = lane(defaultStatus);
+  seen.defaultLane = lanePaths(defaultStatus);
   seen.pinnedBadge = Boolean(board.querySelector('[data-worktree-path="/r/main"] .workspace-board-card-pin'));
-  const steadyLane = board.querySelector('[data-workspace-status="in-progress"]');
-  const steadyCard = steadyLane?.querySelector('[data-worktree-path="/r/work"]');
   paintWorkspaceBoard();
-  seen.stableLane = board.querySelector('[data-workspace-status="in-progress"]') === steadyLane;
-  seen.stableCard = steadyLane?.querySelector('[data-worktree-path="/r/work"]') === steadyCard;
+  seen.stableLane = lane(defaultStatus) === steadyLane;
+  seen.stableCard = workCard(defaultStatus) === steadyCard;
   const laneScroller = document.getElementById("workspace-board-lanes");
   const boardRect = board.getBoundingClientRect();
   seen.horizontal = laneScroller.scrollWidth > laneScroller.clientWidth;
@@ -17053,25 +17073,24 @@ const workspaceBoard = await page.evaluate(async () => {
   seen.searchCount = document.getElementById("workspace-board-search-count").textContent;
   document.getElementById("workspace-board-search-clear").click();
 
-  const drag = (path, target) => {
-    const source = board.querySelector(`[data-worktree-path="${path}"]`);
+  const drag = (source, target) => {
     const dataTransfer = new DataTransfer();
     source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer }));
     target.dispatchEvent(new DragEvent("dragover", { bubbles: true, dataTransfer }));
     target.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer }));
     source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer }));
   };
-  drag("/r/work", board.querySelector('[data-workspace-status="in-review"]'));
-  await new Promise((done) => setTimeout(done, 100));
-  seen.moved = lanePaths("in-review");
+  await waitForSave(() => drag(workCard(defaultStatus), lane(reviewStatus)), "workspace move saved");
+  const movedCard = await revealWorkCard(reviewStatus);
+  seen.moved = lanePaths(reviewStatus);
   seen.moveWrite = window.__WBOARD_ITEM__;
-  drag("/r/work", document.getElementById("workspace-board-pin"));
-  await new Promise((done) => setTimeout(done, 100));
-  seen.pinned = Boolean(board.querySelector('[data-worktree-path="/r/work"] .workspace-board-card-pin'));
+  await waitForSave(() => drag(movedCard, document.getElementById("workspace-board-pin")), "workspace pin saved");
+  seen.pinned = Boolean(workCard(reviewStatus)?.querySelector(".workspace-board-card-pin"));
+  seen.pinWrite = window.__WBOARD_ITEM__;
 
   const resize = board.querySelector(".workspace-board-column-resize");
-  resize.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-  await new Promise((done) => setTimeout(done, 80));
+  await waitForSave(() => resize.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
+    "workspace column width saved");
   seen.width = getComputedStyle(board).getPropertyValue("--workspace-board-column-width").trim();
   seen.widthWrite = window.__WBOARD_WIDTH__;
 
@@ -17081,20 +17100,17 @@ const workspaceBoard = await page.evaluate(async () => {
   let rows = [...document.querySelectorAll(".workspace-board-status-row")];
   const firstName = rows[0].querySelector(".workspace-board-status-name");
   firstName.value = "Backlog";
-  firstName.dispatchEvent(new Event("blur"));
-  await new Promise((done) => setTimeout(done, 80));
+  await waitForSave(() => firstName.dispatchEvent(new Event("blur")), "workspace status rename saved");
   seen.renamed = labels()[0];
   rows = [...document.querySelectorAll(".workspace-board-status-row")];
-  rows.find((row) => row.querySelector(".workspace-board-status-name").value === born.done)
-    ?.querySelector(".is-left")?.click();
-  await new Promise((done) => setTimeout(done, 80));
+  const moveLeft = rows.find((row) => row.querySelector(".workspace-board-status-name").value === born.done)
+    .querySelector(".is-left");
+  await waitForSave(() => moveLeft.click(), "workspace status order saved");
   seen.reordered = labels();
-  document.getElementById("workspace-board-add-status").click();
-  await new Promise((done) => setTimeout(done, 80));
+  await waitForSave(() => document.getElementById("workspace-board-add-status").click(), "new workspace status saved");
   seen.added = labels().length;
   rows = [...document.querySelectorAll(".workspace-board-status-row")];
-  rows.at(-1).querySelector(".is-danger").click();
-  await new Promise((done) => setTimeout(done, 80));
+  await waitForSave(() => rows.at(-1).querySelector(".is-danger").click(), "workspace status removal saved");
   seen.removed = labels().length;
 
   // The board is a stage tab (2026-11-08): its door closes it as it opened
@@ -17103,11 +17119,13 @@ const workspaceBoard = await page.evaluate(async () => {
   seen.closed = !tabs.some((tab) => tab.id === "workspaces") &&
     document.getElementById("nav-board").getAttribute("aria-pressed") === "false";
   document.getElementById("nav-board").click();
-  await new Promise((done) => setTimeout(done, 80));
-  seen.persisted = lanePaths("in-review").includes("/r/work") &&
-    Boolean(board.querySelector('[data-worktree-path="/r/work"] .workspace-board-card-pin'));
+  await until(boardReady, "reopened workspace board lanes");
+  // Closing the board clears selection, so the saved card may fold again.
+  const reopenedCard = await revealWorkCard(reviewStatus);
+  seen.persisted = Boolean(reopenedCard.querySelector(".workspace-board-card-pin"));
 
   setWorkspaceBoardOpen(false);
+  for (const status of openedLanes) workspaceBoardRestOpen.delete(status);
   workspaceBoardSettings = initialBoard;
   workspaceBoardMode = initialMode;
   workspaceBoardFit = initialFit;
@@ -17133,6 +17151,7 @@ ok(
     workspaceBoard.searchCards === 1 && workspaceBoard.searchCount === "1 / 4" &&
     workspaceBoard.moved.includes("/r/work") &&
     workspaceBoard.moveWrite?.status === "in-review" && workspaceBoard.pinned &&
+    workspaceBoard.pinWrite?.pinned === true &&
     workspaceBoard.width === "328px" && workspaceBoard.widthWrite === 328 &&
     workspaceBoard.renamed === "Backlog" &&
     workspaceBoard.reordered.join() === ["Backlog", workspaceBoard.born.progress,
