@@ -180,10 +180,9 @@ impl CacheRates {
     /// row prices — nothing is planned for a price nobody wrote down.
     #[must_use]
     pub fn for_anthropic_model(model: &str) -> Option<Self> {
-        let rate = model_prices::anthropic_rate(model)?;
-        let (five_minute_write, one_hour_write) = model_prices::anthropic_cache_write_rates();
+        let (read, five_minute_write, one_hour_write) = model_prices::cache_multipliers(model)?;
         Some(Self {
-            read: rate.cache_read,
+            read,
             five_minute_write,
             one_hour_write,
         })

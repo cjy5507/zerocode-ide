@@ -315,6 +315,21 @@ pub fn price(model: &str) -> Option<Price> {
     price_at(model, today())
 }
 
+/// Cache read, short write, and one-hour write as multiples of input.
+/// The cache planner needs all three for a meaningful comparison.
+#[must_use]
+pub fn cache_multipliers(model: &str) -> Option<(f64, f64, f64)> {
+    let rates = catalog().row(model, Some(today()))?.rates;
+    if rates.input <= 0.0 {
+        return None;
+    }
+    Some((
+        rates.cache_read? / rates.input,
+        rates.cache_write? / rates.input,
+        rates.cache_write_1h? / rates.input,
+    ))
+}
+
 /// The catalog ID, for callers that need to group equivalent spellings.
 #[must_use]
 pub fn model_key(model: &str) -> Option<&'static str> {

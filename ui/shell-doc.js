@@ -506,7 +506,7 @@ function tokensSlice(held, provider, range, scope) {
     if (row.cost !== null) sum.cost = (sum.cost ?? 0) + row.cost;
     const unknown = row.unpricedRequests || (row.cost === null ? row.turns : 0);
     sum.unpricedRequests += unknown;
-    if (unknown > 0) unpriced.add(row.model);
+    if (row.cost === null || unknown > 0) unpriced.add(row.model);
     for (const [into2, key, word] of [
       [byModel, row.model, row.model],
       [byPlace, row.project, row.label],

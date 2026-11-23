@@ -51552,7 +51552,7 @@ ok(
     tokensScreen.noReReadOnFilter &&
     tokensScreen.cardCount === 8 &&
     tokensScreen.reuseSaid === "75%" && tokensScreen.coldSaid === "43%" &&
-    tokensScreen.pairSaid === "3 / 7" && tokensScreen.costSaid === "$1.75" &&
+    tokensScreen.pairSaid === "3 / 7" && tokensScreen.costSaid === "$1.75 · 모름 1건 포함" &&
     tokensScreen.saysUnpriced && tokensScreen.saysUndated && tokensScreen.saysLeftOut &&
     tokensScreen.saysEstimate && tokensScreen.status.length > 0,
   JSON.stringify(tokensScreen),

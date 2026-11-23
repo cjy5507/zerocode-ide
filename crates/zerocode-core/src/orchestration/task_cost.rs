@@ -54,7 +54,7 @@ use serde_json::Value;
 use super::{Dispatch, MessageKind, Run, TaskStatus, attempt_time, coordinator_take};
 use crate::agent::AgentKind;
 use crate::jev::{self, JevUse, summary};
-use crate::{usage_ledger, usage_stats, usage_stats_codex};
+use crate::{usage_ledger, usage_stats};
 
 mod session_attribution;
 pub use session_attribution::SessionAttribution;
