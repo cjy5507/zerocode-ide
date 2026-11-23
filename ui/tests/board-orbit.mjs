@@ -52,7 +52,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, openWindowTestPage, recordBootPhases } from "./window-boot.mjs";
 import { installBoardWaits } from "./board-waits.mjs";
 import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
 import { frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
@@ -1970,18 +1970,30 @@ export function mainNameFixture({ held = false, scheduledNamed = false } = {}) {
   return { lead: LEAD, asked: ASKED, path };
 }
 
+/* One readiness wait gets the former board-settle and label budgets together.
+ * The first frame may follow the graph model because Three.js loads on demand. */
+const ORBIT_MAIN_NAME_READY_MS = ORBIT_SETTLE_MS + ORBIT_ACTION_MS;
+
+async function openMainNameOrbit(page, fixture) {
+  // A boot that is still restoring tabs can hide the board when its first terminal takes focus.
+  await page.waitForFunction(() => window.__BOOT_PHASES__.includes("browser_tabs_restored"));
+  const opened = await page.evaluate(mainNameFixture, fixture);
+  await page.waitForFunction(
+    (term) => agentOrbitFrames > 0
+      && document.querySelector(`#board-view:not([hidden]) [data-orbit-key="agent:term:${term}"]`)
+      && document.querySelector(`.wt-agent[data-term="${term}"] .wt-agent-name`),
+    opened.lead, { timeout: ORBIT_MAIN_NAME_READY_MS },
+  );
+  return opened;
+}
+
 /* 조율자 판의 이름은 어디서나 하나다: 사이드바의 행, 상황판의 카드와 상세 패널, 입체 보기의
  * 이름표, 한 줄 요약의 주어 — 모두 앞의 뜻 있는 요청이고 「계속」은 어디에도 없다. 요약은
  * 이미 있는 문장 그대로 지시한 작업의 수를 말한다(새 문구 0). */
 export async function testOrbitMainName(browser, origin, ok, { held = false } = {}) {
-  const { page, faults } = await openWindowTestPage(browser, origin);
+  const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
   try {
-    await installBoardWaits(page, { settleMs: ORBIT_SETTLE_MS });
-    await installOrbitCounters(page);
-    const { lead, asked } = await page.evaluate(mainNameFixture, { held });
-    await page.evaluate(() => window.__BOARD_SETTLED__());
-    await page.waitForFunction((key) => document.querySelector(`#board-view [data-orbit-key="${key}"]`),
-      `agent:term:${lead}`, { timeout: ORBIT_ACTION_MS });
+    const { lead, asked } = await openMainNameOrbit(page, { held });
     const named = await page.evaluate(({ term, key }) => {
       const view = docHost(boardTab().pane, "board");
       const model = agentGraphModels.get(view);
@@ -2019,17 +2031,12 @@ export async function testOrbitMainName(browser, origin, ok, { held = false } = 
  * 2회차의 두 장면(예약 점검 글이 들어온 뒤 — 고치기 전 `scheduledNamed`, 뒤 `held`). */
 async function shootMainName(browser, origin, dir, fixture = {}) {
   mkdirSync(dir, { recursive: true });
-  const { page } = await openWindowTestPage(browser, origin);
+  const { page } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
   const shots = [];
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
     await installBoardWaits(page, { settleMs: ORBIT_SETTLE_MS });
-    await installOrbitCounters(page);
-    const { lead } = await page.evaluate(mainNameFixture, fixture);
-    await page.evaluate(() => window.__BOARD_SETTLED__());
-    await page.waitForFunction((key) => document.querySelector(`#board-view [data-orbit-key="${key}"]`),
-      `agent:term:${lead}`, { timeout: ORBIT_ACTION_MS });
-    await page.evaluate(() => window.__ORBIT_FRAMES__(4));
+    const { lead } = await openMainNameOrbit(page, fixture);
     const shoot = async (name) => {
       const file = join(dir, `${name}.png`);
       await page.screenshot({ path: file, animations: "disabled" });
