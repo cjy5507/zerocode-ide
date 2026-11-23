@@ -58,21 +58,13 @@ mod tests {
         );
     }
 
-    /// OpenAI publishes a cached-input rate instead of a multiple, and charges
-    /// no premium for writing the prefix in the first place.
     #[test]
-    fn an_openai_model_reads_at_cached_input_and_writes_at_no_premium() {
-        let sol = model_price("gpt-5.6-sol").expect("the table prices Sol");
-        assert!((sol.input - 5.0).abs() < f64::EPSILON, "{sol:?}");
-        assert!(
-            (sol.cache_read - 0.5).abs() < f64::EPSILON,
-            "cached_input, not a multiple: {sol:?}"
-        );
-        assert!(
-            (sol.cache_write - sol.input).abs() < f64::EPSILON,
-            "no write premium: {sol:?}"
-        );
-        assert!((sol.output - 30.0).abs() < f64::EPSILON, "{sol:?}");
+    fn openai_rates_include_the_published_cache_write_premium() {
+        let price = model_price("gpt-5.6-terra").expect("published model rates");
+        assert!((price.input - 2.0).abs() < f64::EPSILON, "{price:?}");
+        assert!((price.cache_read - 0.20).abs() < f64::EPSILON, "{price:?}");
+        assert!((price.cache_write - 2.50).abs() < f64::EPSILON, "{price:?}");
+        assert!((price.output - 12.0).abs() < f64::EPSILON, "{price:?}");
     }
 
     /// A model no row names is unpriced. Zero would be a lie the scorer would

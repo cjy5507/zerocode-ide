@@ -132,7 +132,7 @@ fn resume_rows_include_cwd_and_first_prompt() {
 #[test]
 #[allow(clippy::float_cmp)]
 fn status_helpers_report_context_cost_and_tokens() {
-    let model = api::resolve_catalog_alias(api::OPENAI_LATEST_MODEL_ALIAS);
+    let model = "gpt-5.4";
     let usage = runtime::TokenUsage {
         input_tokens: 50_000,
         output_tokens: 2_000,
@@ -141,8 +141,8 @@ fn status_helpers_report_context_cost_and_tokens() {
         output_tokens_details: None,
     };
     assert_eq!(context_usage_percent(100_000, 200_000), 50.0);
-    assert!(format_estimated_cost(&model, usage).starts_with('$'));
-    let status = format_usage_status(&model, usage, 200_000);
+    assert!(format_estimated_cost(model, usage).starts_with('$'));
+    let status = format_usage_status(model, usage, 200_000);
     assert!(status.contains("ctx 50.0%"));
     assert!(status.contains("tokens 102.0k"));
     assert!(status.contains("cost $"));

@@ -871,26 +871,25 @@ mod tests {
     }
 
     #[test]
-    fn cost_uses_known_model_pricing_and_marks_fallbacks() {
-        let model = api::resolve_catalog_alias(api::OPENAI_LATEST_MODEL_ALIAS);
+    fn cost_uses_known_prices_and_marks_unpriced_totals() {
+        let model = "gpt-5.4";
         let usage = TokenUsage {
-            input_tokens: 1_000_000,
+            input_tokens: 100_000,
             output_tokens: 1_000_000,
             ..TokenUsage::default()
         };
-        assert_eq!(
-            format_estimated_cost(&model, usage),
-            format_cost_usd(estimated_cost_usd(&model, usage).unwrap())
-        );
-        assert_eq!(format_estimated_cost("unknown-model", usage), "unknown");
-        assert_eq!(estimated_cost_usd("unknown-model", usage), None);
+        assert_eq!(estimated_cost_usd(model, usage), Some(15.25));
+        assert_eq!(format_estimated_cost(model, usage), "$15.25");
+        let long = TokenUsage { input_tokens: 300_000, ..usage };
+        assert_eq!(format_estimated_cost(model, long), "unknown");
+        assert_eq!(format_estimated_cost("synthetic-cli-model", usage), "unknown");
+        assert_eq!(estimated_cost_usd("synthetic-cli-model", usage), None);
         assert_eq!(format_cost_usd(0.0001), "$0.00");
-        assert!(estimated_cost_usd(&model, usage).is_some_and(|cost| cost > 0.0));
     }
 
     #[test]
     fn usage_status_uses_input_side_context_not_output_tokens() {
-        let model = api::resolve_catalog_alias(api::OPENAI_LATEST_MODEL_ALIAS);
+        let model = "gpt-5.4";
         let usage = TokenUsage {
             input_tokens: 20,
             output_tokens: 8,
@@ -899,7 +898,7 @@ mod tests {
             output_tokens_details: None,
         };
         assert_eq!(usage_context_tokens(usage), 24);
-        let status = format_usage_status(&model, usage, 100);
+        let status = format_usage_status(model, usage, 100);
         assert!(status.contains("ctx 24.0%"));
         assert!(status.contains("tokens 32"));
         assert!(status.contains("cost $"));

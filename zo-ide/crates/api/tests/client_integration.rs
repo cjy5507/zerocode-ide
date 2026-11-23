@@ -174,7 +174,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
                 "\"type\":\"message\",",
                 "\"role\":\"assistant\",",
                 "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],",
-                "\"model\":\"claude-3-7-sonnet-latest\",",
+                "\"model\":\"synthetic-provider-model\",",
                 "\"stop_reason\":\"end_turn\",",
                 "\"stop_sequence\":null,",
                 "\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}",
@@ -259,7 +259,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
                 && event.action == "message_usage"
                 && event.properties.get("request_id") == Some(&json!("req_profile_123"))
                 && event.properties.get("total_tokens") == Some(&json!(7))
-                && event.properties.get("estimated_cost_usd") == Some(&json!("$0.0001"))
+                && event.properties.get("estimated_cost_usd") == Some(&json!(null))
     ));
     assert!(matches!(
         &events[5],
