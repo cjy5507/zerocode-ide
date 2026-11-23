@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use runtime::{
+    auto_format::{self, FormatOutcome},
     context_compression::compress_tool_output,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     truncate_tool_output, TruncatedOutput, TruncationConfig,
@@ -589,43 +590,41 @@ fn resolve_file_tool_path(ctx: &ToolContext, path: &Path) -> PathBuf {
     file_tools::resolve_for_boundary_check(path)
 }
 
+#[derive(Default)]
+struct FileEnrichment {
+    notices: Vec<String>,
+    reformatted: bool,
+    format_restore_failed: bool,
+}
+
 fn maybe_enrich_file_tool_result(
     ctx: &ToolContext,
     tool_name: &str,
-    input: &serde_json::Value,
+    input: &Value,
     raw_output: String,
 ) -> String {
-    let paths: Vec<std::path::PathBuf> = match tool_name {
+    enrich_file_tool_result_with_formatter(ctx, tool_name, input, raw_output, |path| {
+        auto_format::format_file_with_timeout(path, Duration::from_millis(AUTO_FORMAT_BUDGET_MS))
+    })
+}
+
+fn enrich_file_tool_result_with_formatter(
+    ctx: &ToolContext,
+    tool_name: &str,
+    input: &Value,
+    raw_output: String,
+    mut format_file: impl FnMut(&str) -> Option<FormatOutcome>,
+) -> String {
+    let paths = match tool_name {
         "write_file" | "edit_file" => enrichment_target_path(ctx, input).into_iter().collect(),
         core_types::tool_names::APPLY_PATCH => patched_file_paths(&raw_output),
         _ => return raw_output,
     };
-    let mut enrichments = Vec::new();
-    let mut reformatted = false;
-    for path in &paths {
-        reformatted |= enrich_written_file(ctx, &path.to_string_lossy(), &mut enrichments);
+    let mut enrichment = FileEnrichment::default();
+    for path in paths {
+        enrich_written_file(ctx, &path.to_string_lossy(), &mut enrichment, &mut format_file);
     }
-    let output = fold_enrichment_into_output(raw_output, &enrichments);
-    if reformatted {
-        mark_reformatted(output)
-    } else {
-        output
-    }
-}
-
-/// Mark a write's JSON envelope whose file the formatter changed after it was
-/// written (`reformatted`), so its view does not say the file holds what was
-/// sent (t-115139 Z3 review): `fn   new( ){let x=1;}` written to a `.rs` came
-/// back `as sent` and `Formatted with rustfmt`, like the same function written
-/// already formatted, and an `Edit` made against the sent text failed.
-fn mark_reformatted(output: String) -> String {
-    match serde_json::from_str::<serde_json::Value>(&output) {
-        Ok(serde_json::Value::Object(mut map)) => {
-            map.insert("reformatted".to_string(), serde_json::Value::Bool(true));
-            serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or(output)
-        }
-        _ => output,
-    }
+    fold_enrichment_into_output(raw_output, &enrichment)
 }
 
 /// The files a successful `apply_patch` left on disk (`files[].filePath`,
@@ -645,28 +644,13 @@ fn patched_file_paths(raw_output: &str) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Auto-format and LSP diagnostics for one file a write tool just wrote.
-/// True when the formatter changed the file's bytes: what is on disk is then
-/// not the text the tool was sent.
-fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<String>) -> bool {
-    enrich_written_file_with_formatter(ctx, path, enrichments, |target| {
-        runtime::auto_format::format_file_with_timeout(
-            target,
-            Duration::from_millis(AUTO_FORMAT_BUDGET_MS),
-        )
-    })
-}
-
-fn enrich_written_file_with_formatter<F>(
+/// Auto-format and collect LSP diagnostics for one file a tool just wrote.
+fn enrich_written_file(
     ctx: &ToolContext,
     path: &str,
-    enrichments: &mut Vec<String>,
-    format_file: F,
-) -> bool
-where
-    F: FnOnce(&str) -> Option<runtime::auto_format::FormatOutcome>,
-{
-    let mut reformatted = false;
+    enrichment: &mut FileEnrichment,
+    format_file: impl FnOnce(&str) -> Option<FormatOutcome>,
+) {
     // Auto-format rewrites the file in place. While an instrumentation probe is
     // staged (debugger debug-mode), skip it: a reformat (e.g. rustfmt re-indenting
     // or line-splitting a column-0 `/*ZO_PROBE*/` line) would shift the probe's
@@ -675,35 +659,56 @@ where
     // reverted at run end, so formatting resumes after the debug window. Only the
     // debugger sub-agent can stage probes, so the main session is unaffected. LSP
     // diagnostics below only READ the file, so they still run.
-    if !file_has_staged_probe(ctx) {
-        let written = runtime::auto_format::formatter_for_path(Path::new(path)).and_then(|_| std::fs::read(path).ok());
-        match format_file(path) {
-            Some(runtime::auto_format::FormatOutcome::Finished(fmt_result)) => {
-                reformatted = written.is_some() && std::fs::read(path).ok() != written;
-                if reformatted {
-                    enrichments.push(format!(
-                        "[auto-format] {fmt_result}: it changed the file, so the text on disk is not the text sent — {} it before you {} it",
+    let target = Path::new(path);
+    if !file_has_staged_probe(ctx) && auto_format::formatter_for_path(target).is_some() {
+        let written = std::fs::read(target);
+        let refresh_observation = match format_file(path) {
+            Some(FormatOutcome::Finished(result)) => {
+                let changed = written.is_ok_and(|bytes| std::fs::read(target).ok() != Some(bytes));
+                enrichment.reformatted |= changed;
+                if changed {
+                    enrichment.notices.push(format!(
+                        "[auto-format] {result}: it changed the file, so the text on disk is not the text sent — {} it before you {} it",
                         core_types::tool_names::CoreTool::Read.wire(),
                         core_types::tool_names::CoreTool::Edit.wire(),
                     ));
                 } else {
-                    enrichments.push(format!("[auto-format] {fmt_result}"));
+                    enrichment.notices.push(format!("[auto-format] {result}"));
                 }
-                // 포맷터가 방금 파일을 재작성했다 — write/edit 성공 시점에 기록된
-                // read-registry 스냅샷이 즉시 stale해지므로 여기서 재기록한다.
-                // 이 재기록이 없으면 다음 edit_file마다 거짓 "외부 변경" 거부 →
-                // 재읽기 강제의 라이브락성 마찰이 생긴다 (CC의 "modified by a
-                // linter" 사이클과 같은 클래스). 무변경 포맷이어도 재기록은
-                // 멱등이라 무해하다.
-                file_tools::record_file_observation(&ctx.file_reads, path);
+                true
             }
-            Some(runtime::auto_format::FormatOutcome::TimedOut { formatter, budget }) => {
-                enrichments.push(format!(
-                    "[format-timeout] {formatter} timed out after {}ms; file left as sent",
+            Some(FormatOutcome::TimedOut { formatter, budget }) => {
+                // The child group has stopped, but the formatter may have
+                // already overwritten the tool's write. Restore those bytes
+                // atomically and skip the write when they still match.
+                let restored = written.and_then(|bytes| {
+                    if std::fs::read(target).is_ok_and(|on_disk| on_disk == bytes) {
+                        return Ok(());
+                    }
+                    runtime::file_ops::replace_file_atomic(target, &bytes)
+                });
+                let status = match &restored {
+                    Ok(()) => "File left as sent.".to_string(),
+                    Err(error) => {
+                        enrichment.format_restore_failed = true;
+                        file_tools::forget_file_observation(&ctx.file_reads, path);
+                        format!(
+                            "Could not restore the written file ({error}). {} the file before editing it.",
+                            core_types::tool_names::CoreTool::Read.wire(),
+                        )
+                    }
+                };
+                enrichment.notices.push(format!(
+                    "[format-timeout] {formatter} timed out after {} ms. {status}",
                     budget.as_millis(),
                 ));
+                restored.is_ok()
             }
-            None => {}
+            None => false,
+        };
+        if refresh_observation {
+            // A rewrite changes the disk observation made by the write tool.
+            file_tools::record_file_observation(&ctx.file_reads, path);
         }
     }
 
@@ -726,7 +731,7 @@ where
                     )
                 })
                 .collect();
-            enrichments.push(format!(
+            enrichment.notices.push(format!(
                 "--- LSP Diagnostics ({} issue{}) ---\n{}",
                 diagnostics.len(),
                 if diagnostics.len() == 1 { "" } else { "s" },
@@ -734,10 +739,9 @@ where
             ));
         }
     }
-    reformatted
 }
 
-/// Attach `enrichments` (auto-format / LSP feedback) to a tool's `raw_output`
+/// Attach file enrichment (auto-format / LSP feedback) to a tool's `raw_output`
 /// without breaking JSON-shaped results.
 ///
 /// `write_file`/`edit_file` return a JSON object whose fields the TUI
@@ -749,18 +753,24 @@ where
 /// field — the output stays parseable for the renderer while the model still
 /// sees the formatter/diagnostic text. Non-object output (e.g. an error
 /// already shaped as text) falls back to the readable text trailer.
-fn fold_enrichment_into_output(raw_output: String, enrichments: &[String]) -> String {
-    if enrichments.is_empty() {
+fn fold_enrichment_into_output(raw_output: String, enrichment: &FileEnrichment) -> String {
+    if enrichment.notices.is_empty() {
         return raw_output;
     }
-    let enrichment_text = enrichments.join("\n");
+    let enrichment_text = enrichment.notices.join("\n");
     match serde_json::from_str::<serde_json::Value>(&raw_output) {
         Ok(serde_json::Value::Object(mut map)) => {
             map.insert(
                 "toolFeedback".to_string(),
-                serde_json::Value::String(enrichment_text),
+                Value::String(enrichment_text),
             );
-            serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or(raw_output)
+            if enrichment.reformatted {
+                map.insert("reformatted".to_string(), Value::Bool(true));
+            }
+            if enrichment.format_restore_failed {
+                map.insert("formatRestoreFailed".to_string(), Value::Bool(true));
+            }
+            serde_json::to_string(&Value::Object(map)).unwrap_or(raw_output)
         }
         _ => format!("{raw_output}\n\n{enrichment_text}"),
     }
@@ -1117,7 +1127,7 @@ mod patched_file_paths_tests {
 
 #[cfg(test)]
 mod auto_format_guard_tests {
-    use super::{enrichment_target_path, file_has_staged_probe, maybe_enrich_file_tool_result};
+    use super::{enrichment_target_path, file_has_staged_probe, maybe_enrich_file_tool_result, FileEnrichment};
     use crate::context::{Probe, ToolContext};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1270,7 +1280,10 @@ mod auto_format_guard_tests {
         let raw = r#"{"filePath":"/tmp/a.rs","content":"line1\nline2","structuredPatch":[]}"#;
         let enriched = super::fold_enrichment_into_output(
             raw.to_string(),
-            &["[auto-format] formatted".to_string()],
+            &FileEnrichment {
+                notices: vec!["[auto-format] formatted".to_string()],
+                ..FileEnrichment::default()
+            },
         );
         let value: serde_json::Value =
             serde_json::from_str(&enriched).expect("enriched output must stay valid JSON");
@@ -1292,77 +1305,202 @@ mod auto_format_guard_tests {
     fn enrichment_falls_back_to_text_for_non_json() {
         let enriched = super::fold_enrichment_into_output(
             "plain text result".to_string(),
-            &["[auto-format] formatted".to_string()],
+            &FileEnrichment {
+                notices: vec!["[auto-format] formatted".to_string()],
+                ..FileEnrichment::default()
+            },
         );
         assert!(enriched.contains("plain text result"));
         assert!(enriched.contains("[auto-format] formatted"));
     }
 
+    fn seed_observed_file(ctx: &ToolContext, path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).expect("seed an existing file");
+        crate::file_tools::record_file_observation(&ctx.file_reads, &path.to_string_lossy());
+    }
+
+    fn run_file_tool_with_formatter(
+        ctx: &ToolContext,
+        name: &str,
+        input: &serde_json::Value,
+        format_file: impl FnMut(&str) -> Option<runtime::auto_format::FormatOutcome>,
+    ) -> String {
+        let raw = super::dispatch_tool_inner(ctx, None, name, input).expect("file tool succeeds");
+        super::enrich_file_tool_result_with_formatter(ctx, name, input, raw.text, format_file)
+    }
+
+    #[test]
+    fn a_write_the_formatter_changed_says_so_and_not_as_sent() {
+        use runtime::auto_format::{FormatOutcome, FormatResult, Formatter};
+        use runtime::context_compression::compress_tool_output;
+        use std::fs;
+        use std::path::Path;
+
+        let root = tempfile::tempdir().expect("create temp dir");
+        let messy = root.path().join("messy.rs");
+        let tidy = root.path().join("tidy.rs");
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        for path in [&messy, &tidy] {
+            seed_observed_file(&ctx, path, "fn old() {}\n");
+        }
+
+        let sent_messy = "fn   new( ){let x=1;}\n";
+        let sent_tidy = "fn new() {\n    let x = 1;\n}\n";
+        let [messy_shown, tidy_shown] = [(&messy, sent_messy), (&tidy, sent_tidy)].map(|(path, sent)| {
+            let input = serde_json::json!({ "path": path, "content": sent });
+            let result = run_file_tool_with_formatter(&ctx, "write_file", &input, |path| {
+                if Path::new(path).file_name() == messy.file_name() {
+                    fs::write(path, sent_tidy).expect("fake formatter rewrites the first file");
+                }
+                Some(FormatOutcome::Finished(FormatResult {
+                    formatter: Formatter::Rustfmt,
+                    success: true,
+                    message: None,
+                }))
+            });
+            compress_tool_output(&result, "write_file", None).content
+        });
+
+        assert_eq!(fs::read_to_string(&messy).expect("read first file"), sent_tidy);
+        assert!(messy_shown.contains("[auto-format] Formatted with rustfmt"), "{messy_shown}");
+        assert!(messy_shown.contains("Read it before you Edit it"), "{messy_shown}");
+        assert!(messy_shown.contains("before the formatter changed the file⟩"), "{messy_shown}");
+        assert!(!messy_shown.contains("as sent⟩"), "{messy_shown}");
+
+        assert_eq!(fs::read_to_string(&tidy).expect("read second file"), sent_tidy);
+        assert!(tidy_shown.contains("[auto-format] Formatted with rustfmt"), "{tidy_shown}");
+        assert!(tidy_shown.contains("+⟨3 lines as sent⟩"), "{tidy_shown}");
+        assert!(!tidy_shown.contains("changed the file"), "{tidy_shown}");
+    }
+
+    #[test]
+    fn a_failed_timeout_restore_reports_the_error_instead_of_as_sent() {
+        use runtime::auto_format::{FormatOutcome, Formatter};
+        use runtime::context_compression::compress_tool_output;
+        use std::fs;
+
+        let root = tempfile::tempdir().expect("create temp dir");
+        let file = root.path().join("restore-fails.rs");
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        seed_observed_file(&ctx, &file, "fn old() {}\n");
+
+        let input = serde_json::json!({ "path": file, "content": "fn new() {}\n" });
+        let output = run_file_tool_with_formatter(&ctx, "write_file", &input, |path| {
+            fs::remove_file(path).expect("remove file after write");
+            fs::create_dir(path).expect("replace the file with a directory");
+            Some(FormatOutcome::TimedOut {
+                formatter: Formatter::Rustfmt,
+                budget: std::time::Duration::from_millis(super::AUTO_FORMAT_BUDGET_MS),
+            })
+        });
+
+        assert_eq!(
+            ctx.file_reads.lock().expect("file reads").check(&file),
+            runtime::FileFreshness::NeverRead,
+            "the read registry must forget an unverified file",
+        );
+        let shown = compress_tool_output(&output, "write_file", None).content;
+        assert!(shown.contains("[format-timeout]"), "{shown}");
+        assert!(shown.contains("Could not restore the written file"), "{shown}");
+        assert!(shown.contains("written before the formatter timed out⟩"), "{shown}");
+        assert!(!shown.contains("as sent"), "{shown}");
+    }
+
     #[cfg(unix)]
     #[test]
-    fn enrich_reports_format_timeout_without_auto_format_claim() {
+    fn enrich_restores_the_sent_file_after_formatter_timeout() {
+        use nix::sys::stat::Mode;
+        use runtime::auto_format::{FormatOutcome, Formatter};
         use runtime::context_compression::{wire_tool_output, WireRewrite};
+        use std::fs;
         use std::os::unix::fs::PermissionsExt;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
-        let root = unique_temp_path("format-timeout");
-        std::fs::create_dir_all(&root).expect("create temp dir");
-        let target = root.join("slow.rs");
+        let root = tempfile::tempdir().expect("create temp dir");
+        let ctx = crate::tests::tool_context_outside_cwd_windows()
+            .with_workspace_root(root.path().to_path_buf());
+        let write = root.path().join("slow-write.rs");
+        let edit = root.path().join("slow-edit.rs");
+        let patched_name = "slow-patch.rs";
+        let patch = root.path().join(patched_name);
+        let old = "fn old() {}";
         let sent = "fn   slow( ){let x=1;}\n";
-        std::fs::write(&target, sent).expect("write target");
-        let script = root.join("slowfmt");
-        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").expect("write slow formatter");
-        let mut perms = std::fs::metadata(&script).expect("script metadata").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod slow formatter");
+        let formatted = "fn slow() {}\n";
+        seed_observed_file(&ctx, &edit, &format!("{old}\n"));
 
-        let ctx = crate::tests::tool_context_outside_cwd_windows();
-        let mut enrichments = Vec::new();
+        let script = root.path().join("slowfmt");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nfor target do :; done\nprintf '%s' '{formatted}' > \"$target\"\n: > \"$target.wait\"\n"
+            ),
+        )
+        .expect("write slow formatter");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod slow formatter");
+
         let budget = Duration::from_millis(50);
-        let target_str = target.to_string_lossy().to_string();
-        let script_str = script.to_string_lossy().to_string();
-        let reformatted = super::enrich_written_file_with_formatter(
-            &ctx,
-            &target_str,
-            &mut enrichments,
-            |p| {
-                runtime::auto_format::format_file_with_command_timeout(
-                    p,
-                    runtime::auto_format::Formatter::Rustfmt,
-                    &script_str,
+        for (tool, target, input) in [
+            ("write_file", &write, serde_json::json!({ "path": write, "content": sent })),
+            (
+                "edit_file",
+                &edit,
+                serde_json::json!({ "path": edit, "old_string": old, "new_string": sent.trim_end() }),
+            ),
+            (
+                core_types::tool_names::APPLY_PATCH,
+                &patch,
+                serde_json::json!({ "input": format!("*** Begin Patch\n*** Add File: {patched_name}\n+{sent}*** End Patch") }),
+            ),
+        ] {
+            // The shell rewrites the file and blocks opening the pipe without
+            // a reader. Start the budget after the rewrite, independent of load.
+            nix::unistd::mkfifo(&target.with_extension("rs.wait"), Mode::S_IRUSR | Mode::S_IWUSR)
+                .expect("create pipe for the blocked formatter");
+            let output = run_file_tool_with_formatter(&ctx, tool, &input, |path| {
+                assert_eq!(fs::read_to_string(path).expect("read just-written file"), sent);
+                let mut saw_rewrite = false;
+                let outcome = runtime::auto_format::format_file_with_command_timeout(
+                    path,
+                    Formatter::Rustfmt,
+                    script.to_str().expect("UTF-8 formatter path"),
                     budget,
-                )
-            },
-        );
-        let on_disk = std::fs::read_to_string(&target).expect("read target");
-        let _ = std::fs::remove_dir_all(&root);
+                    || {
+                        let arming = Instant::now();
+                        while arming.elapsed() < Duration::from_millis(super::AUTO_FORMAT_BUDGET_MS) {
+                            if fs::read(path).is_ok_and(|bytes| bytes == formatted.as_bytes()) {
+                                saw_rewrite = true;
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    },
+                );
+                assert!(saw_rewrite, "{tool}: the formatter must rewrite the file before its budget starts");
+                assert_eq!(
+                    outcome,
+                    Some(FormatOutcome::TimedOut { formatter: Formatter::Rustfmt, budget }),
+                );
+                outcome
+            });
 
-        assert!(!reformatted, "timed-out formatter must not mark file reformatted");
-        assert_eq!(on_disk, sent, "file must remain as sent");
-        assert_eq!(enrichments.len(), 1, "one timeout notice expected");
-        assert!(
-            !enrichments[0].contains("[auto-format]"),
-            "timeout must not claim [auto-format]: {}",
-            enrichments[0]
-        );
-        assert!(
-            enrichments[0].contains("timed out") && enrichments[0].contains("file left as sent"),
-            "timeout notice must say timed out and file left as sent: {}",
-            enrichments[0]
-        );
-
-        let raw = serde_json::json!({
-            "type": "create",
-            "filePath": target_str,
-            "content": sent,
-        })
-        .to_string();
-        let enriched = super::fold_enrichment_into_output(raw, &enrichments);
-        let shown = wire_tool_output(&enriched, "write_file", false, WireRewrite::Full);
-        assert!(shown.contains("· created · 1 lines"), "{shown}");
-        assert!(!shown.contains("before the formatter changed the file"), "{shown}");
-        assert!(!shown.contains("[auto-format]"), "{shown}");
-        assert!(shown.contains("timed out"), "{shown}");
+            assert_eq!(
+                fs::read_to_string(target).expect("read target"),
+                sent,
+                "{tool}: timeout must restore the bytes the tool wrote",
+            );
+            assert_eq!(
+                ctx.file_reads.lock().expect("file reads").check(target),
+                runtime::FileFreshness::Fresh,
+                "{tool}: the read registry must know the restored file",
+            );
+            let envelope = runtime::result_envelope(&output).expect("file result envelope");
+            assert!(!envelope["reformatted"].as_bool().unwrap_or_default(), "{tool}");
+            assert_ne!(envelope["formatRestoreFailed"].as_bool(), Some(true), "{tool}");
+            let shown = wire_tool_output(&output, tool, false, WireRewrite::Full);
+            assert!(shown.contains("[format-timeout]"), "{shown}");
+            assert!(shown.contains("File left as sent"), "{shown}");
+            assert!(!shown.contains("[auto-format]"), "{shown}");
+        }
     }
 
     /// Regression: a `read_file` result larger than the 30k ceiling must stay

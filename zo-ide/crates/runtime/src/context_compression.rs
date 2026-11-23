@@ -660,10 +660,10 @@ fn compress_write_file(raw: &str) -> CompressionOutcome {
     view.push('\n');
     if !created {
         if let Some(patch) = obj.get("structuredPatch").and_then(|v| v.as_array()) {
-            // A formatter that changed the file after it was written leaves
-            // the patch's added lines as they were sent, not as they are on
-            // disk (t-115139 Z3 review).
-            let added = if obj.get("reformatted").and_then(serde_json::Value::as_bool) == Some(true) {
+            // The patch describes the write before any formatter changes.
+            let added = if obj.get("formatRestoreFailed").and_then(serde_json::Value::as_bool) == Some(true) {
+                AddedLines::CountedBeforeFormatTimeout
+            } else if obj.get("reformatted").and_then(serde_json::Value::as_bool) == Some(true) {
                 AddedLines::CountedBeforeTheFormatter
             } else {
                 AddedLines::Counted
@@ -686,6 +686,8 @@ enum AddedLines {
     /// [`Self::Counted`], for a write the formatter then changed on disk:
     /// the line says the lines are the sent ones, before the formatter.
     CountedBeforeTheFormatter,
+    /// The original write before a timeout whose restore failed.
+    CountedBeforeFormatTimeout,
 }
 
 /// Render `structuredPatch` hunks (whose `lines` already carry the
@@ -740,10 +742,14 @@ fn push_added_run(out: &mut String, run: &mut usize, added: AddedLines) {
         return;
     }
     let noun = if lines == 1 { "line" } else { "lines" };
-    let _ = if added == AddedLines::CountedBeforeTheFormatter {
-        writeln!(out, "+⟨{lines} {noun} as sent, before the formatter changed the file⟩")
-    } else {
-        writeln!(out, "+⟨{lines} {noun} as sent⟩")
+    let _ = match added {
+        AddedLines::CountedBeforeTheFormatter => {
+            writeln!(out, "+⟨{lines} {noun} as sent, before the formatter changed the file⟩")
+        }
+        AddedLines::CountedBeforeFormatTimeout => {
+            writeln!(out, "+⟨{lines} {noun} written before the formatter timed out⟩")
+        }
+        AddedLines::Counted | AddedLines::Shown => writeln!(out, "+⟨{lines} {noun} as sent⟩"),
     };
 }
 

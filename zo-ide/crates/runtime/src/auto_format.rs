@@ -112,9 +112,11 @@ pub fn format_file(path: &str) -> Option<FormatResult> {
 pub fn format_file_with_timeout(path: &str, budget: Duration) -> Option<FormatOutcome> {
     let formatter = formatter_for_path(Path::new(path))?;
     let (cmd, _) = formatter.command_args(path);
-    format_file_with_command_timeout(path, formatter, cmd, budget)
+    format_file_with_command_timeout(path, formatter, cmd, budget, || {})
 }
 
+/// Runs an explicit formatter command. Tests can use `start_budget` to wait
+/// for fixture startup before measuring the formatter's time limit.
 #[doc(hidden)]
 #[must_use]
 pub fn format_file_with_command_timeout(
@@ -122,12 +124,13 @@ pub fn format_file_with_command_timeout(
     formatter: Formatter,
     cmd: &str,
     budget: Duration,
+    start_budget: impl FnOnce(),
 ) -> Option<FormatOutcome> {
     if budget.is_zero() || !which_exists(cmd) {
         return None;
     }
     let (_, args) = formatter.command_args(path);
-    match run_formatter_with_timeout(cmd, &args, budget, || {}) {
+    match run_formatter_with_timeout(cmd, &args, budget, start_budget) {
         RunFormatterOutcome::Finished(output) => {
             Some(FormatOutcome::Finished(formatter_output_to_result(formatter, &output)))
         }
@@ -528,7 +531,10 @@ mod tests {
         // The shell takes longer than the budget to arm, as /bin/sh does
         // under heavy load (l82a g3b1), and its grandchild outlives any wait
         // here unless the group kill ends it.
-        fs::write(&script, "#!/bin/sh\nsleep 1\n(sleep 3600) &\necho $! > \"$1\"\nwait\n")
+        fs::write(
+            &script,
+            "#!/bin/sh\nfor target do :; done\nsleep 1\n(sleep 3600) &\necho $! > \"$target\"\nwait\n",
+        )
             .expect("write formatter script");
         let mut perms = fs::metadata(&script)
             .expect("script metadata")
@@ -537,10 +543,12 @@ mod tests {
         fs::set_permissions(&script, perms).expect("chmod formatter script");
 
         let mut budget_started: Option<Instant> = None;
-        let result = run_formatter_with_timeout(
+        let budget = Duration::from_millis(250);
+        let result = format_file_with_command_timeout(
+            child_pid_file.to_str().expect("utf-8 pid path"),
+            Formatter::Rustfmt,
             script.to_str().expect("utf-8 script path"),
-            &[child_pid_file.to_str().expect("utf-8 pid path")],
-            Duration::from_millis(250),
+            budget,
             || {
                 let arming = Instant::now();
                 while recorded_pid(&child_pid_file).is_none() && arming.elapsed() < SCENARIO_BOUND {
@@ -551,9 +559,13 @@ mod tests {
         );
         let returned = Instant::now();
 
-        assert!(
-            matches!(result, RunFormatterOutcome::TimedOut),
-            "timed-out formatter returns TimedOut"
+        assert_eq!(
+            result,
+            Some(FormatOutcome::TimedOut {
+                formatter: Formatter::Rustfmt,
+                budget,
+            }),
+            "timed-out formatter returns its command and budget"
         );
         assert!(
             budget_started.is_some_and(|started| returned.duration_since(started) < Duration::from_secs(10)),
@@ -603,38 +615,5 @@ mod tests {
         use nix::unistd::Pid;
 
         let _ = signal::kill(Pid::from_raw(pid), Signal::SIGKILL);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn format_file_with_command_timeout_reports_timed_out_outcome() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = unique_temp_path("command-timeout");
-        fs::create_dir_all(&root).expect("create temp dir");
-        let target = root.join("slow.rs");
-        fs::write(&target, "fn   slow( ){}\n").expect("write target");
-        let script = root.join("slowfmt");
-        fs::write(&script, "#!/bin/sh\nsleep 60\n").expect("write slow formatter");
-        let mut perms = fs::metadata(&script).expect("script metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).expect("chmod slow formatter");
-
-        let budget = Duration::from_millis(50);
-        let outcome = format_file_with_command_timeout(
-            target.to_str().expect("utf-8 target path"),
-            Formatter::Rustfmt,
-            script.to_str().expect("utf-8 script path"),
-            budget,
-        );
-
-        let _ = fs::remove_dir_all(&root);
-        assert_eq!(
-            outcome,
-            Some(FormatOutcome::TimedOut {
-                formatter: Formatter::Rustfmt,
-                budget,
-            })
-        );
     }
 }
