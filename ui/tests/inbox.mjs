@@ -234,8 +234,8 @@ export async function testInbox(browser, origin, standBackend, ok) {
     return { acts, allowDeny: /허용|거절|allow|deny/i.test(shown.map((button) => button.textContent).join(" ")) };
   });
   ok(
-    "a stopped pane has only 판 열기 — no allow or deny from the page",
-    JSON.stringify(blockedPane.acts) === JSON.stringify(["open-pane"]) && !blockedPane.allowDeny,
+    "a stopped pane has only 판 열기 (and the queue's 다음 편지) — no allow or deny from the page",
+    JSON.stringify(blockedPane.acts) === JSON.stringify(["open-pane", "next"]) && !blockedPane.allowDeny,
     JSON.stringify(blockedPane),
   );
 
@@ -594,6 +594,70 @@ export async function testInbox(browser, origin, standBackend, ok) {
     return { all, shown, on };
   });
   ok("「안 읽음만」 keeps only the unread letters", unreadOnly.on === "true" && unreadOnly.shown.every((one) => one === "true") && unreadOnly.shown.length < unreadOnly.all, JSON.stringify(unreadOnly));
+
+  // The page's own order and hands (p-eaa214091ab4c42a): kinds stand under their heads with
+  // what waits first, questions longest-waiting first, day-old notices fold under one line,
+  // 「모두 확인」 is the batch ack over every batch standing, 「다음 편지」 and a sent answer
+  // land on the next letter, and j/k/e walk the page without a mouse. Empty tabs lose a shade.
+  const ux = await page.evaluate(async () => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    const MIN = 60_000, DAY = 86_400_000, now = Date.now();
+    const base = window.__INBOX__;
+    const q = (id, ago, body) => ({
+      id: `run-a/${id}`, tab: "question", what: "question", run: "run-a", project: "acme-web",
+      at_ms: now - ago, seat: true,
+      letter: { run: "run-a", id, kind: "question", from: "pane:team-a/%7", worker: "w-2043", task_id: "t-1", task: "일", body, created_ms: now - ago, delivery: "delivered", delivery_id: `d-${id}`, batch: 1, notices: 1 },
+    });
+    const n = (id, ago, batch) => ({
+      id: `run-a/${id}`, tab: "notice", what: "went_quiet", run: "run-a", project: "acme-web",
+      at_ms: now - ago, seat: true,
+      letter: { run: "run-a", id, kind: "went_quiet", from: "pane:team-a/%8", worker: "w-1", task_id: "t-2", task: "일", body: "", created_ms: now - ago, delivery: "delivered", delivery_id: batch, batch: 1, notices: 1 },
+    });
+    base.snapshot = {
+      items: [q("m-qa", 5 * MIN, "짧은 질문"), q("m-qb", 3 * 60 * MIN, "오래 기다린 질문"), n("m-na", 30 * MIN, "d-na"), n("m-nb", 2 * DAY, "d-nb")],
+      counts: { all: 4, question: 2, handoff: 0, blocked: 0, notice: 2, waiting: 2 },
+    };
+    await refreshInbox();
+    base.calls.length = 0;
+    view.querySelector('.inbox-tab[data-inbox-tab="all"]').click();
+    const rows = () => [...view.querySelectorAll(".inbox-row")].map((r) => r.dataset.id);
+    const ids = rows();
+    const groups = [...view.querySelectorAll(".inbox-group")].map((g) => g.querySelector(".inbox-group-word").textContent);
+    const foldBtn = view.querySelector(".inbox-fold-btn");
+    const foldText = foldBtn?.textContent ?? "";
+    foldBtn?.click();
+    const afterUnfold = rows();
+    const emptyTabs = [...view.querySelectorAll(".inbox-tab")].filter((b) => b.dataset.empty === "true").map((b) => b.dataset.inboxTab);
+    view.querySelector('.inbox-row[data-id="run-a/m-qb"]').click();
+    const pos = view.querySelector(".inbox-pos")?.textContent ?? "";
+    const nextWords = view.querySelector(".inbox-next-words")?.textContent ?? "";
+    view.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+    const afterJ = view.querySelector('.inbox-row[aria-selected="true"]')?.dataset.id;
+    view.dispatchEvent(new KeyboardEvent("keydown", { key: "k", bubbles: true }));
+    const afterK = view.querySelector('.inbox-row[aria-selected="true"]')?.dataset.id;
+    view.querySelector('.inbox-row[data-id="run-a/m-na"]').click();
+    view.dispatchEvent(new KeyboardEvent("keydown", { key: "e", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const eAcks = base.calls.filter((call) => call.name === "desk_ack").map((call) => call.args.delivery);
+    base.calls.length = 0;
+    view.querySelector('.inbox-tab[data-inbox-tab="notice"]').click();
+    view.querySelector("[data-inbox-ackall]")?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const allAcks = base.calls.filter((call) => call.name === "desk_ack").map((call) => call.args.delivery);
+    view.querySelector('.inbox-tab[data-inbox-tab="question"]').click();
+    view.querySelector('[data-inbox-act="next"]')?.click();
+    const afterNext = view.querySelector('.inbox-row[aria-selected="true"]')?.dataset.id;
+    return { ids, groups, foldText, afterUnfold, emptyTabs, pos, nextWords, afterJ, afterK, eAcks, allAcks, afterNext };
+  });
+  ok("「전체」 walks the kinds under their heads — 질문 first, 알림 last", ux.groups.join(",") === "질문,알림", JSON.stringify(ux.groups));
+  ok("questions stand longest-waiting first", ux.ids[0] === "run-a/m-qb" && ux.ids[1] === "run-a/m-qa", JSON.stringify(ux.ids));
+  ok("a notice past a day folds under one line until pressed", ux.ids.length === 3 && ux.foldText.includes("이전 알림 1개") && ux.afterUnfold.length === 4, JSON.stringify(ux));
+  ok("empty kind tabs lose a shade, not their place", ux.emptyTabs.includes("handoff") && ux.emptyTabs.includes("blocked"), JSON.stringify(ux.emptyTabs));
+  ok("the preview says where the letter stands and what follows", ux.pos.startsWith("편지 1/") && ux.nextWords.includes("짧은 질문"), JSON.stringify(ux));
+  ok("j and k walk the letters without a mouse", ux.afterJ === "run-a/m-qa" && ux.afterK === "run-a/m-qb", JSON.stringify(ux));
+  ok("e presses the selected letter's 「확인」 as its button would", ux.eAcks.length === 1 && ux.eAcks[0] === "d-na", JSON.stringify(ux.eAcks));
+  ok("「모두 확인」 sends the batch ack for every batch still standing", ux.allAcks.length === 1 && ux.allAcks[0] === "d-nb", JSON.stringify(ux.allAcks));
+  ok("「다음 편지」 lands on the letter after this one", ux.afterNext === "run-a/m-qa", JSON.stringify(ux.afterNext));
 
   // The 「주의 필요」 chord opens the page on its 막힘 tab (draft Q2: absorbed, not kept beside it).
   const chord = await page.evaluate(() => {

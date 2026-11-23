@@ -38,6 +38,15 @@ const INBOX_KINDS = Object.freeze({
 
 const INBOX_TABS = Object.freeze(["all", "question", "handoff", "blocked", "notice"]);
 
+/* The order the whole list reads the kinds in (`all`): what waits on the person first,
+ * notices last. Within a question group the longest-waiting letter leads — the desk's own
+ * sort keeps the rest. */
+const INBOX_KIND_ORDER = Object.freeze({ question: 0, handoff: 1, blocked: 2, notice: 3 });
+/* A notice older than a day folds under one line until asked for (the desk's own day-fold,
+ * surfaced here); a question older than an hour wears the wait signal next to its age. */
+const INBOX_NOTICE_OLD_MS = 86_400_000;
+const INBOX_WAIT_OLD_MS = 3_600_000;
+
 /* What a pane that waits says, in the pane's own words (`pane_blocked`, `pane_question`,
  * `pane_finished`). */
 const INBOX_PANE_WORDS = Object.freeze({
@@ -57,7 +66,7 @@ let inboxSnapshot = INBOX_NONE;
 let inboxSaid = "";
 let inboxRefreshTimer = 0;
 /* What the person chose: the tab, the switch and the letter shown. Kept across repaints. */
-const inboxChoice = { tab: "all", unreadOnly: false, selected: null };
+const inboxChoice = { tab: "all", unreadOnly: false, selected: null, oldNotices: false };
 /* The letters opened (`id`s) — unread is the absence of the id. */
 const inboxRead = new Set();
 /* Written answers and reasons to close without one (per letter), and pressed passes and acks
@@ -79,6 +88,9 @@ const inboxPresses = new Map();
 const inboxViewsWired = new WeakSet();
 /* A view's row nodes by letter id: kept and re-ordered, never rebuilt. */
 const inboxRows = new WeakMap();
+/* A view's chrome nodes (kind group heads, the old-notices fold, the key line) by their own
+ * key: same keeping rule as the letter rows. */
+const inboxChrome = new WeakMap();
 
 try {
   for (const id of JSON.parse(localStorage.getItem(INBOX_READ_KEY) ?? "[]")) inboxRead.add(String(id));
@@ -295,7 +307,8 @@ function buildInboxView() {
   list.setAttribute("aria-label", t("inbox.list.label", "편지 목록"));
   list.dataset.i18nAria = "inbox.list.label";
 
-  const kind = inboxNode("div", "inbox-pv-kind", inboxNode("span", "inbox-kind"), inboxNode("span", "inbox-age"));
+  const kind = inboxNode("div", "inbox-pv-kind", inboxNode("span", "inbox-kind"), inboxNode("span", "inbox-age"),
+    inboxNode("span", "inbox-pos"));
   const facts = inboxNode("dl", "inbox-facts",
     inboxWord(INBOX_LABELS.project, "dt"), inboxNode("dd", "inbox-fact-project"),
     inboxWord(INBOX_LABELS.task, "dt"), inboxNode("dd", "inbox-fact-task"),
@@ -325,8 +338,9 @@ function buildInboxView() {
   reply.dataset.personOnly = "";
   actions.dataset.personOnly = "";
   close.dataset.personOnly = "";
+  const next = inboxNode("div", "inbox-next", inboxNode("span", "inbox-next-words"), inboxButton("next"));
   const detail = inboxNode("div", "inbox-detail", kind, inboxNode("h2", "inbox-pv-title"), facts,
-    inboxNode("p", "inbox-pv-body"), reply, actions, close, inboxNode("p", "inbox-note"));
+    inboxNode("p", "inbox-pv-body"), reply, actions, close, inboxNode("p", "inbox-note"), next);
   const preview = inboxNode("article", "inbox-preview", inboxWord(INBOX_LABELS.pick, "p", "inbox-empty"), detail);
   preview.setAttribute("aria-live", "polite");
 
@@ -349,6 +363,17 @@ function wireInboxView(host) {
   });
   const list = host.querySelector(".inbox-list");
   list.addEventListener("click", (event) => {
+    if (event.target.closest("[data-inbox-fold]")) {
+      inboxChoice.oldNotices = !inboxChoice.oldNotices;
+      paintInboxViews();
+      return;
+    }
+    if (event.target.closest("[data-inbox-ackall]")) {
+      for (const item of inboxVisible()) {
+        if (inboxCanAck(item) && !inboxPressed(`ack:${inboxBatchKey(item)}`).done) void ackInboxBatch(item, true);
+      }
+      return;
+    }
     const row = event.target.closest(".inbox-row");
     const item = row && inboxSnapshot.items.find((one) => one.id === row.dataset.id);
     if (item) openInboxItem(item);
@@ -400,8 +425,38 @@ function wireInboxView(host) {
     else if (act === "close") void closeInboxQuestion(item);
     else if (act === "pass") void passInboxHandoff(item);
     else if (act === "ack") void ackInboxBatch(item, true);
+    else if (act === "next") {
+      const following = inboxNextItem();
+      if (following) openInboxItem(following);
+    }
     else if (act === "open-pane") openInboxPane(item);
     else if (act === "open-board") openBoard();
+  });
+  /* j/k walk the letters of the page (not only when the list holds focus), e presses the
+   * selected letter's 「확인」 the way its button would, and ⌘Enter in the answer field already
+   * sends. Typing into a field is never a walk. */
+  host.addEventListener("keydown", (event) => {
+    if (event.target.closest("input, textarea") || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.isComposing) return;
+    if (event.key === "j" || event.key === "k") {
+      const step = event.key === "j" ? 1 : -1;
+      const now = Date.now();
+      const items = inboxOrdered(inboxVisible()).filter((item) => inboxChoice.oldNotices
+        || item.tab !== "notice" || item.at_ms <= 0 || now - item.at_ms <= INBOX_NOTICE_OLD_MS);
+      const at = items.findIndex((one) => one.id === inboxChoice.selected);
+      const next = items[at + step] ?? items[at === -1 ? (step === 1 ? 0 : items.length - 1) : at];
+      if (!next || next.id === inboxChoice.selected) return;
+      event.preventDefault();
+      openInboxItem(next);
+      return;
+    }
+    if (event.key === "e") {
+      const item = inboxSelectedItem();
+      if (item && inboxCanAck(item)) {
+        event.preventDefault();
+        void ackInboxBatch(item, true);
+      }
+    }
   });
 }
 
@@ -485,6 +540,55 @@ function inboxVisible() {
     (inboxChoice.tab === "all" || item.tab === inboxChoice.tab) && (!inboxChoice.unreadOnly || inboxUnread(item)));
 }
 
+/* The order the list walks: `all` reads the kinds in INBOX_KIND_ORDER (what waits first,
+ * notices last), and within a kind the questions stand longest-waiting first — 「지금 누가
+ * 나를 얼마나 오래 기다리는가」 is the page's own sort. The sort is stable, so the desk's
+ * order holds everywhere else. */
+function inboxOrdered(items) {
+  const all = inboxChoice.tab === "all";
+  return [...items].sort((a, b) => {
+    if (all) {
+      const ka = INBOX_KIND_ORDER[a.tab] ?? 9;
+      const kb = INBOX_KIND_ORDER[b.tab] ?? 9;
+      if (ka !== kb) return ka - kb;
+    }
+    if (a.what === "question" && b.what === "question") return a.at_ms - b.at_ms;
+    return 0;
+  });
+}
+
+/* The letter after the selected one in the order the list walks — where 「다음 편지」 and a
+ * sent answer land the person. */
+function inboxNextItem() {
+  const now = Date.now();
+  const items = inboxOrdered(inboxVisible()).filter((item) => inboxChoice.oldNotices
+    || item.tab !== "notice" || item.at_ms <= 0 || now - item.at_ms <= INBOX_NOTICE_OLD_MS);
+  const at = items.findIndex((one) => one.id === inboxChoice.selected);
+  return at === -1 ? null : items[at + 1] ?? null;
+}
+
+/* Whether this letter's 「확인」 can run: a delivered letter of a batch, not a question, on a
+ * run this window seats (the same rule the preview's ack button asks). */
+function inboxCanAck(item) {
+  return Boolean(item.letter) && item.what !== "question" && item.seat === true && !isPopout && inboxBatchKey(item) !== "";
+}
+
+/* A node of list chrome (a kind's group head, the old-notices fold, the key line) kept by
+ * its own key, as the letter rows are kept by theirs. */
+function inboxChromeNode(view, key, make) {
+  let held = inboxChrome.get(view);
+  if (!held) {
+    held = new Map();
+    inboxChrome.set(view, held);
+  }
+  let node = held.get(key);
+  if (!node) {
+    node = make();
+    held.set(key, node);
+  }
+  return node;
+}
+
 function inboxRowNode(view, item) {
   let held = inboxRows.get(view);
   if (!held) {
@@ -523,7 +627,12 @@ function paintInboxRow(li, item, selected, now, minute) {
   const kind = INBOX_KINDS[item.tab];
   writeTextContent(row.querySelector(".inbox-kind-word"), t(kind.key, kind.word));
   writeTextContent(row.querySelector(".inbox-row-title"), inboxTitle(item));
-  writeTextContent(row.querySelector(".inbox-age"), item.at_ms > 0 ? inboxAge(item.at_ms, now) : "");
+  const age = row.querySelector(".inbox-age");
+  writeTextContent(age, item.at_ms > 0 ? inboxAge(item.at_ms, now) : "");
+  // A question or review that has waited past an hour wears the wait signal on its age — the
+  // number itself still says how long, so the wait is never told by colour alone.
+  const waits = item.what === "question" || item.what === "handoff";
+  writeAttribute(age, "data-old", String(waits && item.at_ms > 0 && now - item.at_ms > INBOX_WAIT_OLD_MS));
   writeTextContent(row.querySelector(".inbox-row-meta"), [item.project, inboxTaskName(item), inboxFrom(item)].filter(Boolean).join(" · "));
 }
 
@@ -540,18 +649,85 @@ function paintInboxView(view) {
   for (const button of view.querySelectorAll(".inbox-tab")) {
     const tab = button.dataset.inboxTab;
     writeAttribute(button, "aria-pressed", String(tab === inboxChoice.tab));
+    // An empty kind keeps its tab but loses a shade — what is nothing asks for nothing.
+    writeAttribute(button, "data-empty", String((counts[tab] ?? 0) === 0));
     writeTextContent(button.querySelector(".inbox-tab-count"), String(counts[tab] ?? 0));
   }
   writeAttribute(view.querySelector(".inbox-unread-switch"), "aria-checked", String(inboxChoice.unreadOnly));
 
-  const items = inboxVisible();
+  const items = inboxOrdered(inboxVisible());
   if (!items.some((item) => item.id === inboxChoice.selected)) inboxChoice.selected = items[0]?.id ?? null;
   const list = view.querySelector(".inbox-list");
-  const nodes = items.map((item) => {
+  const nodes = [];
+  const usedChrome = new Set();
+  /* Letters of one kind stand under the kind's head; the head says the kind and how many
+   * stand there, and the notice head also holds 「모두 확인」 — the ledger's batch ack over
+   * every batch standing, the same command the letter's own 「확인」 sends. Notices past a
+   * day fold under one line (the desk's own fold) until the line is pressed. */
+  const folded = [];
+  const shown = [];
+  for (const item of items) {
+    if (item.tab === "notice" && item.at_ms > 0 && now - item.at_ms > INBOX_NOTICE_OLD_MS && !inboxChoice.oldNotices) folded.push(item);
+    else shown.push(item);
+  }
+  let lastTab = null;
+  for (const item of shown) {
+    if (item.tab !== lastTab) {
+      lastTab = item.tab;
+      const kind = INBOX_KINDS[item.tab];
+      const head = inboxChromeNode(view, `group:${item.tab}`, () => {
+        const li = inboxNode("li", "inbox-group", inboxNode("span", "inbox-group-word"), inboxNode("span", "inbox-group-count"));
+        li.setAttribute("role", "presentation");
+        return li;
+      });
+      usedChrome.add(`group:${item.tab}`);
+      head.dataset.kind = item.tab;
+      writeTextContent(head.querySelector(".inbox-group-word"), t(kind.key, kind.word));
+      // The head's number is Rust's `counts` too — the page never recounts the rows it draws.
+      writeTextContent(head.querySelector(".inbox-group-count"), String(counts[item.tab] ?? 0));
+      if (item.tab === "notice") {
+        let ackAll = head.querySelector("[data-inbox-ackall]");
+        if (!ackAll) {
+          ackAll = inboxNode("button", "inbox-ackall");
+          ackAll.type = "button";
+          ackAll.dataset.inboxAckall = "";
+          head.append(ackAll);
+        }
+        const batches = new Set();
+        for (const one of items) if (one.tab === "notice" && inboxCanAck(one)) batches.add(inboxBatchKey(one));
+        writeHidden(ackAll, batches.size === 0);
+        writeTextContent(ackAll, t("inbox.ackAll", "모두 확인"));
+      }
+      nodes.push(head);
+    }
     const li = inboxRowNode(view, item);
     paintInboxRow(li, item, item.id === inboxChoice.selected, now, minute);
+    nodes.push(li);
+  }
+  if (folded.length > 0 && !inboxChoice.oldNotices) {
+    const fold = inboxChromeNode(view, "fold:notice", () => {
+      const button = inboxNode("button", "inbox-fold-btn");
+      button.type = "button";
+      button.dataset.inboxFold = "";
+      const li = inboxNode("li", "inbox-fold", button);
+      li.setAttribute("role", "presentation");
+      return li;
+    });
+    usedChrome.add("fold:notice");
+    const btn = fold.firstElementChild;
+    writeTextContent(btn, t("inbox.notices.older", "이전 알림 {{count}}개 — 펼치기", { count: folded.length }));
+    writeAttribute(btn, "aria-expanded", "false");
+    nodes.push(fold);
+  }
+  const keys = inboxChromeNode(view, "keys", () => {
+    const li = inboxNode("li", "inbox-keys");
+    li.setAttribute("role", "presentation");
+    li.dataset.i18n = "inbox.keys";
     return li;
   });
+  usedChrome.add("keys");
+  writeTextContent(keys, t("inbox.keys", "j/k 편지 오가기 · e 확인 · {{chord}} 답 보내기", { chord: chordLabel("mod+enter") }));
+  if (shown.length > 0) nodes.push(keys);
   if (nodes.length === 0) {
     const none = inboxNode("li", "inbox-empty");
     none.textContent = counts.all === 0
@@ -563,6 +739,8 @@ function paintInboxView(view) {
   const standing = new Set(inboxSnapshot.items.map((item) => item.id));
   const held = inboxRows.get(view);
   if (held) for (const id of held.keys()) if (!standing.has(id)) held.delete(id);
+  const chrome = inboxChrome.get(view);
+  if (chrome) for (const key of chrome.keys()) if (!usedChrome.has(key)) chrome.delete(key);
   paintInboxPreview(view, inboxSelectedItem(), now);
 }
 
@@ -583,7 +761,15 @@ function paintInboxPreview(view, item, now) {
   chip.firstElementChild.firstElementChild?.setAttribute("href", `#${kind.icon}`);
   writeTextContent(chip.querySelector(".inbox-kind-word"), t(kind.key, kind.word));
   writeTextContent(detail.querySelector(".inbox-pv-kind .inbox-age"), item.at_ms > 0 ? inboxAge(item.at_ms, now) : "");
-  writeTextContent(detail.querySelector(".inbox-pv-title"), inboxTitle(item));
+  const title = inboxTitle(item);
+  writeTextContent(detail.querySelector(".inbox-pv-title"), title);
+  /* Where the letter stands in the order the list walks, and what follows it — 「답 보내기」
+   * lands on the next letter, so the one after is named before the send. */
+  const walked = inboxOrdered(inboxVisible());
+  const at = walked.findIndex((one) => one.id === item.id);
+  const pos = detail.querySelector(".inbox-pos");
+  writeTextContent(pos, at !== -1 && walked.length > 1 ? t("inbox.position", "편지 {{at}}/{{total}}", { at: at + 1, total: walked.length }) : "");
+  writeHidden(pos, at === -1 || walked.length <= 1);
   // A fact the letter does not carry (a pane has no task) takes no line.
   for (const [name, value] of [["project", item.project], ["task", inboxTaskName(item)], ["from", inboxFrom(item)]]) {
     const fact = detail.querySelector(`.inbox-fact-${name}`);
@@ -591,7 +777,10 @@ function paintInboxPreview(view, item, now) {
     writeHidden(fact, value === "");
     writeHidden(fact.previousElementSibling, value === "");
   }
-  const body = inboxBody(item, now);
+  let body = inboxBody(item, now);
+  // The question's first line is already the title — the body picks up after it, so the
+  // same sentence is not read twice.
+  if (body.split("\n")[0] === title) body = body.slice(title.length).replace(/^\n+/, "");
   const bodyNode = detail.querySelector(".inbox-pv-body");
   writeTextContent(bodyNode, body);
   writeHidden(bodyNode, body === "");
@@ -605,7 +794,7 @@ function paintInboxPreview(view, item, now) {
   const withdrawn = item.what === "handoff" && boardReviewWithdrawn(item.task) !== null;
   const canPass = item.what === "handoff" && seated && !withdrawn
     && Boolean(item.task.progress?.attempt) && Boolean(item.task.progress?.source);
-  const canAck = Boolean(item.letter) && item.what !== "question" && seated && inboxBatchKey(item) !== "";
+  const canAck = inboxCanAck(item);
   const draft = canReply ? inboxDraft(item.id) : null;
   // A question being answered, or answered, is not closed beside it.
   const canClose = canReply && !draft.sending && !draft.sent;
@@ -677,6 +866,15 @@ function paintInboxPreview(view, item, now) {
   else if (item.tab === "blocked") said = t("inbox.note.blocked", "허용·거절은 그 판에서만 누릅니다. 여기서는 판을 엽니다.");
   writeTextContent(note, said);
   writeHidden(note, said === "");
+
+  const next = detail.querySelector(".inbox-next");
+  const following = inboxNextItem();
+  writeHidden(next, following === null);
+  if (following) {
+    writeTextContent(next.querySelector(".inbox-next-words"),
+      t("inbox.nextWords", "다음: {{title}}", { title: inboxTitle(following) }));
+    writeTextContent(next.querySelector("[data-inbox-act]"), t("inbox.next", "다음 편지 →"));
+  }
 }
 
 /* ---- the hands ---- */
@@ -772,6 +970,9 @@ async function sendInboxReply(item) {
     await invoke("desk_reply", { run: item.run, message: item.letter.id, body, retryRequest: draft.retry.id });
     draft.sent = true;
     draft.retry = null;
+    // A sent answer hands the floor to the next letter — the queue is the work, not the one reply.
+    const following = inboxNextItem();
+    if (following) inboxChoice.selected = following.id;
     void refreshInbox();
   } catch (error) {
     // The name stays: pressing again replays the one receipt rather than writing a second answer.
