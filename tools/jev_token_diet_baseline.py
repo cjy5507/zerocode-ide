@@ -369,45 +369,58 @@ def user_text_shape(text: str) -> str:
 
 
 class Prices:
-    """USD per million tokens from `model-prices.json`.
+    """USD per million tokens from `model-prices.json` (its dated rows).
 
-    Only the matching this corpus needs: an Anthropic id matches a row whose id
-    it equals or extends with a date; an OpenAI id, tier suffix dropped, a row
-    whose `ids` or `exact` it equals. Anything else is unpriced — never free —
-    and the report says how much of the sample that leaves out.
+    Only the matching this corpus needs: an Anthropic id matches a row whose
+    model or alias it equals or extends with a date; an OpenAI id, a tier from
+    the table's `reasoning_tiers` dropped from its end, a row whose model or
+    alias it equals. Of a model's dated rows the one in force on `day` (today,
+    UTC, unless given) prices it. Anything else, or a rate the table leaves
+    unknown for tokens the request spent, is unpriced — never free — and the
+    report says how much of the sample that leaves out.
     """
 
     MILLION = 1_000_000
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, day: str | None = None):
         table = json.loads(path.read_text(encoding="utf-8"))
-        self.anthropic = table["anthropic"]
-        self.openai = table["openai"]
-        self.jev = {row_id: row for row in table["typesafe"]["rows"] for row_id in row["ids"]}
+        day = day or time.strftime("%Y-%m-%d", time.gmtime())
+        self.tiers = tuple(table.get("reasoning_tiers", ()))
+        self.rows: dict[str, dict] = {}
+        for row in sorted(table["rows"], key=lambda one: one["effective_from"]):
+            if row["effective_from"] <= day:  # a later row in force replaces an earlier one
+                for name in (row["model"], *row.get("aliases", ())):
+                    self.rows[name] = row
+        self.jev = {row_id: row for row in table["typesafe"] for row_id in row["ids"]}
 
     def row(self, model: str | None):
         name = re.sub(r"\[[^\]]*\]$", "", (model or "").lower())
         if name.startswith("claude-"):
-            for row in self.anthropic["rows"]:
-                if any(name == i or re.fullmatch(re.escape(i) + r"-\d{8}", name) for i in row["ids"]):
-                    return "anthropic", row
+            row = self.rows.get(name) or self.rows.get(re.sub(r"-\d{8}$", "", name))
+            return ("anthropic", row) if row else (None, None)
         if name.startswith("gpt-"):
-            for row in self.openai["rows"]:
-                if name in row.get("ids", []) or name in row.get("exact", []):
-                    return "openai", row
+            row = self.rows.get(name) or self.rows.get(self.untiered(name))
+            return ("openai", row) if row else (None, None)
         return None, None
+
+    def untiered(self, name: str) -> str:
+        for tier in self.tiers:
+            if name.endswith("-" + tier):
+                return name[: -len(tier) - 1]
+        return name
 
     def cost(self, model: str | None, fresh: float, read: float, output: float) -> float | None:
         kind, row = self.row(model)
         if row is None:
             return None
-        if kind == "anthropic":
-            read_rate = row.get("cache_read_rate", self.anthropic["cache_read_rate"])
-            # Appends land on the rolling five-minute marker; an hour-long write
-            # costs more, so fresh tokens are priced at their floor.
-            write_rate = self.anthropic["cache_write_5m_rate"]
-            return ((fresh * write_rate + read * read_rate) * row["input"] + output * row["output"]) / self.MILLION
-        return (fresh * row["input"] + read * row["cached_input"] + output * row["output"]) / self.MILLION
+        rates = row["rates"]
+        # Appends land on the rolling five-minute marker; an hour-long write
+        # costs more, so fresh Anthropic tokens are priced at their floor.
+        fresh_rate = rates.get("cache_write") if kind == "anthropic" else rates.get("input")
+        terms = ((fresh, fresh_rate), (read, rates.get("cache_read")), (output, rates.get("output")))
+        if any(amount and rate is None for amount, rate in terms):
+            return None
+        return sum(amount * (rate or 0) for amount, rate in terms) / self.MILLION
 
     def jev_input(self) -> float:
         return self.jev["jev-latest"]["input"]

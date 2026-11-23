@@ -217,9 +217,17 @@ class Arithmetic(unittest.TestCase):
         prices = diet.Prices(diet.PRICE_TABLE)
         self.assertEqual(prices.row("claude-haiku-4-5-20251001")[0], "anthropic")
         self.assertIsNone(prices.cost("gemini-3.8-flash", 1, 1, 1))
+        self.assertEqual(prices.row("claude-opus-5-20260724")[1], prices.row("claude-opus-5")[1])
         opus = prices.row("claude-opus-5")[1]
-        write = prices.anthropic["cache_write_5m_rate"]
-        self.assertAlmostEqual(prices.cost("claude-opus-5", 1_000_000, 0, 0), opus["input"] * write)
+        self.assertAlmostEqual(prices.cost("claude-opus-5", 1_000_000, 0, 0), opus["rates"]["cache_write"])
+
+    def test_prices_drop_a_reasoning_tier_and_take_the_row_in_force_on_the_day(self):
+        july = diet.Prices(diet.PRICE_TABLE, day="2026-07-20")
+        september = diet.Prices(diet.PRICE_TABLE, day="2026-09-01")
+        self.assertEqual(july.row("gpt-5.6-sol-high")[1]["effective_from"], "2026-07-09")
+        self.assertEqual(september.row("gpt-5.6-sol")[1]["effective_from"], "2026-08-21")
+        self.assertEqual(july.row("claude-opus-5-5"), (None, None), "not yet in force on that day")
+        self.assertIsNone(july.cost("claude-opus-5-5", 1, 1, 1))
 
 
 if __name__ == "__main__":
