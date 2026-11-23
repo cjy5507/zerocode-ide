@@ -243,6 +243,14 @@ export const openOrbit = async (page, fixture = {}) => {
   await page.evaluate(() => window.__BOARD_SETTLED__());
 };
 
+// Only use this when the fixture expects to open with a visible 3D renderer.
+const openPaintedOrbit = async (page, fixture) => {
+  await openOrbit(page, fixture);
+  await page.evaluate((timeout) => window.__UNTIL__(
+    () => window.__ORBIT__().frames > 0, "the first visible 3D frame", timeout,
+  ), ORBIT_ACTION_MS);
+};
+
 /* 한 구간 동안 이 보기가 건 rAF와 그린 그림의 수. */
 const countOver = (page, ms) => page.evaluate(async (wait) => {
   await window.__ORBIT_FRAMES__(2);
@@ -401,26 +409,30 @@ async function testOrbitFallback(browser, origin, ok) {
   }
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await openOrbit(page);
-    const lost = await page.evaluate(async () => {
+    await openPaintedOrbit(page);
+    const lost = await page.evaluate(async (timeout) => {
       const view = document.querySelector("#board-view");
       const state = window.__ORBIT_STATE__();
       const loser = state.gl.renderer.getContext().getExtension("WEBGL_lose_context");
       loser.loseContext();
-      await window.__ORBIT_WAIT__(300);
+      await window.__UNTIL__(
+        () => window.__ORBIT__().broken === "lost", "the 3D view to report lost graphics", timeout,
+      );
       await window.__BOARD_SETTLED__();
       const button = view.querySelector('[data-relations-view="orbit"]');
       const during = { showing: agentOrbitShowing(view), broken: window.__ORBIT__().broken,
         disabled: button.getAttribute("aria-disabled"), tip: button.dataset.tip ?? "",
         cards: view.querySelectorAll(".agent-graph-node.is-agent").length,
         scroll: view.querySelector(".agent-graph-scroll")?.hidden === false };
+      const frames = window.__ORBIT__().frames;
       loser.restoreContext();
-      await window.__ORBIT_WAIT__(500);
+      await window.__UNTIL__(
+        () => window.__ORBIT__().frames > frames, "the first 3D frame after graphics return", timeout,
+      );
       await window.__BOARD_SETTLED__();
-      await window.__ORBIT_FRAMES__(4);
       return { during, after: { showing: agentOrbitShowing(view), broken: window.__ORBIT__().broken,
         frames: window.__ORBIT__().frames, labels: window.__ORBIT__().labels } };
-    });
+    }, ORBIT_ACTION_MS);
     ok("a lost graphics context stands the board on cards with the reason, and its return stands the 3D view again",
       lost.during.showing === false && lost.during.broken === "lost" && lost.during.disabled === "true"
         && lost.during.tip.length > 0 && lost.during.cards > 0 && lost.during.scroll && lost.after.showing === true
@@ -571,7 +583,7 @@ async function testOrbitShape(ok) {
 async function testOrbitView(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await openOrbit(page);
+    await openPaintedOrbit(page);
     const shape = await page.evaluate(() => {
       const view = document.querySelector("#board-view");
       const stage = view.querySelector(".agent-orbit");
@@ -608,7 +620,16 @@ async function testOrbitView(browser, origin, ok) {
       JSON.stringify(shape.handles));
     ok("sub-agents stand beside their parent", shape.handles?.children === 3, JSON.stringify(shape.handles));
 
-    const running = await countOver(page, 400);
+    const running = await page.evaluate(async (timeout) => {
+      const rafs = window.__ORBIT_RAFS__;
+      const frames = window.__ORBIT__().frames;
+      await window.__UNTIL__(
+        () => window.__ORBIT_RAFS__ > rafs && window.__ORBIT__().frames > frames,
+        "the visible 3D view to request and draw another frame", timeout,
+      );
+      const handles = window.__ORBIT__();
+      return { rafs: window.__ORBIT_RAFS__ - rafs, frames: handles.frames - frames, handles };
+    }, ORBIT_ACTION_MS);
     ok("a shown 3D view turns", running.rafs > 0 && running.frames > 0 && running.handles?.camera?.spin === true,
       JSON.stringify(running));
 
@@ -877,7 +898,7 @@ export const orbitClearance = (page) => page.evaluate(() => {
 async function testOrbitSpace(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await openOrbit(page, { deps: 4 });
+    await openPaintedOrbit(page, { deps: 4 });
     await page.mouse.move(1, 1);
     await page.evaluate(() => window.__ORBIT_FRAMES__(3));
 
@@ -922,7 +943,7 @@ async function testOrbitSpace(browser, origin, ok) {
     const again = await openWindowTestPage(browser, origin);
     let same = null;
     try {
-      await openOrbit(again.page, { deps: 4 });
+      await openPaintedOrbit(again.page, { deps: 4 });
       same = await readSeats(again.page);
     } finally {
       await again.page.close();
@@ -1087,7 +1108,7 @@ async function testOrbitSpace(browser, origin, ok) {
    * 서니 움직여도 된다), 자란 섬과 다음 열 사이에는 열의 틈이 남는다. */
   const grown = await openWindowTestPage(browser, origin);
   try {
-    await openOrbit(grown.page, { chain: true });
+    await openPaintedOrbit(grown.page, { chain: true });
     await grown.page.mouse.move(1, 1);
     const growth = await grown.page.evaluate(async () => {
       const state = window.__ORBIT_STATE__();
@@ -1142,7 +1163,7 @@ async function testOrbitSpace(browser, origin, ok) {
     const one = await openWindowTestPage(browser, origin);
     try {
       await one.page.setViewportSize({ width, height: 960 });
-      await openOrbit(one.page, ORBIT_SIZES[size]);
+      await openPaintedOrbit(one.page, ORBIT_SIZES[size]);
       await one.page.mouse.move(1, 1);
       await one.page.evaluate(() => {
         window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw, ORBIT.camera.pitch);
@@ -1194,14 +1215,24 @@ async function testOrbitCamera(browser, origin, ok) {
   try {
     await openOrbit(page, { fresh: 0, calm: true });
     await page.mouse.move(1, 1);
-    const camera = () => page.evaluate(() => ({ ...window.__ORBIT__().camera, zoom: agentGraphZoom }));
-    const opened = await camera();
-    await page.evaluate(() => window.__ORBIT_WAIT__(300));
-    const later = await camera();
+    const { opened, later } = await page.evaluate(async (timeout) => {
+      const readCamera = () => {
+        const camera = window.__ORBIT__()?.camera;
+        return camera && { ...camera, zoom: agentGraphZoom };
+      };
+      let opened, later;
+      await window.__UNTIL__(() => (opened = readCamera()), "the opening 3D camera", timeout);
+      // The first frame uses a zero time step, so wait for yaw to change.
+      await window.__UNTIL__(
+        () => (later = readCamera()) && later.yaw !== opened.yaw, "the opening 3D camera to turn", timeout,
+      );
+      return { opened, later };
+    }, ORBIT_ACTION_MS);
     ok("the 3D view opens turning slowly by itself, at the table's pitch",
       opened.spin === true && later.yaw !== opened.yaw && Math.abs(later.pitch - opened.pitch) < 1e-9,
       JSON.stringify({ opened, later }));
 
+    const camera = () => page.evaluate(() => ({ ...window.__ORBIT__().camera, zoom: agentGraphZoom }));
     const corner = await stageCorner(page);
     const turn = await page.evaluate(() => ORBIT.camera.turn);
     const before = await camera();
@@ -1477,7 +1508,7 @@ async function testOrbitStillness(browser, origin, ok) {
 async function testOrbitRemembered(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await openOrbit(page);
+    await openPaintedOrbit(page);
     const corner = await stageCorner(page);
     await page.mouse.move(corner.x, corner.y);
     await page.mouse.down();
@@ -1505,12 +1536,15 @@ async function testOrbitRemembered(browser, origin, ok) {
     }));
     ok("a reopened window stands on the saved view", reopened.choice === "cards" && reopened.stage === true
       && reopened.pressed === "true", JSON.stringify(reopened));
-    const refit = await page.evaluate(async () => {
+    const refit = await page.evaluate(async (timeout) => {
+      const frames = window.__ORBIT__().frames;
       document.querySelector('#board-view [data-relations-view="orbit"]').click();
       await window.__BOARD_SETTLED__();
-      await window.__ORBIT_FRAMES__(2);
+      await window.__UNTIL__(
+        () => window.__ORBIT__().frames > frames, "the first 3D frame after returning from cards", timeout,
+      );
       return { ...window.__ORBIT__().camera, pitchWanted: ORBIT.camera.pitch };
-    });
+    }, ORBIT_ACTION_MS);
     ok("the 3D view it returns to opens at the table's camera, turning",
       refit.spin === true && Math.abs(refit.pitch - refit.pitchWanted) < 1e-9, JSON.stringify(refit));
     ok("the remembered page raises no browser errors", faults.length === 0, faults.join("\n"));
