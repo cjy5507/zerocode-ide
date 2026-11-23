@@ -40,7 +40,11 @@ use crate::transcript::{
 /// The file's size and modification time, used to schedule or skip a read.
 pub type DocStamp = (u64, Option<std::time::SystemTime>);
 
-/// The most recent turns for which a session can keep provisional rows.
+/// The most recent turns for which a session can keep provisional rows: those
+/// the document does not hold yet stand, and those it does are kept by their
+/// ids, so a hook of one that comes late draws nothing. A page that reads lets
+/// a turn go within a turn's end; more than this stand only while nothing
+/// reads, and the document holds the oldest of them by then.
 const TURNS_KEPT: usize = 4;
 
 /// The cursor of a parsed document and the file stamp for that read.
