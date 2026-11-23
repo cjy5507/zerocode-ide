@@ -15467,11 +15467,18 @@ await page.evaluate(() => {
     window.__TOGGLED__ = args;
     return window.__ANSWER__.list_automations();
   };
+  // A paused job folds under one row while another job is on and nothing
+  // narrows the list, and the fold closes with the page (settings.mjs pins
+  // the fold itself). These tests read the paused a2 as a row of its own, so
+  // each opens the fold after the page opens.
+  window.__unfoldPausedAutomations = () =>
+    document.querySelector('.auto-paused-fold[aria-expanded="false"]')?.click();
 });
 await page.evaluate(() => document.getElementById("nav-automations").click());
 await page.waitForTimeout(200);
 
 const autoList = await page.evaluate(() => {
+  window.__unfoldPausedAutomations();
   const rows = [...document.querySelectorAll(".auto-row")].map((row) => ({
     name: row.querySelector(".auto-row-name").textContent,
     schedule: row.querySelector(".auto-row-schedule").textContent,
@@ -16040,6 +16047,7 @@ const runHistory = await page.evaluate(async () => {
   closeAutoForm();
   document.getElementById("nav-automations").click();
   await new Promise((done) => setTimeout(done, 200));
+  window.__unfoldPausedAutomations();
   const counts = [...document.querySelectorAll(".auto-row")].map((row) => {
     const cell = row.querySelector(".auto-row-runs");
     return { said: cell.textContent, shown: !cell.hidden };
@@ -16437,6 +16445,7 @@ const automationDelete = await page.evaluate(async () => {
   window.__ANSWER__.list_automations = () => original;
   await refreshAutomations();
   await settle();
+  window.__unfoldPausedAutomations();
   document.querySelectorAll(".auto-row")[1].click();
   await settle();
   document.getElementById("auto-detail-delete").click();
@@ -16481,6 +16490,7 @@ await page.evaluate(() => {
 const autoLang = await page.evaluate(async () => {
   document.getElementById("nav-automations").click();
   await new Promise((done) => setTimeout(done, 150));
+  window.__unfoldPausedAutomations();
   document.querySelectorAll(".auto-row")[0].click();
   await new Promise((done) => setTimeout(done, 100));
   document.getElementById("auto-detail-edit").click();
@@ -16503,6 +16513,7 @@ const autoLang = await page.evaluate(async () => {
   delete window.__ANSWER__.list_automations;
   delete window.__ANSWER__.save_automation;
   delete window.__ANSWER__.enable_automation;
+  delete window.__unfoldPausedAutomations;
   return { before, after, off, chromeRestored };
 });
 ok(
