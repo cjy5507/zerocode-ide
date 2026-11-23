@@ -164,13 +164,27 @@ function inboxFinishStands(term) {
   return inboxSnapshot.items.some((item) => item.what === "pane_finished" && item.pane?.pane === `term:${term}`);
 }
 
-/* The sidebar's number: what waits on the person (Rust's `counts.waiting`). */
+/* The sidebar's number and the status bar's: what waits on the person (Rust's `counts.waiting`).
+ * 같은 수를 두 곳이 말한다 — 사이드바의 배지(편지함의 문)와 아래 상태줄의 줄(11-23 시안: 이 창에서
+ * 가장 급한 수가 탭 안에 갇히지 않게). 누르면 둘 다 받은 편지함이 연다. 0이면 둘 다 서지 않는다. */
 function paintInboxBadge() {
   const badge = el("inbox-badge");
-  if (!badge) return;
   const waiting = Number(inboxSnapshot.counts?.waiting) || 0;
-  writeTextContent(badge, String(waiting));
-  writeHidden(badge, waiting === 0);
+  if (badge) {
+    writeTextContent(badge, String(waiting));
+    writeHidden(badge, waiting === 0);
+  }
+  const owed = el("sb-owed");
+  if (owed) {
+    if (!owed.__wired) {
+      owed.__wired = true;
+      owed.onclick = () => openInboxView();
+    }
+    writeTextContent(owed.querySelector("#sb-owed-words"), waiting > 0 ? t("statusBar.owed", "답할 일 {{count}}", { count: waiting }) : "");
+    writeAttribute(owed, "data-tip", t("statusBar.owedTip", "사람을 기다리는 일 {{count}}개 — 받은 편지함 열기", { count: waiting }));
+    writeAttribute(owed, "aria-label", t("statusBar.owedTip", "사람을 기다리는 일 {{count}}개 — 받은 편지함 열기", { count: waiting }));
+    writeHidden(owed, waiting === 0);
+  }
 }
 
 function inboxViews() {

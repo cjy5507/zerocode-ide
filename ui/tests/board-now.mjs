@@ -631,6 +631,10 @@ export async function testBoardNow(browser, origin, ok) {
     ok("the build card says running at its right, and which of how many steps the build is on",
       now.build?.state === "도는 중" && now.build.dot === now.tokens.run && now.build.meta.includes("네 단계 중 셋째"),
       JSON.stringify(now.build));
+    // Every step's usual is recorded, so the card says when it ends (11-23) — the same buildEnd the head's
+    // 「평소보다 늦음」 reads, not an invented clock.
+    ok("the build's second line says when it is expected to end — from the same usual times the band is long by",
+      now.build?.meta.some((words) => /^예상 종료 \d{2}:\d{2}$/.test(words)), JSON.stringify(now.build?.meta));
     ok("its band is the record's steps in its words: two done with what they took, the running one with its minutes beside its usual, the one ahead with its usual",
       JSON.stringify(now.build?.band.map(([state, name]) => [state, name])) === JSON.stringify([
         ["is-done", "결합 시험"], ["is-done", "앱 빌드"], ["is-running", "zo 시험"], ["is-ahead", "발행"]])
@@ -711,6 +715,42 @@ export async function testBoardNow(browser, origin, ok) {
       !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"]) && now.foldsElsewhere.length === 0
         && now.runsFoot === "오늘 끝난 일 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
+
+    /* ---- 같은 자리를 기다리는 「차례 기다림」의 묶음 (11-23): 둘 이상이면 접힌 머리 하나 ----
+     * 「띄울 워커가 없습니다 · 시안 B」가 행마다 반복되는 대신 묶음의 이름이 그 자리를 한 번 말하고,
+     * 머리를 누르면 각 행이 다시 선다 — 과업 하나하나의 이름과 단추는 그대로다. */
+    await page.evaluate(() => {
+      const base = window.__DESK__.tasks.find((one) => one.id === "t-66912");
+      window.__DESK__.tasks.push(
+        { ...base, id: "t-66913", title: "줄 앞 과업 둘" },
+        { ...base, id: "t-66914", title: "줄 앞 과업 셋" });
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+    });
+    const queueRead = () => page.evaluate(() => {
+      const head = document.querySelector('#board-view [data-goal^="queue:"]');
+      return {
+        head: head?.querySelector(".board-goal-name")?.textContent ?? null,
+        note: head?.querySelector(".board-goal-note")?.textContent ?? null,
+        open: head?.querySelector(".board-goal-fold")?.getAttribute("aria-expanded") ?? null,
+        rows: document.querySelectorAll('#board-view .board-run[data-task^="run-desk/t-6691"]').length,
+      };
+    });
+    const queueGathered = await queueRead();
+    await page.click('#board-view [data-goal^="queue:"] .board-goal-fold');
+    const queueSpread = await queueRead();
+    await page.click('#board-view [data-goal^="queue:"] .board-goal-fold');
+    const queueRegathered = await queueRead();
+    ok("two or more rows waiting for the same seat fold behind one head that names the seat — pressing it stands each task's own row again",
+      queueGathered.head === "차례 기다림 · 시안 B" && queueGathered.note === "같은 자리를 기다리는 일 3개"
+        && queueGathered.open === "false" && queueGathered.rows === 0
+        && queueSpread.open === "true" && queueSpread.rows === 3
+        && queueRegathered.open === "false" && queueRegathered.rows === 0,
+      JSON.stringify({ queueGathered, queueSpread, queueRegathered }));
+    await page.evaluate(() => {
+      window.__DESK__.tasks = window.__DESK__.tasks.filter((one) => !["t-66913", "t-66914"].includes(one.id));
+      boardNowChoice.folded.clear();
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+    });
 
     /* ---- 검증 철회(t-81913): 통과 대신 철회 사실·까닭, 단추는 보고 읽기 하나, 다시 통과하는 길은 줄 끝 말 ---- */
     const withdrawnRow = async (why) => {
@@ -1412,6 +1452,8 @@ async function testBoardNowClarity(browser, origin, ok) {
         rows: [...line.querySelectorAll(".board-line-job")].map((row) => row.dataset.state),
         fold: shown(fold) ? [fold.textContent, fold.getAttribute("aria-expanded")] : null,
         paused: shown(line.querySelector(".board-line-paused")) ? line.querySelector(".board-line-paused").textContent : "",
+        retry: shown(line.querySelector(".board-line-retry")),
+        whens: [...line.querySelectorAll(".board-line-job")].map((row) => row.querySelector(".board-line-when")?.textContent ?? ""),
         sum: line.querySelector(".board-line-sum").textContent,
         release: [Math.round(release.top), Math.round(release.bottom)],
         line: [Math.round(line.getBoundingClientRect().top), Math.round(line.getBoundingClientRect().height)],
@@ -1419,19 +1461,28 @@ async function testBoardNowClarity(browser, origin, ok) {
       };
     });
     const tally = (rows) => rows.reduce((counts, state) => ({ ...counts, [state]: (counts[state] ?? 0) + 1 }), {});
+    /* ---- 빌드 줄의 묶음 (11-23 시안): 실패가 먼저, 조용한 끝만 접힌다 ----
+     *
+     * 실패한 일감이 통과 열댓 개 사이에 묻히는 것이 옛 모양이었다. 지금은 실패(상한·멈춤·끝 모름 포함)가
+     * 늘 맨 앞에 서고 — 카드 아래에 선 줄에서도 — 종료코드가 그 옆에 선다. 접히는 것은 통과·뺌의 조용한
+     * 끝뿐이고, 실패가 둘 이상이면 「실패 전부 다시」가 머리에 선다. */
     await standLine({ running: 0, waiting: 5, ended: 12, paused: true });
     const stalled = await readLinePlace();
     ok("a paused line with five jobs waiting and twelve ended stands whole under the cards — the running release's card stands first, on the first screen",
       stalled.order[0] === "card:release" && stalled.order.at(-1) === "line" && stalled.release[0] < stalled.line[0]
         && stalled.release[1] <= stalled.screen && stalled.rows.length === 17 && stalled.fold === null
-        && stalled.sum === "도는 0 · 기다림 5" && stalled.paused === "줄 멈춤 · 발행이 도는 동안",
+        && stalled.rows.slice(0, 3).every((state) => state === "failed")
+        && stalled.whens.slice(0, 3).every((words) => words.includes("종료코드 1"))
+        && stalled.sum === "실패 3 · 도는 0 · 기다림 5" && stalled.paused === "줄 멈춤 · 발행이 도는 동안",
       JSON.stringify(stalled));
     await standLine({ running: 1, waiting: 5, ended: 12, paused: false });
     const moving = await readLinePlace();
-    ok("while a job runs on it the line stands over the cards with what runs and what waits, its twelve ended jobs behind one line",
+    ok("while a job runs on it the line stands over the cards, failures first with their exit codes, the nine quiet endings behind one line — and a retry-all since failures outnumber one",
       moving.order[0] === "line:live" && moving.order[1] === "card:release"
-        && JSON.stringify(tally(moving.rows)) === JSON.stringify({ running: 1, waiting: 5 })
-        && JSON.stringify(moving.fold) === JSON.stringify(["끝난 일감 12개", "false"]),
+        && JSON.stringify(tally(moving.rows)) === JSON.stringify({ failed: 3, running: 1, waiting: 5 })
+        && moving.whens.slice(0, 3).every((words) => words.includes("종료코드 1"))
+        && moving.retry === true
+        && JSON.stringify(moving.fold) === JSON.stringify(["끝난 일감 9개", "false"]),
       JSON.stringify(moving));
     await page.click("#board-view .board-line-ended");
     await fullBoard(page);
@@ -1440,8 +1491,8 @@ async function testBoardNowClarity(browser, origin, ok) {
     await fullBoard(page);
     const gathered = await readLinePlace();
     ok("pressing that line stands the ended jobs where they were, and pressing again folds them",
-      spread.rows.length === 18 && JSON.stringify(spread.fold) === JSON.stringify(["끝난 일감 12개", "true"]) && spread.line[1] > moving.line[1]
-        && gathered.rows.length === 6 && JSON.stringify(gathered.fold) === JSON.stringify(["끝난 일감 12개", "false"])
+      spread.rows.length === 18 && JSON.stringify(spread.fold) === JSON.stringify(["끝난 일감 9개", "true"]) && spread.line[1] > moving.line[1]
+        && gathered.rows.length === 9 && JSON.stringify(gathered.fold) === JSON.stringify(["끝난 일감 9개", "false"])
         && gathered.line[1] === moving.line[1],
       JSON.stringify({ spread, gathered }));
 

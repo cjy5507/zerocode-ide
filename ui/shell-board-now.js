@@ -1511,7 +1511,42 @@ function paintDeskRunning(block, now, view) {
     if (folded) continue;
     const all = boardNowChoice.goalsAll.has(goal.key);
     const live = all ? goal.live : goal.live.slice(0, BOARD_GOAL_ROWS_SHOWN);
+    // 같은 워커 자리를 기다리는 「차례 기다림」 행이 둘 이상이면 접힌 머리 하나로 묶는다(11-23 시안):
+    // 「띄울 워커가 없습니다 · 좌석」이 행마다 반복돼 읽는 데 걸리는 것은 같은 말이고, 묶음의 이름이
+    // 그 좌석을 한 번 말한다. 「앞선 과업이 끝나기를 기다립니다」는 다른 기다림이라 묶지 않는다.
+    const queues = new Map();
     for (const row of live) {
+      if (row.state !== "queue" || row.task.stage !== "ready") continue;
+      const seat = boardRunName(row.task.run) || row.task.run;
+      const group = queues.get(seat) ?? [];
+      group.push(row);
+      queues.set(seat, group);
+    }
+    const queuedDone = new Set();
+    for (const row of live) {
+      const seat = row.state === "queue" && row.task.stage === "ready" ? boardRunName(row.task.run) || row.task.run : null;
+      const group = seat !== null ? queues.get(seat) : null;
+      if (group && group.length > 1) {
+        if (queuedDone.has(seat)) continue;
+        queuedDone.add(seat);
+        const groupKey = `queue:${goal.key}:${seat}`;
+        const head = take(groupKey, () => boardGoalHead(view));
+        writeAttribute(head, "data-goal", groupKey);
+        const groupFold = head.querySelector(".board-goal-fold");
+        const open = boardNowChoice.folded.has(groupKey);
+        writeAttribute(groupFold, "aria-expanded", String(open));
+        groupFold.querySelector(".icon")?.classList.toggle("is-open", open);
+        writeTextContent(head.querySelector(".board-goal-name"),
+          t("board.now.queueGroup", "차례 기다림 · {{seat}}", { seat }));
+        writeTextContent(head.querySelector(".board-goal-note"),
+          t("board.now.queueGroupNote", "같은 자리를 기다리는 일 {{count}}개", { count: group.length }));
+        if (!open) continue;
+        for (const one of group) {
+          const key = `task:${one.task.run}/${one.task.id}`;
+          paintBoardRunRow(take(key, () => boardRunRow(view)), one, now);
+        }
+        continue;
+      }
       const key = `task:${row.task.run}/${row.task.id}`;
       paintBoardRunRow(take(key, () => boardRunRow(view)), row, now);
       const raw = boardRunRaw(row);

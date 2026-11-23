@@ -1896,23 +1896,18 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         paused: line?.querySelector(".board-line-paused")?.checkVisibility() ? line.querySelector(".board-line-paused").textContent : "",
       };
     });
-    // A line with a job running stands over the cards and folds what ended (11-11): the fold is pressed open to read the whole line.
-    const foldedLine = await readLine();
-    ok("while a job runs on it the build line shows what runs and what waits, and folds what ended behind one line",
-      foldedLine.shown && JSON.stringify(foldedLine.jobs.map((one) => one[0])) === JSON.stringify(["j-run", "j-wait"])
-        && JSON.stringify(foldedLine.ended) === JSON.stringify(["끝난 일감 1개", "false"]),
-      JSON.stringify(foldedLine));
-    await page.click("#board-view .board-line-ended");
-    await page.waitForFunction(() => document.querySelectorAll("#board-view .board-line-job").length === 3);
+    // A line with a job running stands over the cards. A failure stands first with its exit code, never
+    // folded away (11-23); only quiet endings — passed, withdrawn — fold, and there are none here.
     const lineRead = await readLine();
-    ok("pressed open, the machine's build line stands whole: what runs and for how long, what waits and its place, what ended — each with its own buttons",
-      lineRead.shown && lineRead.head.startsWith("빌드 줄 · 이 기계도는 1 · 기다림 1") && lineRead.head.endsWith("줄 멈추기")
-        && JSON.stringify(lineRead.ended) === JSON.stringify(["끝난 일감 1개", "true"])
+    ok("while a job runs on it the build line stands whole: the failure first with its exit code, then what runs and for how long, what waits and its place — each with its own buttons",
+      lineRead.shown && lineRead.head.startsWith("빌드 줄 · 이 기계실패 1 · 도는 1 · 기다림 1") && lineRead.head.endsWith("줄 멈추기")
+        && lineRead.ended === null
         && JSON.stringify(lineRead.jobs.map((one) => [one[0], one[1], one[2], one[3], one[5]])) === JSON.stringify([
+          ["j-fail", "실패", "j-fail 일", "shop · run-1/w-2", "다시|지우기"],
           ["j-run", "도는 중", "j-run 일", "shop · run-1/w-2", "멈추기"],
-          ["j-wait", "차례 기다림", "j-wait 일", "shop · run-1/w-2", "맨 앞으로|빼기"],
-          ["j-fail", "실패", "j-fail 일", "shop · run-1/w-2", "다시|지우기"]])
-        && lineRead.jobs[0][4] === "12분째" && lineRead.jobs[1][4] === "1번째" && /^\d{2}:\d{2}$/.test(lineRead.jobs[2][4])
+          ["j-wait", "차례 기다림", "j-wait 일", "shop · run-1/w-2", "맨 앞으로|빼기"]])
+        && /^\d{2}:\d{2} · 종료코드 1$/.test(lineRead.jobs[0][4])
+        && lineRead.jobs[1][4] === "12분째" && lineRead.jobs[2][4] === "1번째"
         && lineRead.paused === "",
       JSON.stringify(lineRead));
     // One press at a time: a press holds the line's buttons until its answer is read again.
@@ -1932,6 +1927,19 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const pausedLine = await readLine();
     ok("a paused line says so and why, and its button opens it again",
       pausedLine.paused === "줄 멈춤 · release lane" && pausedLine.head.endsWith("줄 다시 열기"), JSON.stringify(pausedLine));
+    /* 실패가 둘 이상이면 머리에 「실패 전부 다시」가 선다 — 한 번의 누름이 실패마다 같은 `line_act`의
+     * 「다시」를 줄의 차례로 부른다(11-23). */
+    await recordBuilds(() => {
+      const failed = window.__BUILDS_LINE__.jobs.find((one) => one.id === "j-fail");
+      window.__BUILDS_LINE__ = { ...window.__BUILDS_LINE__, pause: null,
+        jobs: [...window.__BUILDS_LINE__.jobs, { ...failed, id: "j-fail2", what: "j-fail2 일", rc: 2 }] };
+    });
+    await page.click("#board-view .board-line-retry");
+    await page.waitForFunction(() => !linePressing);
+    const retriedAll = await page.evaluate(() => window.__LINE_SENT__.slice(-2));
+    ok("「실패 전부 다시」 presses retry on each failed job, by the same `zo line` command, in the line's order",
+      JSON.stringify(retriedAll) === JSON.stringify([{ job: "j-fail", verb: "retry" }, { job: "j-fail2", verb: "retry" }]),
+      JSON.stringify(retriedAll));
     await recordBuilds(() => {
       window.__BUILDS_LINE__ = null;
       deskChoice.lineEnded = false;

@@ -3250,6 +3250,14 @@ function buildTookWords(build, now) {
   return runningWord(Number(build.started_ms) || now, now) ?? t("board.now.justStarted", "방금 시작");
 }
 
+/* 도는 단계가 있을 때 둘째 줄이 말하는 끝 — 예상 종료 시각. 계산은 맨 위 문장의 「평소보다 늦음」이 이미
+ * 쓰는 것(`buildEnd`)이다: 지난 통과의 가운데 값이 있어야만 지어낸 시각이 아니라 서고, 한 단계라도 평소를
+ * 모르면 지어내지 않는다. 지연은 그 문장의 몫이라 여기 다시 말하지 않는다. */
+function buildEtaWords(build, now) {
+  const end = buildEnd(build, now);
+  return end?.known && end.end > now ? t("board.build.endsAt", "예상 종료 {{at}}", { at: boardClock(end.end, now) }) : "";
+}
+
 /* 실패하거나 멈춘 단계 — 끝난 실행에서 다시 돌 자리(「…부터 다시」)이고, 멈춘 자리를 말하는 단계다. */
 function buildHaltedStep(build) {
   if (build.state !== "failed" && build.state !== "cancelled") return null;
@@ -3400,7 +3408,7 @@ function paintBuildCard(card, build, order, now, hands) {
   writeHidden(sha, !build.sha);
   writeTextContent(position, at >= 0 ? buildStepOfWords(at + 1, steps.length) : "");
   writeHidden(position, at < 0);
-  const tookWords = buildTookWords(build, now);
+  const tookWords = buildTookWords(build, now) || buildEtaWords(build, now);
   writeTextContent(took, tookWords);
   writeHidden(took, tookWords === "");
   paintBuildActs(acts, build, hands);
@@ -3530,10 +3538,16 @@ let linePressing = false;
 function buildLineNode() {
   const line = deskElement("section", "board-line");
   const head = deskElement("header", "board-line-head");
+  const retry = deskElement("button", "board-build-aux board-line-retry");
+  retry.type = "button";
+  retry.onclick = () => {
+    const jobs = (buildsAnswerHere()?.line?.jobs ?? []).filter(lineJobFailed);
+    if (jobs.length > 0) void pressLineRetryAll(jobs);
+  };
   const pause = deskElement("button", "board-build-aux board-line-pause");
   pause.type = "button";
   pause.onclick = () => void pressLinePause(!buildsAnswerHere()?.line?.pause);
-  head.append(deskElement("strong", "board-line-title"), deskElement("span", "board-line-sum"), pause);
+  head.append(deskElement("strong", "board-line-title"), deskElement("span", "board-line-sum"), retry, pause);
   const jobs = deskElement("ol", "board-line-jobs");
   jobs.onclick = (event) => {
     const button = event.target.closest("button[data-verb]");
@@ -3558,7 +3572,16 @@ function lineJobOpen(job) {
   return job.state === "running" || job.state === "waiting";
 }
 
-/* 한 일감의 「언제」: 도는 것은 걸린 시간, 기다리는 것은 차례, 끝난 것은 상태와 끝난 시각. */
+/* 사람이 다시 볼 일감 — 실패로 끝난 것(상한·멈춤·끝 모름 포함). 통과·뺌은 조용한 끝이다
+ * (11-23 시안, Buildkite의 「상태별 묶음 — 기다림·실패가 위로」와 같은 차례). */
+const LINE_FAILED = Object.freeze(["failed", "capped", "stopped", "lost"]);
+
+function lineJobFailed(job) {
+  return LINE_FAILED.includes(job.state);
+}
+
+/* 한 일감의 「언제」: 도는 것은 걸린 시간, 기다리는 것은 차례, 끝난 것은 상태와 끝난 시각.
+ * 실패로 끝난 일감은 그 곁에 까닭이 선다 — 종료코드(`rc`), 누가 멈췄는지(`ended_by`). */
 function lineJobWhen(job, places, now) {
   if (job.state === "running") {
     return Number(job.started_ms) > 0 ? t("board.line.runningFor", "{{time}}째", { time: deskSpanWords(now - Number(job.started_ms)) }) : "";
@@ -3567,25 +3590,40 @@ function lineJobWhen(job, places, now) {
     const place = places?.[job.id];
     return Number.isInteger(place) ? t("board.line.place", "{{place}}번째", { place }) : "";
   }
-  return Number(job.ended_ms) > 0 ? boardClock(Number(job.ended_ms), now) : "";
+  const at = Number(job.ended_ms) > 0 ? boardClock(Number(job.ended_ms), now) : "";
+  if (!lineJobFailed(job)) return at;
+  const why = Number.isInteger(job.rc) ? t("board.line.exitCode", "종료코드 {{rc}}", { rc: job.rc })
+    : job.ended_by ? t("board.line.endedBy", "{{who}}이(가) 멈춤", { who: job.ended_by }) : "";
+  return [at, why].filter(Boolean).join(" · ");
 }
 
 function paintBuildLine(node, line, now, live = false) {
   const [head, paused, list, ended] = node.children;
-  const [title, sum, pause] = head.children;
+  const [title, sum, retry, pause] = head.children;
   const jobs = line?.jobs ?? [];
-  // 카드 위에 선 줄(`live`)은 끝난 일감을 접는다 — 몇 개인지는 접힌 줄이 말하고, 사람이 펴면 모두 선다.
-  const over = live ? jobs.filter((job) => !lineJobOpen(job)).length : 0;
-  const folded = over > 0 && !deskChoice.lineEnded;
-  const shown = folded ? jobs.filter(lineJobOpen) : jobs;
-  writeHidden(ended, over === 0);
-  writeTextContent(ended.lastElementChild, over > 0 ? t("board.line.ended", "끝난 일감 {{count}}개", { count: over }) : "");
+  // 상태별 묶음(11-23 시안): 실패가 먼저 — 통과 열댓 개 사이에 묻히지 않게. 그다음 도는 것과 기다리는
+  // 것, 맨 뒤가 조용히 끝난 것(통과·뺌)으로 「끝난 일감 N개」 뒤에 접힌다. 접히는 것은 조용한 끝뿐이다:
+  // 실패는 줄이 카드 위에 서든 아래에 서든 언제나 보인다. 묶음 안의 차례는 줄의 차례 그대로다.
+  const failedJobs = jobs.filter(lineJobFailed);
+  const open = jobs.filter(lineJobOpen);
+  const quiet = jobs.filter((job) => !lineJobOpen(job) && !lineJobFailed(job));
+  // 접히는 것은 줄이 카드 위에 서서 첫 화면을 다툴 때뿐 — 카드 아래에 서면 끝난 일감도 다 선다.
+  const folded = live && quiet.length > 0 && !deskChoice.lineEnded;
+  const shown = [...failedJobs, ...open, ...(folded ? [] : quiet)];
+  writeHidden(ended, !live || quiet.length === 0);
+  writeTextContent(ended.lastElementChild, quiet.length > 0 ? t("board.line.ended", "끝난 일감 {{count}}개", { count: quiet.length }) : "");
   writeAttribute(ended, "aria-expanded", String(!folded));
-  ended.querySelector(".icon")?.classList.toggle("is-open", over > 0 && !folded);
+  ended.querySelector(".icon")?.classList.toggle("is-open", quiet.length > 0 && !folded);
   writeTextContent(title, t("board.line.title", "빌드 줄 · 이 기계"));
-  const running = jobs.filter((job) => job.state === "running").length;
-  const waiting = jobs.filter((job) => job.state === "waiting").length;
-  writeTextContent(sum, t("board.line.sum", "도는 {{running}} · 기다림 {{waiting}}", { running, waiting }));
+  const running = open.filter((job) => job.state === "running").length;
+  const waiting = open.length - running;
+  writeTextContent(sum, failedJobs.length > 0
+    ? t("board.line.sumFail", "실패 {{failed}} · 도는 {{running}} · 기다림 {{waiting}}", { failed: failedJobs.length, running, waiting })
+    : t("board.line.sum", "도는 {{running}} · 기다림 {{waiting}}", { running, waiting }));
+  // 실패가 둘 이상이면 「실패 전부 다시」가 머리에 선다 — 한 번의 누름이 실패마다 같은 「다시」를 누른다.
+  writeTextContent(retry, t("board.line.retryAll", "실패 전부 다시"));
+  writeHidden(retry, failedJobs.length < 2);
+  writeDisabled(retry, linePressing);
   writeTextContent(pause, line?.pause ? t("board.line.resume", "줄 다시 열기") : t("board.line.pause", "줄 멈추기"));
   writeDisabled(pause, linePressing);
   const why = line?.pause?.why || line?.pause?.by || "";
@@ -3641,6 +3679,30 @@ async function pressLineAct(job, verb) {
     }
   } catch (error) {
     toast(String(error?.message ?? error), "halt");
+  } finally {
+    linePressing = false;
+    await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+    scheduleDeskPaint();
+  }
+}
+
+/* 「실패 전부 다시」 — 실패한 일감마다 줄의 「다시」를 차례로 누른다. 하나가 거절돼도 나머지는 간다:
+ * 어느 것이 안 됐는지는 토스트 하나와 줄의 다시 그림이 말한다. */
+async function pressLineRetryAll(jobs) {
+  if (linePressing || jobs.length === 0) return;
+  linePressing = true;
+  scheduleDeskPaint();
+  let retried = 0;
+  try {
+    for (const job of jobs) {
+      try {
+        await invoke("line_act", { job: job.id, verb: "retry" });
+        retried += 1;
+      } catch (error) {
+        toast(String(error?.message ?? error), "halt");
+      }
+    }
+    if (retried > 0) toast(t("board.line.retriedAll", "{{count}}개를 다시 세웠습니다", { count: retried }), "");
   } finally {
     linePressing = false;
     await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());

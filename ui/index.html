@@ -8460,6 +8460,12 @@
 
     <footer class="statusbar">
       <span class="sb-item" id="sb-project"></span>
+      <!-- 사람을 기다리는 일의 수 — 받은 편지함의 `counts.waiting`과 같은 수로, 누르면 그 목록이
+           연다. 이 창에서 가장 급한 수가 「지금」 탭 안에 갇히지 않게(11-23 시안). 0이면 서지 않는다. -->
+      <button class="sb-item sb-button" id="sb-owed" type="button" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-bell"></use></svg>
+        <span id="sb-owed-words"></span>
+      </button>
       <!-- Native Codex pointer delivery is optional, but losing it must not
            be invisible. This stays for exactly as long as a degraded worker
            does; clicking repeats the reason after the first toast is gone. -->

@@ -137,6 +137,13 @@ export async function testInbox(browser, origin, standBackend, ok) {
   ok("its number is what Rust counts as waiting (7), not a recount", door.badge === "7" && door.badgeShown, JSON.stringify(door));
   ok("「나를 기다림」 and 「주의 필요」 left the sidebar", !door.oldList && !door.oldRow, JSON.stringify(door));
 
+  // The same number stands on the status bar — the most urgent count is not locked inside the tab (11-23).
+  const owed = await page.evaluate(() => {
+    const row = document.getElementById("sb-owed");
+    return { shown: row ? !row.hidden : false, words: row?.querySelector("#sb-owed-words")?.textContent ?? null };
+  });
+  ok("the status bar says 답할 일 7 — the same number, before any tab opens", owed.shown && owed.words === "답할 일 7", JSON.stringify(owed));
+
   // One screen from the start to the answer sent (the old road crossed three: sidebar card,
   // task board, the answer box). A screen is the active tab; its changes are counted.
   const screens = await page.evaluate(() => {
@@ -632,5 +639,13 @@ export async function testInbox(browser, origin, standBackend, ok) {
       `INBOX_REPORT screens=${crossed} paint_rows=${PAINT_ROWS} rewritten_ms_median=${median.toFixed(2)} rewritten_ms_max=${timings.changed.at(-1).toFixed(2)} steady_ms_median=${middle(timings.steady).toFixed(2)}`,
     );
   }
+  // The status bar's line is a door too: from any tab, pressing it opens this page (11-23).
+  const owedDoor = await page.evaluate(() => {
+    document.getElementById("nav-agents").click();
+    const away = activeTabId;
+    document.getElementById("sb-owed").click();
+    return { away, back: activeTabId };
+  });
+  ok("the status bar's 「답할 일」 opens the inbox from wherever the window stood", owedDoor.away !== "inbox" && owedDoor.back === "inbox", JSON.stringify(owedDoor));
   await page.close();
 }

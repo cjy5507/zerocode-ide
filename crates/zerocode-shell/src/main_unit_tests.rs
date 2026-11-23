@@ -2482,7 +2482,7 @@ fn platform_tray_settings_match_orcas_defaults_and_share_one_native_owner() {
             && shipped_backend().contains("native_tray::ActivitySource::AgentTaskComplete")
             && shipped_backend().contains("native_tray::ActivitySource::TerminalBell")
             && shipped_backend()
-                .contains("native_tray()\n                    .clear_activity(handle)")
+                .contains("native_tray()\n                        .clear_activity(handle)")
             && shipped_backend().contains(".hide_main_on_close(handle)")
             && shipped_backend().contains("api.prevent_close();")
             && native.contains("app.tray_by_id(TRAY_ID).is_some()")
