@@ -18,7 +18,7 @@
 //! its format has been measured; a format guessed at is a cost nobody can check.
 
 use crate::agent::AgentKind;
-use crate::usage_stats::{SourceTurn, estimate_cost_usd, parse_record};
+use crate::usage_stats::{SourceTurn, parse_record};
 use crate::usage_stats_codex::{ReadState, read_record};
 
 /// What an assistant record without a session of its own is filed under: the
@@ -97,13 +97,8 @@ pub struct CodexFormat {
 
 /// What a turn cost at its model's price.
 fn cost_of_turn(turn: &crate::usage_ledger::Entry) -> CallCost {
-    crate::usage_stats_codex::estimate_cost_usd(
-        turn.model.as_deref(),
-        turn.input_tokens,
-        turn.cached_input_tokens,
-        turn.output_tokens,
-    )
-    .map_or(CallCost::Unpriced, CallCost::Usd)
+    turn.estimated_cost_usd
+        .map_or(CallCost::Unpriced, CallCost::Usd)
 }
 
 impl CostReader for CodexFormat {
@@ -144,14 +139,7 @@ impl ClaudeFormat {
 
 /// What a call cost at its model's price.
 fn cost_of(turn: &SourceTurn) -> CallCost {
-    estimate_cost_usd(
-        turn.model.as_deref(),
-        turn.input_tokens,
-        turn.output_tokens,
-        turn.cache_read_tokens,
-        turn.cache_write_tokens,
-    )
-    .map_or(CallCost::Unpriced, CallCost::Usd)
+    crate::usage_stats::cost_of_turn(turn).map_or(CallCost::Unpriced, CallCost::Usd)
 }
 
 impl CostReader for ClaudeFormat {
@@ -169,6 +157,8 @@ impl CostReader for ClaudeFormat {
                 open.output_tokens = open.output_tokens.max(turn.output_tokens);
                 open.cache_read_tokens = open.cache_read_tokens.max(turn.cache_read_tokens);
                 open.cache_write_tokens = open.cache_write_tokens.max(turn.cache_write_tokens);
+                open.cache_write_1h_tokens =
+                    open.cache_write_1h_tokens.max(turn.cache_write_1h_tokens);
                 if turn.model.is_some() {
                     open.model = turn.model;
                 }

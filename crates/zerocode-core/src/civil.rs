@@ -19,22 +19,7 @@ pub const MS_PER_HOUR: i64 = 3_600_000;
 /// One day, in milliseconds.
 pub const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
 
-/// Days since 1970-01-01 for a proleptic Gregorian date.
-///
-/// `month` is 1-12 and `day` is 1-31; a date that does not exist answers as
-/// though the extra days rolled forward, which is the algorithm's own
-/// behaviour and not a validation this owes its callers.
-#[must_use]
-pub const fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month = month as i64;
-    let day = day as i64;
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
+pub use model_prices::days_from_civil;
 
 /// The calendar date `days` after 1970-01-01 — the exact inverse of
 /// [`days_from_civil`].

@@ -147,6 +147,10 @@ fn claude_scan() -> usage_stats::Ledger {
             total_cache_read_tokens: 30_000,
             total_cache_write_tokens: 4_000,
             location_breakdown: Vec::new(),
+            cost: model_prices::CostTotal {
+                cost_usd: Some(0.07),
+                unpriced_requests: 0,
+            },
         }],
         daily_aggregates: Vec::new(),
     }

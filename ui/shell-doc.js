@@ -65,6 +65,7 @@ const TOKEN_PROVIDERS = [
       cacheWrite: row.cache_create ?? 0,
       reasoning: 0,
       cost: row.cost_usd ?? null,
+      unpricedRequests: row.unpriced_requests ?? 0,
     }),
     session: (row) => ({
       session: row.session,
@@ -82,7 +83,9 @@ const TOKEN_PROVIDERS = [
       tokens: tokenBuckets(row.tokens),
       oursTokens: tokenBuckets(row.ours_tokens),
       cost: row.cost_usd ?? null,
+      unpricedRequests: row.unpriced_requests ?? 0,
       oursCost: row.ours_cost_usd ?? null,
+      oursUnpricedRequests: row.ours_unpriced_requests ?? 0,
     }),
     /* 캐시 재사용률 — 읽어 온 몫이 "새로 보냈을 입력 + 읽어 온 몫"에서
      * 차지하는 비율(Orca ClaudeUsagePane.tsx:234의 그 식). */
@@ -101,7 +104,7 @@ const TOKEN_PROVIDERS = [
       { word: t("tokens.output", "출력"), of: (row) => tokenCount(row.output) },
       { word: t("tokens.cacheRead", "캐시 읽기"), of: (row) => tokenCount(row.cacheRead) },
       { word: t("tokens.cacheWrite", "캐시 쓰기"), of: (row) => tokenCount(row.cacheWrite) },
-      { word: t("tokens.cost", "비용"), of: (row) => tokenCost(row.cost) },
+      { word: t("tokens.cost", "비용"), of: (row) => tokenUsageCost(row) },
     ],
     countWord: () => t("tokens.messageCount", "메시지"),
     /* 최근 대화 표에서 낱말로 서는 열이 하나 더 있다 — 브랜치. */
@@ -116,7 +119,7 @@ const TOKEN_PROVIDERS = [
         word: t("tokens.cache", "캐시"),
         of: (one) => tokenShort(tokenSide(one, mine).cacheRead + tokenSide(one, mine).cacheWrite),
       },
-      { word: t("tokens.cost", "비용"), of: (one) => tokenCost(tokenSide(one, mine).cost) },
+      { word: t("tokens.cost", "비용"), of: (one) => tokenUsageCost(tokenSide(one, mine)) },
     ],
     /* 이 판이 세우는 카드 여덟 장, Orca의 순서 그대로. */
     cards: (slice) => [
@@ -131,7 +134,7 @@ const TOKEN_PROVIDERS = [
         word: t("tokens.sessionsMessages", "대화 / 메시지"),
         said: `${tokenCount(slice.sessions.length)} / ${tokenCount(slice.sum.turns)}`,
       },
-      { glyph: "book", word: t("tokens.estimatedCost", "추정 비용"), said: tokenCost(slice.sum.cost) },
+      { glyph: "book", word: t("tokens.estimatedCost", "추정 비용"), said: tokenUsageCost(slice.sum) },
     ],
     /* 카드 밑 한 줄 — 재사용률이 무엇의 비율인지. 백틱은 쓰지 않는다
      * (no_user_facing_string_is_written_in_markdown). */
@@ -165,6 +168,7 @@ const TOKEN_PROVIDERS = [
       cacheWrite: 0,
       reasoning: row.reasoning_output ?? 0,
       cost: row.cost_usd ?? null,
+      unpricedRequests: row.unpriced_requests ?? 0,
     }),
     session: (row) => ({
       session: row.session,
@@ -182,7 +186,9 @@ const TOKEN_PROVIDERS = [
       tokens: tokenBuckets(row.tokens),
       oursTokens: tokenBuckets(row.ours_tokens),
       cost: row.cost_usd ?? null,
+      unpricedRequests: row.unpriced_requests ?? 0,
       oursCost: row.ours_cost_usd ?? null,
+      oursUnpricedRequests: row.ours_unpriced_requests ?? 0,
     }),
     // 캐시가 입력의 일부이므로 분모는 입력 하나다. 카드로는 서지 않고, 이
     // 값이 필요한 곳이 하나 더 늘면 여기 한 자리에서 답한다.
@@ -204,7 +210,7 @@ const TOKEN_PROVIDERS = [
       { word: t("tokens.cachedInput", "캐시 입력"), of: (row) => tokenCount(row.cacheRead) },
       { word: t("tokens.output", "출력"), of: (row) => tokenCount(row.output) },
       { word: t("tokens.reasoning", "추론 출력"), of: (row) => tokenCount(row.reasoning) },
-      { word: t("tokens.cost", "비용"), of: (row) => tokenCost(row.cost) },
+      { word: t("tokens.cost", "비용"), of: (row) => tokenUsageCost(row) },
     ],
     countWord: () => t("tokens.turnCount", "턴"),
     recentWords: 0,
@@ -213,7 +219,7 @@ const TOKEN_PROVIDERS = [
       { word: t("tokens.input", "입력"), of: (one) => tokenShort(tokenSide(one, mine).input) },
       { word: t("tokens.cachedInput", "캐시 입력"), of: (one) => tokenShort(tokenSide(one, mine).cacheRead) },
       { word: t("tokens.output", "출력"), of: (one) => tokenShort(tokenSide(one, mine).output) },
-      { word: t("tokens.cost", "비용"), of: (one) => tokenCost(tokenSide(one, mine).cost) },
+      { word: t("tokens.cost", "비용"), of: (one) => tokenUsageCost(tokenSide(one, mine)) },
     ],
     cards: (slice) => [
       { glyph: "upload", word: t("tokens.inputTokens", "입력 토큰"), said: tokenShort(slice.sum.input) },
@@ -226,7 +232,7 @@ const TOKEN_PROVIDERS = [
         word: t("tokens.sessionsTurns", "대화 / 턴"),
         said: `${tokenCount(slice.sessions.length)} / ${tokenCount(slice.sum.turns)}`,
       },
-      { glyph: "book", word: t("tokens.estimatedCost", "추정 비용"), said: tokenCost(slice.sum.cost) },
+      { glyph: "book", word: t("tokens.estimatedCost", "추정 비용"), said: tokenUsageCost(slice.sum) },
     ],
     note: () =>
       t(
@@ -322,6 +328,7 @@ function tokenSide(one, mine) {
     reasoning: held.reasoning,
     turns: mine ? one.oursTurns : one.turns,
     cost: mine ? one.oursCost : one.cost,
+    unpricedRequests: mine ? one.oursUnpricedRequests : one.unpricedRequests,
   };
 }
 
@@ -392,6 +399,10 @@ function tokenCost(dollars) {
   // (usage-formatters.ts:12).
   const digits = dollars > 0 && dollars < 0.01 ? 4 : 2;
   return `$${dollars.toFixed(digits).replace(/\B(?=(\d{3})+(?!\d)\.)/g, ",")}`;
+}
+
+function tokenUsageCost(row) {
+  return formatUsageCost(row.cost, row.unpricedRequests, row.turns > 0, tokenCost);
 }
 
 /* 카드와 막대에서만 줄인다 — 표는 정확한 자릿수를 보러 가는 곳이다. */
@@ -477,7 +488,7 @@ function tokensSlice(held, provider, range, scope) {
     .filter((one) => (cutoff === null || one.date >= cutoff) && (!mine || one.ours));
   const sum = {
     input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
-    turns: 0, cold: 0, cost: null,
+    turns: 0, cold: 0, cost: null, unpricedRequests: 0,
   };
   const byModel = new Map();
   const byPlace = new Map();
@@ -493,13 +504,15 @@ function tokensSlice(held, provider, range, scope) {
     // 값이 없는 것과 0인 것을 가른다: 요율을 모르는 모델만 있는 구간은 "$0"이
     // 아니라 "—"다(Orca hasAnyBillableCost와 같은 주장).
     if (row.cost !== null) sum.cost = (sum.cost ?? 0) + row.cost;
-    else unpriced.add(row.model);
+    const unknown = row.unpricedRequests || (row.cost === null ? row.turns : 0);
+    sum.unpricedRequests += unknown;
+    if (unknown > 0) unpriced.add(row.model);
     for (const [into2, key, word] of [
       [byModel, row.model, row.model],
       [byPlace, row.project, row.label],
     ]) {
       const into = into2.get(key)
-        ?? { key, word, turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: null };
+        ?? { key, word, turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: null, unpricedRequests: 0 };
       into.turns += row.turns;
       into.input += row.input;
       into.output += row.output;
@@ -507,6 +520,7 @@ function tokensSlice(held, provider, range, scope) {
       into.cacheWrite += row.cacheWrite;
       into.reasoning += row.reasoning;
       if (row.cost !== null) into.cost = (into.cost ?? 0) + row.cost;
+      into.unpricedRequests += unknown;
       // 자리의 이름은 처음 본 것이 정본이다 — 같은 열쇠는 같은 자리다.
       if (into.word === null && word !== null && word !== undefined) into.word = word;
       into2.set(key, into);
@@ -719,8 +733,9 @@ function tokensRollupRows(provider, rows, name) {
       cacheWrite: sum.cacheWrite + row.cacheWrite,
       reasoning: sum.reasoning + row.reasoning,
       cost: row.cost === null ? sum.cost : (sum.cost ?? 0) + row.cost,
+      unpricedRequests: sum.unpricedRequests + row.unpricedRequests,
     }), {
-      turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: null,
+      turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: null, unpricedRequests: 0,
     });
     body.push([
       t("tokens.placeRest", "그 외 {{count}}곳", { count: tokenCount(rest.length) }),

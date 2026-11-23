@@ -33,6 +33,8 @@ pub struct Summary {
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub unpriced_requests: u64,
     pub top_model: Option<String>,
     pub top_project: Option<String>,
     pub has_any_data: bool,
@@ -65,6 +67,8 @@ pub struct BreakdownRow {
     pub output_tokens: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub unpriced_requests: u64,
 }
 
 /// One row of the recent-sessions table.

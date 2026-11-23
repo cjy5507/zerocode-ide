@@ -243,6 +243,7 @@ fn a_zo_journal_read_in_part_is_never_a_bill() {
         input_uncached: 200,
         cache_read: 100,
         cache_creation: 0,
+        cache_creation_1h: None,
         output: 50,
         ttl: String::new(),
     };

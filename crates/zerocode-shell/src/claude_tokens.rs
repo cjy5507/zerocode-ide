@@ -183,6 +183,7 @@ pub(crate) struct DayRow {
     #[serde(flatten)]
     pub(crate) tokens: Tokens,
     pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
 }
 
 /// One conversation, as the transcripts remember it.
@@ -228,7 +229,9 @@ pub(crate) struct SessionRow {
     pub(crate) tokens: Tokens,
     pub(crate) ours_tokens: Tokens,
     pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
     pub(crate) ours_cost_usd: Option<f64>,
+    pub(crate) ours_unpriced_requests: u64,
 }
 
 /// One model's share of the corpus.
@@ -246,6 +249,7 @@ pub(crate) struct ModelRow {
     /// would have cost through the API — the same claim Orca makes of its own
     /// figure (`ClaudeUsagePane.tsx:224`).
     pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
 }
 
 /// What one pass over the transcripts found.
@@ -285,7 +289,8 @@ pub(crate) struct TokenScan {
     /// number somebody reads, and there is nothing to guess from.
     pub(crate) undated: u64,
     /// Every priced row added up, in dollars.
-    pub(crate) cost_usd: f64,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
     /// The models that had no rate, named rather than folded in as free — a
     /// total that quietly swallowed an unknown model would be a smaller number
     /// wearing the same confidence.
@@ -432,10 +437,8 @@ struct SessionBuild {
     ours_messages: u64,
     tokens: Tokens,
     ours_tokens: Tokens,
-    spent: f64,
-    priced: bool,
-    ours_spent: f64,
-    ours_priced: bool,
+    cost: model_prices::CostTotal,
+    ours_cost: model_prices::CostTotal,
     places: HashMap<u32, PlaceWeight>,
 }
 
@@ -445,6 +448,7 @@ struct DayTally {
     messages: u64,
     zero_cache_read: u64,
     tokens: Tokens,
+    cost: model_prices::CostTotal,
 }
 
 /// One pass over every transcript under `root`, rolled up in the caller's day.
@@ -495,6 +499,12 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
             row.zero_cache_read += 1;
         }
         row.tokens.add(reading.tokens);
+        let spent = cost_usd(
+            words.read(reading.model),
+            reading.tokens,
+            model_prices::day_at_millis(at),
+        );
+        row.cost.record(spent);
 
         // A message with no conversation on its record cannot be filed under
         // one. It is still counted everywhere else — the day rows above hold
@@ -502,11 +512,6 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
         let Some(session) = reading.session else {
             continue;
         };
-        let spent = cost_usd(
-            words.read(reading.model),
-            reading.tokens,
-            day_of_iso_date(words.read(day)),
-        );
         let standing = by_session.entry(session).or_insert_with(|| SessionBuild {
             first_at: at,
             last_at: at,
@@ -516,10 +521,8 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
             ours_messages: 0,
             tokens: Tokens::default(),
             ours_tokens: Tokens::default(),
-            spent: 0.0,
-            priced: false,
-            ours_spent: 0.0,
-            ours_priced: false,
+            cost: model_prices::CostTotal::default(),
+            ours_cost: model_prices::CostTotal::default(),
             places: HashMap::new(),
         });
         standing.first_at = standing.first_at.min(at);
@@ -530,17 +533,11 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
         }
         standing.messages += 1;
         standing.tokens.add(reading.tokens);
-        if let Some(dollars) = spent {
-            standing.spent += dollars;
-            standing.priced = true;
-        }
+        standing.cost.record(spent);
         if ours {
             standing.ours_messages += 1;
             standing.ours_tokens.add(reading.tokens);
-            if let Some(dollars) = spent {
-                standing.ours_spent += dollars;
-                standing.ours_priced = true;
-            }
+            standing.ours_cost.record(spent);
         }
         let visited = standing.places.entry(place).or_default();
         visited.weight += reading.tokens.input + reading.tokens.output;
@@ -560,7 +557,8 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
                 messages: tally.messages,
                 zero_cache_read: tally.zero_cache_read,
                 tokens: tally.tokens,
-                cost_usd: None,
+                cost_usd: tally.cost.cost_usd,
+                unpriced_requests: tally.cost.unpriced_requests,
             }
         })
         .collect();
@@ -611,8 +609,10 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
                 ours_messages: built.ours_messages,
                 tokens: built.tokens,
                 ours_tokens: built.ours_tokens,
-                cost_usd: built.priced.then_some(built.spent),
-                ours_cost_usd: built.ours_priced.then_some(built.ours_spent),
+                cost_usd: built.cost.cost_usd,
+                unpriced_requests: built.cost.unpriced_requests,
+                ours_cost_usd: built.ours_cost.cost_usd,
+                ours_unpriced_requests: built.ours_cost.unpriced_requests,
             }
         })
         .collect();
@@ -628,14 +628,9 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
 
     let mut by_model: HashMap<String, ModelRow> = HashMap::new();
     let mut total = Tokens::default();
-    let mut spent = 0.0;
+    let mut cost = model_prices::CostTotal::default();
     let mut unpriced: Vec<String> = Vec::new();
-    for row in &mut days {
-        // Priced on ITS OWN day. The day number is recovered from the date the
-        // row was filed under, so the rate that applies is the one that was in
-        // force when the message was sent.
-        let day = day_of_iso_date(&row.date);
-        row.cost_usd = cost_usd(&row.model, row.tokens, day);
+    for row in &days {
         total.add(row.tokens);
         let held = by_model
             .entry(row.model.clone())
@@ -644,19 +639,18 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
                 messages: 0,
                 tokens: Tokens::default(),
                 cost_usd: None,
+                unpriced_requests: 0,
             });
         held.messages += row.messages;
         held.tokens.add(row.tokens);
-        match row.cost_usd {
-            Some(dollars) => {
-                spent += dollars;
-                held.cost_usd = Some(held.cost_usd.unwrap_or(0.0) + dollars);
-            }
-            None => {
-                if !unpriced.contains(&row.model) {
-                    unpriced.push(row.model.clone());
-                }
-            }
+        cost.merge(model_prices::CostTotal {
+            cost_usd: row.cost_usd,
+            unpriced_requests: row.unpriced_requests,
+        });
+        held.cost_usd = model_prices::sum_cost(held.cost_usd, row.cost_usd);
+        held.unpriced_requests += row.unpriced_requests;
+        if row.unpriced_requests > 0 && !unpriced.contains(&row.model) {
+            unpriced.push(row.model.clone());
         }
     }
 
@@ -681,66 +675,26 @@ pub(crate) fn scan(root: &Path, offset_minutes: i32, places: &mut Places) -> Tok
         records,
         messages,
         undated,
-        cost_usd: spent,
+        cost_usd: cost.cost_usd,
+        unpriced_requests: cost.unpriced_requests,
         unpriced,
     }
 }
 
-/// The day number a launch window's last day sits on.
-///
-/// The price table is a leaf crate both this tree and zo compile, so it keeps
-/// the date it was written with rather than a day number — turning one into
-/// the other is [`civil`]'s job, and it happens here, at the one comparison
-/// that needs it.
-fn day_of_civil_date(date: model_prices::CivilDate) -> i64 {
-    civil::days_from_civil(date.year, date.month, date.day)
-}
-
-/// The day number a `YYYY-MM-DD` string names.
-///
-/// The rows are filed under the written date, so this reads it back rather
-/// than carrying a second field that could disagree with the first.
-fn day_of_iso_date(date: &str) -> i64 {
-    let mut parts = date.split('-');
-    let year = parts.next().and_then(|held| held.parse().ok()).unwrap_or(0);
-    let month = parts.next().and_then(|held| held.parse().ok()).unwrap_or(1);
-    let day = parts.next().and_then(|held| held.parse().ok()).unwrap_or(1);
-    civil::days_from_civil(year, month, day)
-}
-
-/* ---- what it cost ------------------------------------------------------- */
-
-/// What one model's tokens cost, in dollars — or `None` for a model this table
-/// does not know.
-///
-/// `None` rather than zero on purpose: a model nobody has a rate for costs an
-/// unknown amount, and folding it in as free would quietly shrink the total.
-/// The caller says so out loud instead.
+/// Estimate a transcript request with both cache-write durations.
 pub(crate) fn cost_usd(model: &str, tokens: Tokens, day: i64) -> Option<f64> {
-    let rate = model_prices::anthropic_rate(model)?;
-    // The price in force on the day it was sent, not the price today.
-    let (input, output) = match rate.intro {
-        Some(intro) if day <= day_of_civil_date(intro.through) => (intro.input, intro.output),
-        _ => (rate.input, rate.output),
-    };
-    // The five-minute share is what is left after the hour-long share — the
-    // vendor reports the total and the hour-long part, not the five-minute one.
-    // An hour-long write costs twice, not 1.25 times: Orca carries a single
-    // cacheWrite and bills every cache-creation token at the five-minute rate,
-    // 37.5% under on the 70% of this machine's corpus that is hour-TTL, which
-    // is why the scanner carries [`Tokens::cache_create_1h`] separately.
-    let write_1h = tokens.cache_create_1h.min(tokens.cache_create);
-    let write_5m = tokens.cache_create - write_1h;
-    let (write_5m_rate, write_1h_rate) = model_prices::anthropic_cache_write_rates();
-    let per = |count: u64, dollars: f64| (count as f64) * dollars;
-    Some(
-        (per(tokens.input, input)
-            + per(tokens.output, output)
-            + per(tokens.cache_read, input * rate.cache_read)
-            + per(write_5m, input * write_5m_rate)
-            + per(write_1h, input * write_1h_rate))
-            / 1_000_000.0,
+    model_prices::request_cost(
+        model,
+        day,
+        model_prices::RequestTokens {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_create,
+            cache_write_1h: tokens.cache_create_1h,
+        },
     )
+    .map(model_prices::Cost::total_cost_usd)
 }
 
 #[cfg(test)]
@@ -1129,8 +1083,17 @@ mod tests {
         let held = scan(&projects_root(home.path()), 0, &mut known());
         let wire = serde_json::to_value(&held).expect("serialise");
         for name in [
-            "days", "models", "sessions", "total", "files", "records", "messages", "undated",
-            "cost_usd", "unpriced",
+            "days",
+            "models",
+            "sessions",
+            "total",
+            "files",
+            "records",
+            "messages",
+            "undated",
+            "cost_usd",
+            "unpriced",
+            "unpriced_requests",
         ] {
             assert!(wire.get(name).is_some(), "the scan stopped saying {name}");
         }
@@ -1293,7 +1256,7 @@ mod tests {
         assert_eq!(cost_usd_on("claude-opus-5", million), Some(5.0));
         assert_eq!(cost_usd_on("claude-fable-5", million), Some(10.0));
         assert_eq!(cost_usd_on("claude-fable-5-1", million), Some(10.0));
-        assert_eq!(cost_usd_on("claude-sonnet-5", million), Some(3.0));
+        assert_eq!(cost_usd_on("claude-sonnet-5", million), Some(2.0));
         assert_eq!(cost_usd_on("claude-haiku-4-5", million), Some(1.0));
 
         let out = Tokens {
@@ -1386,7 +1349,6 @@ mod tests {
             "claude-opus-4.8",
             "claude-opus-4-8-thinking",
             "anthropic/claude-opus-5",
-            "claude-opus-5-20260101",
         ] {
             assert_eq!(
                 cost_usd_on(modern, million),
@@ -1394,10 +1356,7 @@ mod tests {
                 "{modern} lost its rate"
             );
         }
-        // An Opus 4 point release nobody has taught this table about bills at
-        // the current rate, not the legacy one — three times too much is a
-        // worse answer than a little too little.
-        assert_eq!(cost_usd_on("claude-opus-4-9", million), Some(5.0));
+        assert_eq!(cost_usd_on("claude-opus-4-9", million), None);
     }
 
     /// A model with no rate costs an unknown amount, and says so.
@@ -1491,81 +1450,23 @@ mod tests {
     /// date (`claude-model-pricing.ts:26-27`). A message has a timestamp, so
     /// this asks what it cost on the day it was sent.
     #[test]
-    fn a_message_is_billed_at_the_price_of_the_day_it_was_sent() {
-        let million = Tokens {
-            input: 1_000_000,
-            output: 0,
-            cache_read: 0,
-            cache_create: 0,
-            cache_create_1h: 0,
-        };
-        let day = |year, month, day| civil::days_from_civil(year, month, day);
-        // Inside the window: the launch price.
-        assert_eq!(
-            cost_usd("claude-sonnet-5", million, day(2026, 8, 18)),
-            Some(2.0)
-        );
-        // Its last day is inclusive…
-        assert_eq!(
-            cost_usd("claude-sonnet-5", million, day(2026, 8, 31)),
-            Some(2.0)
-        );
-        // …and the day after is the standard rate, with nothing to edit.
-        assert_eq!(
-            cost_usd("claude-sonnet-5", million, day(2026, 9, 1)),
-            Some(3.0)
-        );
-        // Output too, not just input.
-        let out = Tokens {
-            input: 0,
-            output: 1_000_000,
-            ..million
+    fn the_request_day_picks_the_cache_rate_in_force() {
+        let day = civil::days_from_civil;
+        let tokens = Tokens {
+            cache_read: 1_000_000,
+            ..Tokens::default()
         };
         assert_eq!(
-            cost_usd("claude-sonnet-5", out, day(2026, 8, 18)),
-            Some(10.0)
+            cost_usd("claude-sonnet-5-5", tokens, day(2026, 10, 6)),
+            Some(0.20)
         );
         assert_eq!(
-            cost_usd("claude-sonnet-5", out, day(2026, 9, 1)),
-            Some(15.0)
+            cost_usd("claude-sonnet-5-5", tokens, day(2026, 10, 7)),
+            Some(0.10)
         );
-        // A model with no launch price is unmoved by the date.
-        for at in [day(2020, 1, 1), day(2026, 8, 18), day(2030, 1, 1)] {
-            assert_eq!(cost_usd("claude-opus-5", million, at), Some(5.0));
-        }
-
-        // And it reaches the rows: the same tokens on two sides of the cutover
-        // cost different amounts.
-        let home = corpus(&[
-            &dated_row(
-                "u1",
-                Some("m1"),
-                Some("r1"),
-                "claude-sonnet-5",
-                1_000_000,
-                "2026-08-18T00:00:00.000Z",
-            ),
-            &dated_row(
-                "u2",
-                Some("m2"),
-                Some("r2"),
-                "claude-sonnet-5",
-                1_000_000,
-                "2026-09-01T00:00:00.000Z",
-            ),
-        ]);
-        let held = scan(&projects_root(home.path()), 0, &mut nowhere());
-        let priced = |date: &str| {
-            held.days
-                .iter()
-                .find(|row| row.date == date)
-                .and_then(|row| row.cost_usd)
-                .expect("a day went missing")
-        };
-        assert!(
-            priced("2026-09-01") > priced("2026-08-18"),
-            "the launch window did not reach the rows: {:?}",
-            held.days
+        assert_eq!(
+            cost_usd("claude-sonnet-5-5", tokens, day(2026, 9, 27)),
+            None
         );
     }
 

@@ -44,7 +44,7 @@
 use serde_json::Value;
 
 use crate::civil::iso_utc_of;
-use crate::usage_ledger::{Dollars, Entry, Ledger, Report};
+use crate::usage_ledger::{Entry, Ledger, Report};
 use crate::usage_stats::{Range, Scope};
 
 /// One row of the per-message query, as the database handed it over.
@@ -252,14 +252,7 @@ pub fn report(
     now_ms: i64,
     offset_minutes: i32,
 ) -> Report {
-    crate::usage_ledger::report(
-        ledger,
-        scope,
-        range,
-        now_ms,
-        offset_minutes,
-        Dollars::AsReported,
-    )
+    crate::usage_ledger::report(ledger, scope, range, now_ms, offset_minutes)
 }
 
 /// The model, named where a row is known to name one.
@@ -343,7 +336,7 @@ fn whole(value: Option<&Value>) -> i64 {
     }
 }
 
-/// Dollars, when the vendor reported any. Zero is not a report.
+/// when the vendor reported any. Zero is not a report.
 fn money(value: Option<&Value>) -> Option<f64> {
     let read = match value {
         Some(Value::Number(number)) => number.as_f64()?,

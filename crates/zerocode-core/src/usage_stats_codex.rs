@@ -10,12 +10,8 @@
 //!
 //! ## What is measured, and against what
 //!
-//! The record shape, the delta resolution, the event key, the aggregation
-//! keys and the price table are read out of Orca's own
-//! `src/main/codex-usage/*` (1.4.184) — `codex-usage-record-parser.ts`,
-//! `codex-usage-token-delta.ts`, `codex-model-pricing.ts`,
-//! `codex-usage-cost-estimate.ts`. The FILE FORMAT was verified against real
-//! `~/.codex/sessions/**/rollout-*.jsonl` on this machine.
+//! Usage comes from the incremental token counters in Codex rollouts.
+//! We estimate each recorded request using the shared provider price catalog.
 //!
 //! ## What is here and what is next door
 //!
@@ -363,13 +359,21 @@ pub fn read_record(line: &str, state: &mut ReadState) -> Option<Event> {
     };
 
     let model = read_model(payload).or_else(|| state.current_model.clone());
+    let estimated_cost_usd = model.as_deref().and_then(|model| {
+        let day = model_prices::day_at_millis(crate::civil::epoch_ms_of_iso(timestamp)?);
+        request_cost(
+            model,
+            day,
+            u64::try_from(delta.input_tokens).ok()?,
+            u64::try_from(delta.cached_input_tokens).ok()?,
+            u64::try_from(delta.output_tokens).ok()?,
+        )
+    });
     Some(Event {
         session_id: state.session_id.clone(),
         timestamp: timestamp.to_string(),
         event_key: event_key(timestamp, total, last),
-        // Codex reports tokens and no dollars; the price table below turns a
-        // rolled-up row into money at report time.
-        estimated_cost_usd: None,
+        estimated_cost_usd,
         model,
         cwd: state
             .current_cwd
@@ -445,158 +449,13 @@ impl<'claimed> RolloutReader<'claimed> {
 
 /// Dollars per million tokens, with the tier some models bill above a
 /// context threshold.
-#[derive(Clone, Copy)]
-struct Pricing {
-    input: f64,
-    cached_input: f64,
-    output: f64,
-    /// `None` for a model that bills one flat rate at every context length.
-    long_context: Option<(f64, f64, f64)>,
-}
-
-/// Where the long-context tier starts for the models that have one.
-const LONG_CONTEXT_THRESHOLD: f64 = 272_000.0;
-
-/// Orca's `MODEL_PRICING` for Codex.
-fn pricing_of(model: &str) -> Option<Pricing> {
-    let flat = |input, cached_input, output| {
-        Some(Pricing {
-            input,
-            cached_input,
-            output,
-            long_context: None,
-        })
-    };
-    let tiered = |input, cached_input, output, above: (f64, f64, f64)| {
-        Some(Pricing {
-            input,
-            cached_input,
-            output,
-            long_context: Some(above),
-        })
-    };
-    match model {
-        "gpt-5" | "gpt-5.1" | "gpt-5.1-codex" | "gpt-5.1-codex-max" => flat(1.25, 0.125, 10.0),
-        "gpt-5.2" | "gpt-5.2-codex" | "gpt-5.3" | "gpt-5.3-codex" | "gpt-5.3-codex-spark" => {
-            flat(1.75, 0.175, 14.0)
-        }
-        "gpt-5.4-mini" => flat(0.75, 0.075, 4.5),
-        "gpt-5.4-nano" => flat(0.2, 0.02, 1.25),
-        "gpt-5.4-pro" | "gpt-5.5-pro" => tiered(30.0, 30.0, 180.0, (60.0, 60.0, 270.0)),
-        "gpt-5.4" | "gpt-5.6-terra" => tiered(2.5, 0.25, 15.0, (5.0, 0.5, 22.5)),
-        "gpt-5.5" | "gpt-5.6-sol" => tiered(5.0, 0.5, 30.0, (10.0, 1.0, 45.0)),
-        "gpt-5.6-luna" => tiered(1.0, 0.1, 6.0, (2.0, 0.2, 9.0)),
-        _ => None,
-    }
-}
-
-/// The reasoning-effort words a model id can be suffixed with.
-const REASONING_TIERS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "auto", "none"];
-
-/// Strips a trailing `(high)`, or refuses the id when the parentheses hold
-/// something else — a name this table has never met must not be priced as its
-/// prefix.
-///
-/// The result is TRIMMED, which the original does not do, and the difference
-/// is a real misprice rather than tidiness. `gpt-5.4-pro (high)` becomes
-/// `gpt-5.4-pro ` there — with the space the name matches neither
-/// `gpt-5.4-pro` nor `gpt-5.4-pro-`, so it falls through to the `gpt-5.4-`
-/// prefix and is billed at $2.50/M instead of $30/M. The same slip makes
-/// `gpt-5.6-luna (high)` match nothing at all and lose its price entirely.
-/// It stays invisible upstream because the families where it fires most often
-/// — `5.1`, `5.2`, `5.3` and their `-codex` variants — happen to be priced
-/// identically.
-fn strip_parenthesized_tier(model: &str) -> Option<String> {
-    let Some(open) = model.rfind('(') else {
-        return Some(model.to_string());
-    };
-    if !model.ends_with(')') {
-        return Some(model.to_string());
-    }
-    let inside = &model[open + 1..model.len() - 1];
-    if inside.contains('(') || inside.contains(')') {
-        return Some(model.to_string());
-    }
-    if !REASONING_TIERS.contains(&inside.trim()) {
-        return None;
-    }
-    Some(model[..open].trim_end().to_string())
-}
-
-/// Strips trailing `-high`, `-medium`, … up to four deep.
-fn strip_dash_tiers(model: &str) -> String {
-    let mut current = model.to_string();
-    for _ in 0..4 {
-        let Some(tier) = REASONING_TIERS
-            .iter()
-            .find(|tier| current.ends_with(&format!("-{tier}")))
-        else {
-            return current;
-        };
-        current.truncate(current.len() - tier.len() - 1);
-    }
-    current
-}
-
-/// The price-table key a rollout's model id maps to, or `None` when this table
-/// has never heard of it.
+/// The catalog ID for an exact model or recorded alias.
 #[must_use]
 pub fn pricing_key(model: Option<&str>) -> Option<String> {
-    let lowered = model?.to_lowercase();
-    let lower = strip_dash_tiers(&strip_parenthesized_tier(lowered.trim())?);
-    if lower == "gpt-5" || lower == "gpt-5-codex" {
-        return Some("gpt-5".to_string());
-    }
-    // Longest name first: `gpt-5.1-codex-max` must not be answered by the
-    // `gpt-5.1-codex` rule, nor `gpt-5.4-pro` by the bare `gpt-5.4` one.
-    for family in [
-        "gpt-5.1-codex-max",
-        "gpt-5.1-codex",
-        "gpt-5.1",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5.3-codex-spark",
-        "gpt-5.3-codex",
-        "gpt-5.3",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-        "gpt-5.4-pro",
-        "gpt-5.4",
-        "gpt-5.5-pro",
-        "gpt-5.5",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-    ] {
-        if lower == family || lower.starts_with(&format!("{family}-")) {
-            return Some(family.to_string());
-        }
-    }
-    // The bare `gpt-5.6` alias routes to Sol. Matched EXACTLY: a prefix rule
-    // would swallow the tier ids above and any future cheaper variant.
-    if lower == "gpt-5.6" {
-        return Some("gpt-5.6-sol".to_string());
-    }
-    None
+    model_prices::model_key(model?).map(str::to_owned)
 }
 
-/// Splits a token count across the tier boundary and prices each part.
-fn tiered_cost(tokens: f64, base: f64, above: Option<f64>) -> f64 {
-    let Some(above_price) = above else {
-        return tokens * base;
-    };
-    let below = tokens.min(LONG_CONTEXT_THRESHOLD);
-    let over = (tokens - LONG_CONTEXT_THRESHOLD).max(0.0);
-    below * base + over * above_price
-}
-
-/// What these tokens would have cost on the API, or `None` for a model with
-/// no price on file.
-///
-/// Cached input is charged ONCE, at the cache rate, and the full-price input
-/// is the remainder — the cached count is a subset of the input count, not a
-/// separate bucket beside it. Reasoning output is not charged at all: it is
-/// already inside the output figure.
+/// Estimate one Codex request at the current list price.
 #[must_use]
 pub fn estimate_cost_usd(
     model: Option<&str>,
@@ -604,23 +463,30 @@ pub fn estimate_cost_usd(
     cached_input_tokens: i64,
     output_tokens: i64,
 ) -> Option<f64> {
-    let pricing = pricing_of(&pricing_key(model)?)?;
-    let cached = cached_input_tokens.min(input_tokens).max(0);
-    let uncached = (input_tokens - cached).max(0);
-    let total = tiered_cost(
-        uncached as f64,
-        pricing.input,
-        pricing.long_context.map(|(input, _, _)| input),
-    ) + tiered_cost(
-        cached as f64,
-        pricing.cached_input,
-        pricing.long_context.map(|(_, cached, _)| cached),
-    ) + tiered_cost(
-        output_tokens as f64,
-        pricing.output,
-        pricing.long_context.map(|(_, _, output)| output),
-    );
-    Some(total / 1_000_000.0)
+    request_cost(
+        model?,
+        model_prices::today(),
+        u64::try_from(input_tokens).ok()?,
+        u64::try_from(cached_input_tokens).ok()?,
+        u64::try_from(output_tokens).ok()?,
+    )
+}
+
+/// Codex includes cache reads in input and reasoning in output.
+#[must_use]
+pub fn request_cost(model: &str, day: i64, input: u64, cached: u64, output: u64) -> Option<f64> {
+    let cache_read = cached.min(input);
+    model_prices::request_cost(
+        model,
+        day,
+        model_prices::RequestTokens {
+            input: input - cache_read,
+            cache_read,
+            output,
+            ..model_prices::RequestTokens::default()
+        },
+    )
+    .map(model_prices::Cost::total_cost_usd)
 }
 
 /* ---- what this pane draws ------------------------------------------------
@@ -635,11 +501,7 @@ pub use crate::usage_ledger::{
 };
 pub use crate::usage_report::{BreakdownRow, DailyPoint, Report, SessionRow, Summary};
 
-/// Builds every figure the Codex pane draws.
-///
-/// Codex reports no dollars, so every row is priced here from
-/// [`estimate_cost_usd`] — the difference between this ledger and the other
-/// one that shares the rollup, and the only reason this wrapper exists.
+/// Builds the Codex report from the costs recorded per request.
 #[must_use]
 pub fn report(
     ledger: &Ledger,
@@ -648,14 +510,7 @@ pub fn report(
     now_ms: i64,
     offset_minutes: i32,
 ) -> Report {
-    crate::usage_ledger::report(
-        ledger,
-        scope,
-        range,
-        now_ms,
-        offset_minutes,
-        crate::usage_ledger::Dollars::FromTable(estimate_cost_usd),
-    )
+    crate::usage_ledger::report(ledger, scope, range, now_ms, offset_minutes)
 }
 
 #[cfg(test)]
@@ -893,7 +748,10 @@ mod tests {
             pricing_key(Some("GPT-5.3-Codex (xhigh)")).as_deref(),
             Some("gpt-5.3-codex")
         );
-        assert_eq!(pricing_key(Some("gpt-5-codex")).as_deref(), Some("gpt-5"));
+        assert_eq!(
+            pricing_key(Some("gpt-5-codex")).as_deref(),
+            Some("gpt-5-codex")
+        );
         // The longer family name wins over the shorter one that prefixes it.
         assert_eq!(
             pricing_key(Some("gpt-5.1-codex-max")).as_deref(),
@@ -927,28 +785,29 @@ mod tests {
         assert_eq!(estimate_cost_usd(None, 1_000, 0, 1_000), None);
     }
 
-    /// The long-context tier bills the excess higher.
+    /// The long-context tier applies to the whole request.
     #[test]
-    fn the_long_context_tier_prices_the_excess() {
+    fn the_long_context_tier_prices_the_entire_request() {
         // gpt-5.4: input 2.5 below 272k, 5 above.
         let cost = estimate_cost_usd(Some("gpt-5.4"), 372_000, 0, 0).expect("priced");
-        let expected = (272_000.0 * 2.5 + 100_000.0 * 5.0) / 1_000_000.0;
+        let expected = 372_000.0 * 5.0 / 1_000_000.0;
         assert!((cost - expected).abs() < 1e-9, "{cost} vs {expected}");
         // gpt-5.3 bills flat at every length.
-        let flat = estimate_cost_usd(Some("gpt-5.3"), 372_000, 0, 0).expect("priced");
+        let flat = estimate_cost_usd(Some("gpt-5.3-codex"), 372_000, 0, 0).expect("priced");
         assert!((flat - 372_000.0 * 1.75 / 1_000_000.0).abs() < 1e-9);
     }
 
     /// The pane's dollars come from this module's table, through the wrapper.
     #[test]
-    fn the_wrapper_prices_the_rolled_up_rows() {
+    fn the_report_sums_request_costs_in_each_breakdown() {
+        let expected = estimate_cost_usd(Some("gpt-5.3-codex"), 1_000, 400, 200).expect("priced");
         let event = Event {
             session_id: "sess".to_string(),
             timestamp: "2026-08-19T01:00:00Z".to_string(),
             event_key: "one".to_string(),
             model: Some("gpt-5.3-codex".to_string()),
             cwd: Some("/w/repo".to_string()),
-            estimated_cost_usd: None,
+            estimated_cost_usd: Some(expected),
             input_tokens: 1_000,
             cached_input_tokens: 400,
             output_tokens: 200,
@@ -958,7 +817,6 @@ mod tests {
         let ledger = aggregate(vec![event], &[], KST);
         let now = crate::civil::epoch_ms_of_iso("2026-08-19T02:00:00Z").expect("stamp");
         let answer = report(&ledger, Scope::All, Range::All, now, KST);
-        let expected = estimate_cost_usd(Some("gpt-5.3-codex"), 1_000, 400, 200).expect("priced");
         let priced = answer.summary.estimated_cost_usd.expect("a price");
         assert!(
             (priced - expected).abs() < 1e-12,
@@ -970,8 +828,9 @@ mod tests {
             "the model list lost the price the table gave it"
         );
         assert_eq!(
-            answer.project_breakdown[0].estimated_cost_usd, None,
-            "a project row was priced from a table that keys on models"
+            answer.project_breakdown[0].estimated_cost_usd,
+            Some(expected),
+            "the project total kept the price of its recorded requests"
         );
     }
 }

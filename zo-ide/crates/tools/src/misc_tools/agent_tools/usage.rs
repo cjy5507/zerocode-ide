@@ -28,8 +28,8 @@ impl AgentUsageCost {
         if complete {
             self.unreported_requests = self.unreported_requests.saturating_sub(1);
         }
-        if let Some(pricing) = core_types::pricing_for_model(model) {
-            self.estimated_cost_usd += usage.estimate_cost_usd_with_pricing(pricing).total_cost_usd();
+        if let Some(cost) = core_types::usage::estimate_request_cost(model, *usage, 0) {
+            self.estimated_cost_usd += cost.total_cost_usd();
         } else {
             self.unpriced_requests = self.unpriced_requests.saturating_add(1);
         }

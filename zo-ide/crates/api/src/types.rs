@@ -1,4 +1,4 @@
-use core_types::{OutputTokensDetails, TokenUsage, UsageCostEstimate, pricing_for_model};
+use core_types::{OutputTokensDetails, TokenUsage, UsageCostEstimate};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -891,12 +891,9 @@ impl Usage {
     }
 
     #[must_use]
-    pub fn estimated_cost_usd(&self, model: &str) -> UsageCostEstimate {
-        let usage = self.token_usage();
-        pricing_for_model(model).map_or_else(
-            || usage.estimate_cost_usd(),
-            |pricing| usage.estimate_cost_usd_with_pricing(pricing),
-        )
+    pub fn estimated_cost_usd(&self, model: &str) -> Option<UsageCostEstimate> {
+        let hour = self.cache_creation.as_ref().map_or(0, |cache| u64::from(cache.ephemeral_1h_input_tokens));
+        core_types::usage::estimate_request_cost(model, self.token_usage(), hour)
     }
 }
 
@@ -1462,7 +1459,7 @@ mod tests {
         // Sonnet 4.x prices at $3/$15 (+$3.75 cache-write, $0.30 cache-read),
         // its own tier — not the opus/default $15/$75 it used to fall through to.
         // 1M·$3 + 0.5M·$15 + 0.1M·$3.75 + 0.2M·$0.30 = $10.935.
-        let cost = response.usage.estimated_cost_usd(&response.model);
+        let cost = response.usage.estimated_cost_usd(&response.model).unwrap();
         assert_eq!(format_usd(cost.total_cost_usd()), "$10.9350");
         assert_eq!(response.total_tokens(), 1_800_000);
     }

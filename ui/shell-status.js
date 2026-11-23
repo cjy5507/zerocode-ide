@@ -1966,7 +1966,7 @@ const FIVE_COUNTER_FACE = {
       `${summary.sessions.toLocaleString()} / ${summary.events.toLocaleString()}`,
       "folder-kanban",
     ),
-    usageStatsCard(provider.costLabel(), formatCost(summary.estimated_cost_usd), "coins"),
+    usageStatsCard(provider.costLabel(), formatUsageCost(summary.estimated_cost_usd, summary.unpriced_requests, summary.has_any_data), "coins"),
   ],
   // No reuse rate to report — the cached count is beside or inside the input
   // depending on the vendor, and neither is a read-versus-write ratio. The
@@ -2017,7 +2017,7 @@ const FOUR_COUNTER_FACE = {
         `${summary.sessions.toLocaleString()} / ${summary.turns.toLocaleString()}`,
         "folder-kanban",
       ),
-      usageStatsCard(provider.costLabel(), formatCost(summary.estimated_cost_usd), "coins"),
+      usageStatsCard(provider.costLabel(), formatUsageCost(summary.estimated_cost_usd, summary.unpriced_requests, summary.has_any_data), "coins"),
     ];
   },
   sessionAbout: (summary) =>
@@ -2077,6 +2077,16 @@ function formatTokens(value) {
 function formatCost(value) {
   if (value === null || value === undefined) return t("stats.na", "해당 없음");
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+function formatUsageCost(value, unpriced = 0, hasUsage = true, format = formatCost) {
+  if (value === null || value === undefined) {
+    return hasUsage ? t("stats.costUnknown", "모름") : format(value);
+  }
+  const cost = format(value);
+  return unpriced > 0
+    ? t("stats.costPartial", "{{cost}} · 모름 {{count}}건 포함", { cost, count: unpriced.toLocaleString() })
+    : cost;
 }
 
 function formatPercent(rate) {
@@ -2413,10 +2423,8 @@ function usageStatsBreakdown(standing, title, topLabel, topValue, rows) {
     foot.className = "usage-breakdown-foot";
     const sessions = t("stats.sessionsCount", "세션 {{n}}개", { n: row.sessions });
     const turns = standing.rowActivity(row);
-    const priced = row.estimated_cost_usd === null || row.estimated_cost_usd === undefined
-      ? ""
-      : ` · ${formatCost(row.estimated_cost_usd)}`;
-    foot.textContent = `${sessions} · ${turns}${priced}`;
+    const cost = formatUsageCost(row.estimated_cost_usd, row.unpriced_requests);
+    foot.textContent = `${sessions} · ${turns} · ${cost}`;
     line.append(top, foot);
     list.appendChild(line);
   }
@@ -2522,6 +2530,7 @@ function overviewProviderOf(id, report) {
     cacheTokens: figure(shape.cache),
     reasoningTokens: figure(shape.reasoning),
     estimatedCostUsd: summary?.estimated_cost_usd ?? null,
+    unpricedRequests: summary?.unpriced_requests ?? (summary?.has_any_data && summary?.estimated_cost_usd == null ? figure(shape.activity) : 0),
     topModel: summary?.top_model ?? null,
     topProject: summary?.top_project ?? null,
     // The total the VENDOR reported, never the counters added up: where a
@@ -2582,7 +2591,7 @@ function buildUsageOverview(providers) {
     estimatedCostUsd: providers.some((one) => one.estimatedCostUsd !== null) ? knownCost : null,
     // True when a provider has data but no price — the cost shown is then a
     // floor rather than a total, and the pane says so.
-    hasPartialCost: providers.some((one) => one.hasData && one.estimatedCostUsd === null),
+    unpricedRequests: sum((one) => one.unpricedRequests),
     cacheShare: newInputTokens + cacheTokens > 0 ? cacheTokens / (newInputTokens + cacheTokens) : null,
     daily,
     bestDay: daily.reduce((best, day) => (!best || day.total > best.total ? day : best), null),
@@ -2766,7 +2775,7 @@ function overviewProviderRow(provider, totalTokens) {
   for (const figure of [
     t("stats.tokensAre", "토큰 {{tokens}}", { tokens: formatTokens(provider.totalTokens) }),
     `${t("stats.sessionsCount", "세션 {{n}}개", { n: provider.sessions })} · ${activity}`,
-    formatCost(provider.estimatedCostUsd),
+    formatUsageCost(provider.estimatedCostUsd, provider.unpricedRequests, provider.hasData),
   ]) {
     const cell = document.createElement("span");
     cell.textContent = figure;
@@ -2820,13 +2829,13 @@ function paintUsageOverview(host) {
   cards.className = "usage-stat-cards";
   cards.append(
     usageStatsCard(t("stats.totalTokens", "전체 토큰"), formatTokens(overview.totalTokens), "sparkles"),
-    usageStatsCard(t("stats.estCost", "API 환산 비용"), formatCost(overview.estimatedCostUsd), "coins"),
+    usageStatsCard(t("stats.estCost", "API 환산 비용"), formatUsageCost(overview.estimatedCostUsd, overview.unpricedRequests, overview.hasAnyData), "coins"),
     usageStatsCard(t("stats.activeDays", "활동한 날"), overview.activeDays.toLocaleString(), "calendar-days"),
     usageStatsCard(t("stats.cacheShare", "캐시 비중"), formatPercent(overview.cacheShare), "database-zap"),
   );
   host.appendChild(cards);
 
-  if (overview.hasPartialCost) {
+  if (overview.unpricedRequests > 0) {
     const note = document.createElement("p");
     note.className = "usage-stats-note";
     note.textContent = t(
@@ -3301,7 +3310,7 @@ function drawShareCard(canvas, standing, report, scale) {
   const tileWidth = (box.width - box.pad * 2 - 16) / 3;
   const tiles = [
     {
-      value: formatCost(summary.estimated_cost_usd),
+      value: formatUsageCost(summary.estimated_cost_usd, summary.unpriced_requests, summary.has_any_data),
       label: standing.costShort(),
       ground: "rgba(20, 71, 230, 0.1)",
       edge: "rgba(20, 71, 230, 0.2)",
@@ -3517,7 +3526,7 @@ function postShareUsage() {
       range: shareCardRangeWord(),
       provider: standing.name(),
       tokens: formatTokens(standing.overview.total(report.summary) || 0),
-      cost: formatCost(report.summary.estimated_cost_usd),
+      cost: formatUsageCost(report.summary.estimated_cost_usd, report.summary.unpriced_requests, report.summary.has_any_data),
     }),
   ];
   openExternal(`https://x.com/intent/post?text=${encodeURIComponent(lines.join("\n"))}`);

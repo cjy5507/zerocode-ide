@@ -119,6 +119,16 @@ fn claude_session(id: &str, model: &str, tokens: [i64; 4]) -> usage_stats::Sessi
         total_cache_read_tokens: cache_read,
         total_cache_write_tokens: cache_write,
         location_breakdown: Vec::new(),
+        cost: model_prices::CostTotal {
+            cost_usd: usage_stats::estimate_cost_usd(
+                Some(model),
+                input,
+                output,
+                cache_read,
+                cache_write,
+            ),
+            unpriced_requests: 0,
+        },
     }
 }
 
@@ -159,7 +169,13 @@ fn codex_session(
                 total_tokens: input + output,
             })
             .collect(),
-        estimated_cost_usd: None,
+        estimated_cost_usd: usage_stats_codex::estimate_cost_usd(
+            models.last().copied(),
+            input,
+            cached,
+            output,
+        ),
+        unpriced_requests: 0,
     }
 }
 

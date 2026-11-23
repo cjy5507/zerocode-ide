@@ -114,6 +114,7 @@ pub(crate) struct CodexDayRow {
     /// An estimate, and labelled as one wherever it is shown: a subscription
     /// is not billed per token.
     pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
 }
 
 /// One model's whole share, across every day.
@@ -130,6 +131,7 @@ pub(crate) struct CodexModelRow {
     #[serde(flatten)]
     pub(crate) tokens: CodexTokens,
     pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
 }
 
 /// One Codex conversation, as the rollouts remember it.
@@ -162,7 +164,9 @@ pub(crate) struct CodexSessionRow {
     pub(crate) tokens: CodexTokens,
     pub(crate) ours_tokens: CodexTokens,
     pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
     pub(crate) ours_cost_usd: Option<f64>,
+    pub(crate) ours_unpriced_requests: u64,
 }
 
 /// What one pass over the rollouts found.
@@ -193,7 +197,8 @@ pub(crate) struct CodexScan {
     /// on a guessed day.
     pub(crate) undated: u64,
     /// Every priced row added up.
-    pub(crate) cost_usd: f64,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) unpriced_requests: u64,
     /// Models with no rate on file, named rather than folded in as free.
     pub(crate) unpriced: Vec<String>,
 }
@@ -336,7 +341,13 @@ fn absorb_rollout(
             reasoning_output: delta.reasoning_output,
         };
         let date = civil::iso_date_of(at, offset_minutes);
-        let dollars = cost_usd(&model, delta.input, delta.cached_input, delta.output);
+        let dollars = zerocode_core::usage_stats_codex::request_cost(
+            &model,
+            model_prices::day_at_millis(at),
+            delta.input,
+            delta.cached_input,
+            delta.output,
+        );
         let one = places.at(place);
         let row = tally
             .spent
@@ -351,17 +362,15 @@ fn absorb_rollout(
                 zero_cached_input: 0,
                 tokens: CodexTokens::default(),
                 cost_usd: None,
+                unpriced_requests: 0,
             });
         row.turns += 1;
         if delta.cached_input == 0 {
             row.zero_cached_input += 1;
         }
         row.tokens.add(tokens);
-        // Priced HERE, one turn at a time, because the long-context surcharge
-        // is a property of a single request — see `cost_usd`.
-        if let Some(spent) = dollars {
-            row.cost_usd = Some(row.cost_usd.unwrap_or(0.0) + spent);
-        }
+        row.cost_usd = model_prices::sum_cost(row.cost_usd, dollars);
+        row.unpriced_requests += u64::from(dollars.is_none());
 
         let ours = places.at(place).ours;
         let standing = tally
@@ -375,10 +384,8 @@ fn absorb_rollout(
                 ours_turns: 0,
                 tokens: CodexTokens::default(),
                 ours_tokens: CodexTokens::default(),
-                spent: 0.0,
-                priced: false,
-                ours_spent: 0.0,
-                ours_priced: false,
+                cost: model_prices::CostTotal::default(),
+                ours_cost: model_prices::CostTotal::default(),
                 places: HashMap::new(),
             });
         standing.first_at = standing.first_at.min(at);
@@ -388,17 +395,11 @@ fn absorb_rollout(
         }
         standing.turns += 1;
         standing.tokens.add(tokens);
-        if let Some(spent) = dollars {
-            standing.spent += spent;
-            standing.priced = true;
-        }
+        standing.cost.record(dollars);
         if ours {
             standing.ours_turns += 1;
             standing.ours_tokens.add(tokens);
-            if let Some(spent) = dollars {
-                standing.ours_spent += spent;
-                standing.ours_priced = true;
-            }
+            standing.ours_cost.record(dollars);
         }
         let visited = standing.places.entry(place).or_default();
         visited.weight += tokens.input + tokens.output;
@@ -428,10 +429,8 @@ struct CodexSessionBuild {
     ours_turns: u64,
     tokens: CodexTokens,
     ours_tokens: CodexTokens,
-    spent: f64,
-    priced: bool,
-    ours_spent: f64,
-    ours_priced: bool,
+    cost: model_prices::CostTotal,
+    ours_cost: model_prices::CostTotal,
     places: HashMap<u32, CodexPlaceWeight>,
 }
 
@@ -475,8 +474,10 @@ fn fold_sessions(
                 ours_turns: one.ours_turns,
                 tokens: one.tokens,
                 ours_tokens: one.ours_tokens,
-                cost_usd: one.priced.then_some(one.spent),
-                ours_cost_usd: one.ours_priced.then_some(one.ours_spent),
+                cost_usd: one.cost.cost_usd,
+                unpriced_requests: one.cost.unpriced_requests,
+                ours_cost_usd: one.ours_cost.cost_usd,
+                ours_unpriced_requests: one.ours_cost.unpriced_requests,
             }
         })
         .collect();
@@ -507,13 +508,13 @@ fn fold_by_model(days: &[CodexDayRow]) -> Vec<CodexModelRow> {
                 zero_cached_input: 0,
                 tokens: CodexTokens::default(),
                 cost_usd: None,
+                unpriced_requests: 0,
             });
         into.turns += row.turns;
         into.zero_cached_input += row.zero_cached_input;
         into.tokens.add(row.tokens);
-        if let Some(spent) = row.cost_usd {
-            into.cost_usd = Some(into.cost_usd.unwrap_or(0.0) + spent);
-        }
+        into.cost_usd = model_prices::sum_cost(into.cost_usd, row.cost_usd);
+        into.unpriced_requests += row.unpriced_requests;
     }
     let mut models: Vec<CodexModelRow> = held.into_values().collect();
     models.sort_by(|left, right| {
@@ -579,16 +580,15 @@ pub(crate) fn scan_through(
             .then_with(|| left.model.cmp(&right.model))
             .then_with(|| left.project.cmp(&right.project))
     });
-    let mut spent_usd = 0.0;
-    let mut unpriced: Vec<String> = Vec::new();
+    let mut cost = model_prices::CostTotal::default();
+    let mut unpriced = Vec::new();
     for row in &days {
-        match row.cost_usd {
-            Some(dollars) => spent_usd += dollars,
-            None => {
-                if !unpriced.contains(&row.model) {
-                    unpriced.push(row.model.clone());
-                }
-            }
+        cost.merge(model_prices::CostTotal {
+            cost_usd: row.cost_usd,
+            unpriced_requests: row.unpriced_requests,
+        });
+        if row.unpriced_requests > 0 && !unpriced.contains(&row.model) {
+            unpriced.push(row.model.clone());
         }
     }
     unpriced.sort();
@@ -608,73 +608,26 @@ pub(crate) fn scan_through(
         events,
         folded,
         undated,
-        cost_usd: spent_usd,
+        cost_usd: cost.cost_usd,
+        unpriced_requests: cost.unpriced_requests,
         unpriced,
     }
 }
 
-/* ---- what it cost ------------------------------------------------------- */
-
-/// Where the vendor's long-context surcharge begins, in tokens of ONE request
-/// (`resources/model-prices.json`). The unit matters more than the number —
-/// see [`cost_usd`].
-fn long_context_threshold() -> u64 {
-    model_prices::openai_long_context_threshold()
-}
-
-/// One bucket's cost, with the surcharge applied above the threshold.
-fn tier_cost(tokens: u64, base: f64, long: Option<f64>) -> f64 {
-    let threshold = long_context_threshold();
-    match long {
-        Some(long) if tokens > threshold => {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "token counts are far inside f64"
-            )]
-            let (under, over) = (threshold as f64, (tokens - threshold) as f64);
-            under * base + over * long
-        }
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "token counts are far inside f64"
-        )]
-        _ => tokens as f64 * base,
-    }
-}
-
-/// What ONE TURN cost, in dollars — or `None` for a model with no rate.
-///
-/// Two things here are deliberate.
-///
-/// Cached input is subtracted from input before either is priced. The vendor
-/// reports cached tokens as a SHARE of input, not beside it, so billing both
-/// at full price would charge the cheap half twice
-/// (`codex-usage-cost-estimate.ts:30-35`).
-///
-/// And the surcharge is applied **per turn**, which is where this parts from
-/// Orca. Orca prices a whole day's row at once
-/// (`codex-usage-rollup-projections.ts:48`), so a day that spent more than
-/// 272,000 tokens in total is billed as though every one of them sat in a
-/// long-context request. The threshold is a property of ONE request, and a
-/// turn is the closest thing to a request that a rollout records. Measured on
-/// this machine's corpus the difference is not academic: 0.9% of turns are
-/// genuinely over the line, and pricing by day rather than by turn takes the
-/// bill from $6,752.72 to $12,966.15 — 92% more.
-pub(crate) fn cost_usd(model: &str, input: u64, cached_input: u64, output: u64) -> Option<f64> {
-    let rate = model_prices::openai_rate(model)?;
-    let cached = cached_input.min(input);
-    let uncached = input - cached;
-    let long = rate.long;
-    Some(
-        (tier_cost(uncached, rate.input, long.map(|held| held.input))
-            + tier_cost(
-                cached,
-                rate.cached_input,
-                long.map(|held| held.cached_input),
-            )
-            + tier_cost(output, rate.output, long.map(|held| held.output)))
-            / 1_000_000.0,
+#[cfg(test)]
+fn cost_usd(model: &str, input: u64, cached_input: u64, output: u64) -> Option<f64> {
+    zerocode_core::usage_stats_codex::request_cost(
+        model,
+        model_prices::pricing_day("2026-07-29").unwrap(),
+        input,
+        cached_input,
+        output,
     )
+}
+
+#[cfg(test)]
+fn long_context_threshold() -> u64 {
+    272_000
 }
 
 #[cfg(test)]
@@ -1182,11 +1135,11 @@ mod tests {
             cost_usd("gpt-5.6-sol", long_context_threshold(), 0, 0),
             Some(long_context_threshold() as f64 * 5.0 / 1e6)
         );
-        // Over it: the first 272,000 at base and the rest at the surcharge.
+        // Above the threshold, the surcharge applies to the whole request.
         let over = long_context_threshold() + 100_000;
         assert_eq!(
             cost_usd("gpt-5.6-sol", over, 0, 0),
-            Some((long_context_threshold() as f64 * 5.0 + 100_000.0 * 10.0) / 1e6)
+            Some(over as f64 * 10.0 / 1e6)
         );
         // A model with no surcharge is unmoved by the size.
         assert_eq!(
@@ -1214,11 +1167,13 @@ mod tests {
         let apart = scan(apart.path(), 0, &mut nowhere()).cost_usd;
         let together = scan(together.path(), 0, &mut nowhere()).cost_usd;
         assert!(
-            apart < together,
-            "the surcharge was measured against the day, not the turn: {apart} vs {together}"
+            apart
+                .zip(together)
+                .is_some_and(|(apart, together)| apart < together),
+            "the surcharge was measured against the day, not the turn: {apart:?} vs {together:?}"
         );
         // The tokens are the same either way.
-        assert_eq!(apart, 400_000.0 * 5.0 / 1e6);
+        assert_eq!(apart, Some(400_000.0 * 5.0 / 1e6));
     }
 
     /// A model with no rate is named rather than counted as free.
@@ -1236,7 +1191,7 @@ mod tests {
         let held = scan(home.path(), 0, &mut nowhere());
         assert_eq!(held.unpriced, vec!["codex-auto-review".to_string()]);
         assert!(
-            held.cost_usd > 0.0,
+            held.cost_usd.is_some_and(|cost| cost > 0.0),
             "the priced half was lost with the unpriced one"
         );
         let unknown = held

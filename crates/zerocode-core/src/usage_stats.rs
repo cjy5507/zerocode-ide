@@ -127,6 +127,7 @@ pub struct SourceTurn {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
+    pub cache_write_1h_tokens: i64,
     /// The strongest stable identity this row carried, used to collapse the
     /// repeats a stream writes. `None` means the row cannot be matched to any
     /// other and is therefore always kept.
@@ -216,6 +217,11 @@ pub fn parse_record(line: &str, fallback_session_id: Option<&str>) -> Option<Sou
         output_tokens,
         cache_read_tokens,
         cache_write_tokens,
+        cache_write_1h_tokens: usage
+            .and_then(|usage| usage.get("cache_creation"))
+            .and_then(|cache| cache.get("ephemeral_1h_input_tokens"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
         dedupe_key: dedupe_key(
             text(message, "id"),
             text(Some(&value), "requestId"),
@@ -244,6 +250,7 @@ pub fn dedupe(turns: Vec<SourceTurn>) -> Vec<SourceTurn> {
             held.output_tokens = held.output_tokens.max(turn.output_tokens);
             held.cache_read_tokens = held.cache_read_tokens.max(turn.cache_read_tokens);
             held.cache_write_tokens = held.cache_write_tokens.max(turn.cache_write_tokens);
+            held.cache_write_1h_tokens = held.cache_write_1h_tokens.max(turn.cache_write_1h_tokens);
             continue;
         }
         if let Some(key) = turn.dedupe_key.clone() {
@@ -402,215 +409,13 @@ pub fn place(
 
 /// Dollars per million tokens for one model, with the long-context tier some
 /// of them bill above a threshold.
-#[derive(Clone, Copy)]
-struct Pricing {
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: f64,
-    /// `None` for a model that bills one flat rate at every context length.
-    long_context: Option<LongContext>,
-}
-
-#[derive(Clone, Copy)]
-struct LongContext {
-    threshold_tokens: f64,
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: f64,
-}
-
-/// The tier Sonnet 4-series models bill above 200k tokens of context.
-const SONNET_LONG_CONTEXT: LongContext = LongContext {
-    threshold_tokens: 200_000.0,
-    input: 6.0,
-    output: 22.5,
-    cache_read: 0.6,
-    cache_write: 7.5,
-};
-
-/// Orca's `MODEL_PRICING`, in dollars per million tokens.
-///
-/// Sonnet 5 bills its full window at flat rates, so it carries no long-context
-/// tier; the figures are the standard rates rather than the introductory ones,
-/// because this table has no date dimension to expire them with.
-fn pricing_of(model: &str) -> Option<Pricing> {
-    let flat = |input, output, cache_read, cache_write| {
-        Some(Pricing {
-            input,
-            output,
-            cache_read,
-            cache_write,
-            long_context: None,
-        })
-    };
-    let sonnet_4 = || {
-        Some(Pricing {
-            input: 3.0,
-            output: 15.0,
-            cache_read: 0.3,
-            cache_write: 3.75,
-            long_context: Some(SONNET_LONG_CONTEXT),
-        })
-    };
-    match model {
-        "claude-fable-5-1" => flat(10.0, 50.0, 0.25, 12.5),
-        "claude-fable-5" => flat(10.0, 50.0, 1.0, 12.5),
-        "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
-        | "claude-opus-4-5" => flat(5.0, 25.0, 0.5, 6.25),
-        "claude-opus-4-1" | "claude-opus-4" => flat(15.0, 75.0, 1.5, 18.75),
-        "claude-sonnet-5" => flat(3.0, 15.0, 0.3, 3.75),
-        "claude-sonnet-4-6" | "claude-sonnet-4-5" | "claude-sonnet-4" => sonnet_4(),
-        "claude-sonnet-3-7" | "claude-sonnet-3-5" => flat(3.0, 15.0, 0.3, 3.75),
-        "claude-haiku-4-5" => flat(1.0, 5.0, 0.1, 1.25),
-        "claude-haiku-3-5" => flat(0.8, 4.0, 0.08, 1.0),
-        "claude-haiku-3" => flat(0.25, 1.25, 0.03, 0.3),
-        _ => None,
-    }
-}
-
-/// Whether a model id names this family at this version.
-///
-/// The version has to end at a non-digit or the string's end, so `opus-4-1`
-/// does not answer for a query about `opus-4`.
-fn has_version(model: &str, family: &str, version: &str) -> bool {
-    let normalized = model.replace('.', "-");
-    let needle = format!("{family}-{version}");
-    let mut from = 0;
-    while let Some(at) = normalized[from..].find(&needle) {
-        let at = from + at;
-        let after = at + needle.len();
-        match normalized.as_bytes().get(after) {
-            None => return true,
-            Some(byte) if !byte.is_ascii_digit() => return true,
-            _ => from = at + 1,
-        }
-    }
-    false
-}
-
-/// The pre-4.5 Opus 4 releases, which bill at the old high rate.
-fn is_legacy_opus_4(model: &str) -> bool {
-    let normalized = model.replace('.', "-");
-    let Some(at) = normalized.find("opus-4") else {
-        return false;
-    };
-    let rest = &normalized[at + "opus-4".len()..];
-    rest.is_empty()
-        || rest == "-thinking"
-        || (rest.starts_with("-20")
-            && rest.len() >= 9
-            && rest[1..9].bytes().all(|b| b.is_ascii_digit()))
-        || (rest.starts_with("@20")
-            && rest.len() >= 9
-            && rest[1..9].bytes().all(|b| b.is_ascii_digit()))
-        || (rest.starts_with("-20") && rest.ends_with("-thinking"))
-}
-
-/// The price-table key a transcript's model id maps to, or `None` when this
-/// table has never heard of it.
-///
-/// `None` matters: an unknown model contributes no cost at all rather than a
-/// guessed one, and the pane says `n/a` instead of a number nobody can check.
+/// The catalog ID for an exact model or recorded alias.
 #[must_use]
 pub fn pricing_key(model: Option<&str>) -> Option<String> {
-    let model = model?;
-    let lower = model
-        .to_lowercase()
-        .trim()
-        .trim_start_matches("anthropic/")
-        .trim_start_matches("anthropic:")
-        .to_string();
-    let alias = match lower.as_str() {
-        "model_placeholder_m26" => Some("claude-opus-4-6"),
-        "model_placeholder_m35" => Some("claude-sonnet-4-6"),
-        "claude-opus-4.8" | "claude-opus-4.8-thinking" | "claude-opus-4-8-thinking" => {
-            Some("claude-opus-4-8")
-        }
-        "claude-opus-4.6" | "claude-opus-4.6-thinking" | "claude-opus-4-6-thinking" => {
-            Some("claude-opus-4-6")
-        }
-        "claude-sonnet-4.6" | "claude-sonnet-4.6-thinking" | "claude-sonnet-4-6-thinking" => {
-            Some("claude-sonnet-4-6")
-        }
-        _ => None,
-    };
-    if let Some(alias) = alias {
-        return Some(alias.to_string());
-    }
-    for (family, version, key) in [
-        ("fable", "5-1", "claude-fable-5-1"),
-        ("fable", "5", "claude-fable-5"),
-        ("opus", "5", "claude-opus-5"),
-        ("opus", "4-8", "claude-opus-4-8"),
-        ("opus", "4-7", "claude-opus-4-7"),
-        ("opus", "4-6", "claude-opus-4-6"),
-        ("opus", "4-5", "claude-opus-4-5"),
-        ("opus", "4-1", "claude-opus-4-1"),
-    ] {
-        if has_version(&lower, family, version) {
-            return Some(key.to_string());
-        }
-    }
-    if is_legacy_opus_4(&lower) {
-        return Some("claude-opus-4".to_string());
-    }
-    if lower.contains("opus-4") {
-        // A point release this table has not met yet bills at the current low
-        // Opus rate, not the legacy one — overbilling an unknown id is the
-        // worse of the two errors.
-        return Some("claude-opus-4-8".to_string());
-    }
-    for (family, version, key) in [
-        ("sonnet", "5", "claude-sonnet-5"),
-        ("sonnet", "4-6", "claude-sonnet-4-6"),
-        ("sonnet", "4-5", "claude-sonnet-4-5"),
-    ] {
-        if has_version(&lower, family, version) {
-            return Some(key.to_string());
-        }
-    }
-    if lower.contains("sonnet-4") {
-        return Some("claude-sonnet-4-6".to_string());
-    }
-    if lower.contains("sonnet-3-7") || lower.contains("sonnet-3.7") {
-        return Some("claude-sonnet-3-7".to_string());
-    }
-    // Version-first ids like `claude-3-5-sonnet-20241022` are still in old
-    // logs on disk; matching them keeps their cost out of the silently-dropped
-    // pile.
-    for needle in ["sonnet-3-5", "sonnet-3.5", "3-5-sonnet", "3.5-sonnet"] {
-        if lower.contains(needle) {
-            return Some("claude-sonnet-3-5".to_string());
-        }
-    }
-    if lower.contains("haiku-4-5") {
-        return Some("claude-haiku-4-5".to_string());
-    }
-    for needle in ["haiku-3-5", "haiku-3.5", "3-5-haiku", "3.5-haiku"] {
-        if lower.contains(needle) {
-            return Some("claude-haiku-3-5".to_string());
-        }
-    }
-    if lower.contains("haiku-3") {
-        return Some("claude-haiku-3".to_string());
-    }
-    None
+    model_prices::model_key(model?).map(str::to_owned)
 }
 
-/// Splits a token count across a threshold and prices each half.
-fn tiered(tokens: f64, base: f64, above: Option<(f64, f64)>) -> f64 {
-    let Some((threshold, above_price)) = above else {
-        return tokens * base;
-    };
-    let below = tokens.min(threshold);
-    let over = (tokens - threshold).max(0.0);
-    below * base + over * above_price
-}
-
-/// What these tokens would have cost on the API, or `None` for a model with
-/// no price on file.
+/// Estimate one request at the current list price.
 #[must_use]
 pub fn estimate_cost_usd(
     model: Option<&str>,
@@ -619,29 +424,52 @@ pub fn estimate_cost_usd(
     cache_read_tokens: i64,
     cache_write_tokens: i64,
 ) -> Option<f64> {
-    let pricing = pricing_of(&pricing_key(model)?)?;
-    let tier = |pick: fn(&LongContext) -> f64| {
-        pricing
-            .long_context
-            .map(|long| (long.threshold_tokens, pick(&long)))
-    };
-    let total = tiered(input_tokens as f64, pricing.input, tier(|long| long.input))
-        + tiered(
-            output_tokens as f64,
-            pricing.output,
-            tier(|long| long.output),
-        )
-        + tiered(
-            cache_read_tokens as f64,
-            pricing.cache_read,
-            tier(|long| long.cache_read),
-        )
-        + tiered(
-            cache_write_tokens as f64,
-            pricing.cache_write,
-            tier(|long| long.cache_write),
-        );
-    Some(total / 1_000_000.0)
+    estimate_request(
+        model?,
+        model_prices::today(),
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        0,
+    )
+}
+
+/// Price one transcript request using its timestamp and cache durations.
+#[must_use]
+pub fn cost_of_turn(turn: &SourceTurn) -> Option<f64> {
+    estimate_request(
+        turn.model.as_deref()?,
+        model_prices::day_at_millis(epoch_ms_of_iso(&turn.timestamp)?),
+        turn.input_tokens,
+        turn.output_tokens,
+        turn.cache_read_tokens,
+        turn.cache_write_tokens,
+        turn.cache_write_1h_tokens,
+    )
+}
+
+fn estimate_request(
+    model: &str,
+    day: i64,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cache_write_1h: i64,
+) -> Option<f64> {
+    model_prices::request_cost(
+        model,
+        day,
+        model_prices::RequestTokens {
+            input: u64::try_from(input).ok()?,
+            output: u64::try_from(output).ok()?,
+            cache_read: u64::try_from(cache_read).ok()?,
+            cache_write: u64::try_from(cache_write).ok()?,
+            cache_write_1h: u64::try_from(cache_write_1h).ok()?,
+        },
+    )
+    .map(model_prices::Cost::total_cost_usd)
 }
 
 /// Where one session spent its turns. A session that moved between checkouts
@@ -674,6 +502,8 @@ pub struct Session {
     pub total_cache_read_tokens: i64,
     pub total_cache_write_tokens: i64,
     pub location_breakdown: Vec<LocationBreakdown>,
+    #[serde(default)]
+    pub cost: model_prices::CostTotal,
 }
 
 /// One day of one model in one project.
@@ -691,6 +521,8 @@ pub struct DailyAggregate {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
+    #[serde(default)]
+    pub cost: model_prices::CostTotal,
 }
 
 /// Everything one scan learned, before any scope or range is applied.
@@ -723,6 +555,7 @@ pub fn aggregate(turns: Vec<AttributedTurn>) -> Ledger {
                 total_cache_read_tokens: 0,
                 total_cache_write_tokens: 0,
                 location_breakdown: Vec::new(),
+                cost: model_prices::CostTotal::default(),
             });
         if turn.timestamp < session.first_timestamp {
             session.first_timestamp = turn.timestamp.clone();
@@ -735,6 +568,8 @@ pub fn aggregate(turns: Vec<AttributedTurn>) -> Ledger {
         if turn.model.is_some() {
             session.model = turn.model.clone();
         }
+        let cost = cost_of_turn(turn);
+        session.cost.record(cost);
         session.turn_count += 1;
         session.total_input_tokens += turn.input_tokens;
         session.total_output_tokens += turn.output_tokens;
@@ -784,7 +619,9 @@ pub fn aggregate(turns: Vec<AttributedTurn>) -> Ledger {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cost: model_prices::CostTotal::default(),
         });
+        row.cost.record(cost);
         row.turn_count += 1;
         if turn.cache_read_tokens == 0 {
             row.zero_cache_read_turn_count += 1;
@@ -848,6 +685,7 @@ pub fn merge(into: &mut Ledger, from: Ledger) {
         if session.model.is_some() {
             held.model = session.model.clone();
         }
+        held.cost.merge(session.cost);
         held.turn_count += session.turn_count;
         held.total_input_tokens += session.total_input_tokens;
         held.total_output_tokens += session.total_output_tokens;
@@ -900,6 +738,7 @@ pub fn merge(into: &mut Ledger, from: Ledger) {
             continue;
         };
         let held = &mut into.daily_aggregates[index];
+        held.cost.merge(row.cost);
         held.turn_count += row.turn_count;
         held.zero_cache_read_turn_count += row.zero_cache_read_turn_count;
         held.input_tokens += row.input_tokens;
@@ -941,6 +780,8 @@ pub struct Summary {
     pub cache_write_tokens: i64,
     pub cache_reuse_rate: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub unpriced_requests: u64,
     pub top_model: Option<String>,
     pub top_project: Option<String>,
     pub has_any_data: bool,
@@ -968,6 +809,8 @@ pub struct BreakdownRow {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub unpriced_requests: u64,
 }
 
 /// One row of the recent-sessions table.
@@ -1098,14 +941,14 @@ pub fn report(
         cache_write_tokens: 0,
         cache_reuse_rate: None,
         estimated_cost_usd: None,
+        unpriced_requests: 0,
         top_model: None,
         top_project: None,
         has_any_data: !sessions.is_empty() || !daily_rows.is_empty(),
     };
     let mut by_model: BTreeMap<String, i64> = BTreeMap::new();
     let mut by_project: BTreeMap<String, i64> = BTreeMap::new();
-    let mut cost = 0.0;
-    let mut any_billable = false;
+    let mut cost = model_prices::CostTotal::default();
     for row in &daily_rows {
         summary.input_tokens += row.input_tokens;
         summary.output_tokens += row.output_tokens;
@@ -1122,16 +965,7 @@ pub fn report(
             )
             .or_insert(0) += tokens;
         *by_project.entry(row.project_label.clone()).or_insert(0) += tokens;
-        if let Some(row_cost) = estimate_cost_usd(
-            row.model.as_deref(),
-            row.input_tokens,
-            row.output_tokens,
-            row.cache_read_tokens,
-            row.cache_write_tokens,
-        ) {
-            any_billable = true;
-            cost += row_cost;
-        }
+        cost.merge(row.cost.for_requests(row.turn_count));
     }
     let heaviest = |counts: BTreeMap<String, i64>| {
         counts
@@ -1147,9 +981,8 @@ pub fn report(
                 / (summary.input_tokens + summary.cache_read_tokens) as f64,
         );
     }
-    if any_billable {
-        summary.estimated_cost_usd = Some(cost);
-    }
+    summary.estimated_cost_usd = cost.cost_usd;
+    summary.unpriced_requests = cost.unpriced_requests;
 
     let mut by_day: BTreeMap<String, DailyPoint> = BTreeMap::new();
     for row in &daily_rows {
@@ -1204,7 +1037,11 @@ fn breakdown(
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             estimated_cost_usd: None,
+            unpriced_requests: 0,
         });
+        let cost = row.cost.for_requests(row.turn_count);
+        held.estimated_cost_usd = model_prices::sum_cost(held.estimated_cost_usd, cost.cost_usd);
+        held.unpriced_requests += cost.unpriced_requests;
         held.turns += row.turn_count;
         held.input_tokens += row.input_tokens;
         held.output_tokens += row.output_tokens;
@@ -1241,17 +1078,6 @@ fn breakdown(
     }
 
     let mut rows: Vec<BreakdownRow> = rows.into_values().collect();
-    if kind == BreakdownKind::Model {
-        for row in &mut rows {
-            row.estimated_cost_usd = estimate_cost_usd(
-                Some(&row.key),
-                row.input_tokens,
-                row.output_tokens,
-                row.cache_read_tokens,
-                row.cache_write_tokens,
-            );
-        }
-    }
     rows.sort_by(|left, right| {
         (right.input_tokens + right.output_tokens).cmp(&(left.input_tokens + left.output_tokens))
     });
@@ -1336,6 +1162,7 @@ mod tests {
             output_tokens: 10,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_1h_tokens: 0,
             dedupe_key: None,
         }
     }
@@ -1674,14 +1501,14 @@ mod tests {
         let cached = |model: &str| estimate_cost_usd(Some(model), 0, 0, 1_000_000, 0);
         assert_eq!(cached("claude-fable-5-1"), Some(0.25));
         assert_eq!(cached("claude-fable-5"), Some(1.0));
-        assert_eq!(million("claude-sonnet-5"), Some(3.0));
+        assert_eq!(million("claude-sonnet-5"), Some(2.0));
         assert_eq!(million("claude-haiku-4-5"), Some(1.0));
         // Version-bearing ids from real logs resolve to their family.
-        assert_eq!(million("claude-opus-5-20260514"), Some(5.0));
-        assert_eq!(million("anthropic/claude-sonnet-5"), Some(3.0));
+        assert_eq!(million("claude-opus-5-20260514"), None);
+        assert_eq!(million("anthropic/claude-sonnet-5"), Some(2.0));
         assert_eq!(million("claude-opus-4.8-thinking"), Some(5.0));
         // The legacy Opus 4 rate, and the boundary that separates it from 4-1.
-        assert_eq!(million("claude-opus-4-20250101"), Some(15.0));
+        assert_eq!(million("claude-opus-4-20250514"), Some(15.0));
         assert_eq!(
             million("claude-opus-4-1"),
             Some(15.0),
@@ -1700,21 +1527,26 @@ mod tests {
         assert_eq!(estimate_cost_usd(None, 1_000_000, 0, 0, 0), None);
     }
 
-    /// Sonnet's long-context tier bills the excess at the higher rate.
     #[test]
-    fn sonnet_bills_the_context_above_two_hundred_thousand_higher() {
-        // 300k input: 200k at $3/M and 100k at $6/M.
-        let cost = estimate_cost_usd(Some("claude-sonnet-4-6"), 300_000, 0, 0, 0).expect("priced");
-        let expected = (200_000.0 * 3.0 + 100_000.0 * 6.0) / 1_000_000.0;
+    fn the_daily_cost_carries_known_amounts_and_unpriced_requests() {
+        let date = "2026-10-10T03:00:00Z";
+        let first = turn("a", date, None, 100);
+        let unknown = SourceTurn {
+            model: Some("synthetic-cli-model".to_string()),
+            ..turn("b", date, None, 200)
+        };
+        let ledger = aggregate(attribute(vec![first, unknown], &[], KST));
+        let now = epoch_ms_of_iso(date).unwrap();
+        let report = report(&ledger, Scope::All, Range::All, now, KST);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["summary"]["unpriced_requests"], 1);
+        assert!(json["summary"]["estimated_cost_usd"].as_f64().unwrap() > 0.0);
+        assert_eq!(report.project_breakdown[0].unpriced_requests, 1);
         assert!(
-            (cost - expected).abs() < 1e-9,
-            "the long-context tier was ignored: {cost} vs {expected}"
-        );
-        // Sonnet 5 bills its whole window flat, so no tier applies.
-        let flat = estimate_cost_usd(Some("claude-sonnet-5"), 300_000, 0, 0, 0).expect("priced");
-        assert!(
-            (flat - 300_000.0 * 3.0 / 1_000_000.0).abs() < 1e-9,
-            "Sonnet 5 was billed a long-context tier it does not have"
+            report
+                .model_breakdown
+                .iter()
+                .any(|row| row.key == "synthetic-cli-model" && row.estimated_cost_usd.is_none())
         );
     }
 
@@ -1836,9 +1668,9 @@ mod tests {
             .estimated_cost_usd
             .expect("the model row carries its own cost");
         assert!((model_cost - expected).abs() < 1e-12);
-        assert!(
-            ours.project_breakdown[0].estimated_cost_usd.is_none(),
-            "a project row claimed a price, but a project is not billed at one rate"
+        assert_eq!(
+            ours.project_breakdown[0].estimated_cost_usd,
+            Some(model_cost)
         );
     }
 

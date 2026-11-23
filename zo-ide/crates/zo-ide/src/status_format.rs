@@ -143,14 +143,14 @@ pub fn format_tokens_compact(tokens: u64) -> String {
 
 /// Estimate a token sample using the model-specific public pricing table.
 #[must_use]
-pub fn estimate_usage_cost(model: &str, usage: TokenUsage) -> UsageCostEstimate {
+pub fn estimate_usage_cost(model: &str, usage: TokenUsage) -> Option<UsageCostEstimate> {
     core_types::usage::estimate_usage_cost(model, usage)
 }
 
 /// Return the total estimated USD cost as a number for machine consumers.
 #[must_use]
-pub fn estimated_cost_usd(model: &str, usage: TokenUsage) -> f64 {
-    estimate_usage_cost(model, usage).total_cost_usd()
+pub fn estimated_cost_usd(model: &str, usage: TokenUsage) -> Option<f64> {
+    estimate_usage_cost(model, usage).map(UsageCostEstimate::total_cost_usd)
 }
 
 /// Format a cost with the same two-decimal presentation as the forge HUD.
@@ -163,16 +163,10 @@ pub fn format_cost_usd(amount: f64) -> String {
     }
 }
 
-/// Format a model-aware estimated cost. Unknown models use the fallback tier
-/// and are marked with `~` so a status line cannot imply a metered bill.
+/// Format a model-aware estimated cost.
 #[must_use]
 pub fn format_estimated_cost(model: &str, usage: TokenUsage) -> String {
-    let prefix = if runtime::pricing_for_model(model).is_some() {
-        ""
-    } else {
-        "~"
-    };
-    format!("{prefix}{}", format_cost_usd(estimated_cost_usd(model, usage)))
+    estimated_cost_usd(model, usage).map_or_else(|| "unknown".to_string(), format_cost_usd)
 }
 
 /// The provider's input-side context occupancy for a usage sample.
@@ -886,15 +880,12 @@ mod tests {
         };
         assert_eq!(
             format_estimated_cost(&model, usage),
-            format_cost_usd(estimated_cost_usd(&model, usage))
+            format_cost_usd(estimated_cost_usd(&model, usage).unwrap())
         );
-        let fallback = format_estimated_cost("unknown-model", usage);
-        assert_eq!(
-            fallback,
-            format!("~{}", format_cost_usd(estimated_cost_usd("unknown-model", usage)))
-        );
+        assert_eq!(format_estimated_cost("unknown-model", usage), "unknown");
+        assert_eq!(estimated_cost_usd("unknown-model", usage), None);
         assert_eq!(format_cost_usd(0.0001), "$0.00");
-        assert!(estimated_cost_usd(&model, usage) > 0.0);
+        assert!(estimated_cost_usd(&model, usage).is_some_and(|cost| cost > 0.0));
     }
 
     #[test]

@@ -52478,6 +52478,18 @@ const usageRows = await page.evaluate(async () => {
   seen.codexRow = document.querySelector(".usage-breakdown-tokens")?.textContent;
   seen.codexSays = formatTokens(1070);
 
+  // A priced zero, a missing estimate, and a partial subtotal can all arrive
+  // from the same provider. The settings UI has to make them distinguishable.
+  const zero = formatUsageCost(0, 0);
+  const unknown = formatUsageCost(null, 1);
+  usageStatsReports.codex.summary.unpriced_requests = 2;
+  usageStatsReports.codex.summary.top_model = "synthetic-cli-model";
+  paintUsageStats();
+  const usageText = document.getElementById("usage-stats-body").textContent;
+  seen.pricingStates = zero.startsWith("$0") && !unknown.includes("$")
+    && usageText.includes(formatUsageCost(1.5, 2))
+    && usageText.includes("synthetic-cli-model");
+
   // Claude는 입력+출력(캐시 제외) — 이쪽 원본의 선택.
   usageStatsReports.claude = report();
   usageStatsProvider = "claude";
@@ -52534,6 +52546,7 @@ const usageRows = await page.evaluate(async () => {
 ok(
   "each ledger's breakdown counts its own way, and the overview keeps a switched-off provider with its way back",
   usageRows.codexRow === usageRows.codexSays &&
+    usageRows.pricingStates &&
     usageRows.claudeRow === usageRows.claudeSays &&
     usageRows.codexRow !== usageRows.claudeRow &&
     usageRows.opencodeRow === usageRows.opencodeSays &&

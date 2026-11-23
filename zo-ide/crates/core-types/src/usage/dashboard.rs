@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{ModelPricing, TokenUsage, UsageCostEstimate, pricing_for_model};
+use model_prices::{CostTotal, RequestTokens};
+
+use super::{ModelPricing, TokenUsage, UsageCostEstimate, pricing::pricing_at};
 
 /// Dashboard-only token counters that can safely aggregate many sessions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -86,7 +88,8 @@ pub struct UsagePeriodRow {
     /// Tokens billed/observed in this bucket.
     pub tokens: u64,
     /// Estimated USD cost in this bucket.
-    pub cost_usd: f64,
+    pub cost_usd: Option<f64>,
+    pub unpriced_records: u64,
     /// Estimated USD saved in this bucket.
     pub saved_usd: f64,
     /// Dominant model for the bucket.
@@ -101,7 +104,8 @@ pub struct UsageModelRow {
     /// Token total attributed to this model.
     pub tokens: u64,
     /// Estimated USD cost attributed to this model.
-    pub cost_usd: f64,
+    pub cost_usd: Option<f64>,
+    pub unpriced_records: u64,
     /// Estimated USD saved for this model.
     pub saved_usd: f64,
     /// Share of total dashboard tokens (`0.0..=1.0`).
@@ -112,7 +116,8 @@ pub struct UsageModelRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageSavingsSummary {
     /// Actual estimated cost.
-    pub actual_cost_usd: f64,
+    pub actual_cost_usd: Option<f64>,
+    pub unpriced_records: u64,
     /// Baseline cost before cache/model-mix savings.
     pub baseline_cost_usd: f64,
     /// Savings from prompt-cache reads being cheaper than normal input tokens.
@@ -136,7 +141,8 @@ pub struct UsageDashboardSnapshot {
     /// Unsaturated cumulative token count for dashboard display and shares.
     pub total_tokens: u64,
     /// Cumulative estimated cost.
-    pub total_cost_usd: f64,
+    pub total_cost_usd: Option<f64>,
+    pub unpriced_records: u64,
     /// Daily rows aggregated from persisted/live session usage.
     pub daily: Vec<UsagePeriodRow>,
     /// Monthly rows aggregated from persisted/live session usage.
@@ -152,20 +158,22 @@ pub struct UsageDashboardSnapshot {
 #[derive(Debug, Clone, Default)]
 struct UsageAccumulator {
     usage: UsageTokenTotals,
-    cost_usd: f64,
+    cost: CostTotal,
+    comparable_cost_usd: f64,
     cache_savings_usd: f64,
     baseline_cost_usd: f64,
     model_tokens: BTreeMap<String, u64>,
 }
 
 impl UsageAccumulator {
-    fn add(&mut self, record: &UsageDashboardRecord, baseline_pricing: ModelPricing) {
-        let pricing = pricing_for_model(&record.model).unwrap_or_else(ModelPricing::default_sonnet_tier);
-        let cost_usd = estimate_totals_cost_usd(record.usage, pricing);
+    fn add(&mut self, record: &UsageDashboardRecord, amounts: &RecordCost) {
         self.usage.add(record.usage);
-        self.cost_usd += cost_usd;
-        self.cache_savings_usd += cache_read_savings_usd(record.usage, pricing);
-        self.baseline_cost_usd += estimate_totals_cost_usd(record.usage, baseline_pricing);
+        self.cost.record(amounts.estimate);
+        self.cache_savings_usd += amounts.cache_savings;
+        if let Some((baseline, actual)) = amounts.baseline.zip(amounts.estimate) {
+            self.baseline_cost_usd += baseline;
+            self.comparable_cost_usd += actual;
+        }
         *self.model_tokens.entry(record.model.clone()).or_default() += record.usage.total_tokens();
     }
 
@@ -181,7 +189,7 @@ impl UsageAccumulator {
     }
 
     fn saved_usd(&self) -> f64 {
-        let model_mix = (self.baseline_cost_usd - self.cost_usd).max(0.0);
+        let model_mix = (self.baseline_cost_usd - self.comparable_cost_usd).max(0.0);
         self.cache_savings_usd + model_mix
     }
 }
@@ -195,8 +203,6 @@ impl UsageDashboardSnapshot {
         note: impl Into<String>,
     ) -> Self {
         let baseline_model = baseline_model.into();
-        let baseline_pricing =
-            pricing_for_model(&baseline_model).unwrap_or_else(ModelPricing::default_sonnet_tier);
         let mut total = UsageAccumulator::default();
         let mut daily: BTreeMap<String, UsageAccumulator> = BTreeMap::new();
         let mut monthly: BTreeMap<String, UsageAccumulator> = BTreeMap::new();
@@ -207,13 +213,14 @@ impl UsageDashboardSnapshot {
             record_count = record_count.saturating_add(1);
             let day = day_label(record.occurred_at_ms);
             let month = month_label(record.occurred_at_ms);
-            total.add(&record, baseline_pricing);
-            daily.entry(day).or_default().add(&record, baseline_pricing);
-            monthly.entry(month).or_default().add(&record, baseline_pricing);
+            let amounts = RecordCost::estimate(&record, &baseline_model);
+            total.add(&record, &amounts);
+            daily.entry(day).or_default().add(&record, &amounts);
+            monthly.entry(month).or_default().add(&record, &amounts);
             models
                 .entry(record.model.clone())
                 .or_default()
-                .add(&record, baseline_pricing);
+                .add(&record, &amounts);
         }
 
         let total_tokens = total.tokens();
@@ -226,7 +233,8 @@ impl UsageDashboardSnapshot {
             .map(|(model, acc)| UsageModelRow {
                 model,
                 tokens: acc.tokens(),
-                cost_usd: acc.cost_usd,
+                cost_usd: acc.cost.cost_usd,
+                unpriced_records: acc.cost.unpriced_requests,
                 saved_usd: acc.saved_usd(),
                 share: token_share(acc.tokens(), total_tokens),
             })
@@ -240,20 +248,22 @@ impl UsageDashboardSnapshot {
                 .then_with(|| left.model.cmp(&right.model))
         });
 
-        let model_mix_savings_usd = (total.baseline_cost_usd - total.cost_usd).max(0.0);
+        let model_mix_savings_usd = (total.baseline_cost_usd - total.comparable_cost_usd).max(0.0);
         let total_savings_usd = total.cache_savings_usd + model_mix_savings_usd;
         Self {
             model: baseline_model,
             turns: record_count,
             total_usage: total.usage.to_saturated_usage(),
             total_tokens,
-            total_cost_usd: total.cost_usd,
+            total_cost_usd: total.cost.cost_usd,
+            unpriced_records: total.cost.unpriced_requests,
             daily: daily_rows,
             monthly: monthly_rows,
             models: model_rows,
             savings: UsageSavingsSummary {
-                actual_cost_usd: total.cost_usd,
-                baseline_cost_usd: total.cost_usd + total_savings_usd,
+                actual_cost_usd: total.cost.cost_usd,
+                unpriced_records: total.cost.unpriced_requests,
+                baseline_cost_usd: total.cost.cost_usd.unwrap_or(0.0) + total_savings_usd,
                 cache_savings_usd: total.cache_savings_usd,
                 model_mix_savings_usd,
                 total_savings_usd,
@@ -293,7 +303,8 @@ fn period_rows(buckets: BTreeMap<String, UsageAccumulator>) -> Vec<UsagePeriodRo
         .map(|(label, acc)| UsagePeriodRow {
             label,
             tokens: acc.tokens(),
-            cost_usd: acc.cost_usd,
+            cost_usd: acc.cost.cost_usd,
+            unpriced_records: acc.cost.unpriced_requests,
             saved_usd: acc.saved_usd(),
             top_model: acc.top_model(),
         })
@@ -325,14 +336,38 @@ fn cache_read_savings_usd(usage: UsageTokenTotals, pricing: ModelPricing) -> f64
     (undiscounted - discounted).max(0.0)
 }
 
-fn estimate_totals_cost_usd(usage: UsageTokenTotals, pricing: ModelPricing) -> f64 {
-    cost_for_tokens(usage.input_tokens, pricing.input_cost_per_million)
-        + cost_for_tokens(usage.output_tokens, pricing.output_cost_per_million)
-        + cost_for_tokens(
-            usage.cache_creation_input_tokens,
-            pricing.cache_creation_cost_per_million,
-        )
-        + cost_for_tokens(usage.cache_read_input_tokens, pricing.cache_read_cost_per_million)
+struct RecordCost {
+    estimate: Option<f64>,
+    baseline: Option<f64>,
+    cache_savings: f64,
+}
+
+impl RecordCost {
+    fn estimate(record: &UsageDashboardRecord, baseline: &str) -> Self {
+        let day = model_prices::day_at_millis(i64::try_from(record.occurred_at_ms).unwrap_or(i64::MAX));
+        let tokens = record.usage.request_tokens();
+        let estimate = |model| model_prices::aggregate_cost(model, day, tokens).map(UsageCostEstimate::total_cost_usd);
+        let cost = estimate(record.model.as_str());
+        let cache_savings = cost.and_then(|_| pricing_at(&record.model, day))
+            .map_or(0.0, |pricing| cache_read_savings_usd(record.usage, pricing));
+        Self {
+            estimate: cost,
+            baseline: estimate(baseline),
+            cache_savings,
+        }
+    }
+}
+
+impl UsageTokenTotals {
+    fn request_tokens(self) -> RequestTokens {
+        RequestTokens {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_input_tokens,
+            cache_write: self.cache_creation_input_tokens,
+            ..RequestTokens::default()
+        }
+    }
 }
 
 fn cost_for_tokens(tokens: u64, usd_per_million_tokens: f64) -> f64 {
@@ -369,11 +404,20 @@ fn month_label(ms: u64) -> String {
     format!("{year:04}-{month:02}")
 }
 
-/// Convenience for callers that already need the cost breakdown.
+/// Estimate cumulative usage when the counters identify a single rate.
 #[must_use]
-pub fn estimate_usage_cost(model: &str, usage: TokenUsage) -> UsageCostEstimate {
-    let pricing = pricing_for_model(model).unwrap_or_else(ModelPricing::default_sonnet_tier);
-    usage.estimate_cost_usd_with_pricing(pricing)
+pub fn estimate_usage_cost(model: &str, usage: TokenUsage) -> Option<UsageCostEstimate> {
+    model_prices::aggregate_cost(model, model_prices::today(), UsageTokenTotals::from_usage(usage).request_tokens())
+}
+
+/// Estimate one request, including any hour-long cache writes it reported.
+#[must_use]
+pub fn estimate_request_cost(model: &str, usage: TokenUsage, cache_write_1h: u64) -> Option<UsageCostEstimate> {
+    let tokens = RequestTokens {
+        cache_write_1h,
+        ..UsageTokenTotals::from_usage(usage).request_tokens()
+    };
+    model_prices::request_cost(model, model_prices::today(), tokens)
 }
 
 #[cfg(test)]
@@ -385,7 +429,7 @@ mod tests {
         let records = vec![
             UsageDashboardRecord {
                 session_id: "a".to_string(),
-                occurred_at_ms: 1_711_843_200_000, // 2024-03-31 UTC
+                occurred_at_ms: 1_788_134_400_000, // 2026-08-31 UTC
                 model: "claude-sonnet-4".to_string(),
                 usage: UsageTokenTotals {
                     input_tokens: 1_000,
@@ -396,7 +440,7 @@ mod tests {
             },
             UsageDashboardRecord {
                 session_id: "b".to_string(),
-                occurred_at_ms: 1_711_929_600_000, // 2024-04-01 UTC
+                occurred_at_ms: 1_788_220_800_000, // 2026-09-01 UTC
                 model: "gpt-5.5".to_string(),
                 usage: UsageTokenTotals {
                     input_tokens: 2_000,
@@ -415,10 +459,28 @@ mod tests {
         assert_eq!(snapshot.daily.len(), 2);
         assert_eq!(snapshot.monthly.len(), 2);
         assert_eq!(snapshot.models.len(), 2);
-        assert_eq!(snapshot.daily[0].label, "2024-04-01");
-        assert_eq!(snapshot.daily[1].label, "2024-03-31");
+        assert_eq!(snapshot.daily[0].label, "2026-09-01");
+        assert_eq!(snapshot.daily[1].label, "2026-08-31");
         assert!(snapshot.savings.cache_savings_usd > 0.0);
         assert!(snapshot.savings.total_savings_usd >= snapshot.savings.cache_savings_usd);
+    }
+
+    #[test]
+    fn dashboard_marks_incomplete_totals_without_hiding_the_model() {
+        let at = 1_787_616_000_000;
+        let record = |model: &str| UsageDashboardRecord {
+            session_id: model.to_owned(),
+            occurred_at_ms: at,
+            model: model.to_owned(),
+            usage: UsageTokenTotals { input_tokens: 1_000, ..UsageTokenTotals::default() },
+        };
+        let first = record("gpt-5.4");
+        let second = record("synthetic-provider-model");
+        let snapshot = UsageDashboardSnapshot::from_records("gpt-5.4", [first, second], "");
+        assert!(snapshot.total_cost_usd.is_some_and(|cost| cost > 0.0));
+        assert_eq!(snapshot.unpriced_records, 1);
+        assert_eq!(snapshot.models[1].model, "synthetic-provider-model");
+        assert_eq!(snapshot.models[1].cost_usd, None);
     }
 
     #[test]

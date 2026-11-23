@@ -16,7 +16,7 @@ mod tracker;
 
 pub use dashboard::{
     UsageDashboardRecord, UsageDashboardSnapshot, UsageModelRow, UsagePeriodRow,
-    UsageSavingsSummary, UsageTokenTotals, estimate_usage_cost,
+    UsageSavingsSummary, UsageTokenTotals, estimate_usage_cost, estimate_request_cost,
 };
 pub use pricing::{ModelPricing, UsageCostEstimate, format_usd, pricing_for_model};
 pub use rate_limit::{RateLimitSnapshot, RateLimitWindow, RateLimitWindowKind};
@@ -94,11 +94,6 @@ impl TokenUsage {
     }
 
     #[must_use]
-    pub fn estimate_cost_usd(self) -> UsageCostEstimate {
-        self.estimate_cost_usd_with_pricing(ModelPricing::default_sonnet_tier())
-    }
-
-    #[must_use]
     pub fn estimate_cost_usd_with_pricing(self, pricing: ModelPricing) -> UsageCostEstimate {
         UsageCostEstimate {
             input_cost_usd: cost_for_tokens(self.input_tokens, pricing.input_cost_per_million),
@@ -116,11 +111,7 @@ impl TokenUsage {
 
     #[must_use]
     pub fn summary_lines_for_model(self, label: &str, model: Option<&str>) -> Vec<String> {
-        let pricing = model.and_then(pricing_for_model);
-        let cost = pricing.map_or_else(
-            || self.estimate_cost_usd(),
-            |pricing| self.estimate_cost_usd_with_pricing(pricing),
-        );
+        let cost = model.and_then(|model| estimate_usage_cost(model, self));
         let mut summary = String::new();
         let _ = write!(
             &mut summary,
@@ -130,15 +121,15 @@ impl TokenUsage {
             self.output_tokens,
             self.cache_creation_input_tokens,
             self.cache_read_input_tokens,
-            format_usd(cost.total_cost_usd()),
+            cost.map_or_else(|| "unknown".to_string(), |cost| format_usd(cost.total_cost_usd())),
         );
         if let Some(model_name) = model {
             let _ = write!(&mut summary, " model={model_name}");
-            if pricing.is_none() {
-                summary.push_str(" pricing=estimated-default");
-            }
         }
 
+        let Some(cost) = cost else {
+            return vec![summary];
+        };
         let mut breakdown = String::new();
         let _ = write!(
             &mut breakdown,

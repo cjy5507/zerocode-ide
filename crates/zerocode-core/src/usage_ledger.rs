@@ -11,13 +11,7 @@
 //! Claude is not one of them: it reports four independent counters and no
 //! total, so [`crate::usage_stats`] keeps its own rollup for its own shape.
 //!
-//! ## Two ways a row gets a price
-//!
-//! A vendor that reports dollars per turn has already decided, and this module
-//! only carries the figure and adds it up. A vendor that reports tokens alone
-//! is priced from the rolled-up row by a table its own module owns. That is
-//! the one difference between these two ledgers, so it is a parameter —
-//! [`Dollars`] — rather than two copies of everything around it.
+//! The reader supplies each request's reported or estimated cost before rollup.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -49,9 +43,7 @@ pub struct Entry {
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
-    /// What the VENDOR said this turn cost, when it says so at all. `None`
-    /// means either "not reported" or "priced later from a table" — which of
-    /// the two is decided by the [`Dollars`] a report is asked for.
+    /// Reported or estimated cost for this request. Missing prices stay unknown.
     pub estimated_cost_usd: Option<f64>,
     /// The identity this turn is deduped by, when its reader needs one.
     ///
@@ -62,47 +54,7 @@ pub struct Entry {
     pub event_key: String,
 }
 
-/// Where a vendor's dollars come from — the one thing these ledgers differ on.
-#[derive(Clone, Copy)]
-pub enum Dollars {
-    /// The turns carried their own cost and the rollup summed it. OpenCode.
-    AsReported,
-    /// The turns carried only tokens, so a rolled-up row is priced by this
-    /// table from `(model, input, cached input, output)`. Codex.
-    ///
-    /// The row it prices is the same row the original prices — a per-day, per
-    /// model, per-project one — so a tier that starts above a context length
-    /// starts where it does upstream rather than one aggregation level away.
-    FromTable(fn(Option<&str>, i64, i64, i64) -> Option<f64>),
-}
-
-impl Dollars {
-    /// Prices one rolled-up row, or answers `carried` when the vendor already
-    /// did.
-    fn of(
-        self,
-        carried: Option<f64>,
-        model: Option<&str>,
-        input_tokens: i64,
-        cached_input_tokens: i64,
-        output_tokens: i64,
-    ) -> Option<f64> {
-        match self {
-            Self::AsReported => carried,
-            Self::FromTable(price) => {
-                price(model, input_tokens, cached_input_tokens, output_tokens)
-            }
-        }
-    }
-}
-
-/// Adds two costs without turning "nobody reported one" into zero dollars.
-fn plus_cost(left: Option<f64>, right: Option<f64>) -> Option<f64> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
-    }
-}
+use model_prices::{CostTotal, sum_cost};
 
 /// Where one session spent its events.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,6 +108,8 @@ pub struct Session {
     /// priced it (a task's cost, t-9470). `None` where no turn reported one.
     #[serde(default)]
     pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub unpriced_requests: u64,
 }
 
 /// One day of one model in one project.
@@ -173,10 +127,11 @@ pub struct DailyAggregate {
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
-    /// Summed from the turns that reported one. A ledger whose vendor prices
-    /// nothing leaves this `None` and is priced at report time instead.
+    /// Sum of the known request costs.
     #[serde(default)]
     pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub unpriced_requests: u64,
 }
 
 /// Everything one scan learned, before scope or range is applied.
@@ -219,6 +174,7 @@ pub fn aggregate(entries: Vec<Entry>, worktrees: &[WorktreeRef], offset_minutes:
                 location_breakdown: Vec::new(),
                 model_breakdown: Vec::new(),
                 estimated_cost_usd: None,
+                unpriced_requests: 0,
             });
         if entry.timestamp < session.first_timestamp {
             session.first_timestamp = entry.timestamp.clone();
@@ -236,8 +192,8 @@ pub fn aggregate(entries: Vec<Entry>, worktrees: &[WorktreeRef], offset_minutes:
         session.output_tokens += entry.output_tokens;
         session.reasoning_output_tokens += entry.reasoning_output_tokens;
         session.total_tokens += entry.total_tokens;
-        session.estimated_cost_usd =
-            plus_cost(session.estimated_cost_usd, entry.estimated_cost_usd);
+        session.unpriced_requests += u64::from(entry.estimated_cost_usd.is_none());
+        session.estimated_cost_usd = sum_cost(session.estimated_cost_usd, entry.estimated_cost_usd);
 
         match session
             .location_breakdown
@@ -302,6 +258,7 @@ pub fn aggregate(entries: Vec<Entry>, worktrees: &[WorktreeRef], offset_minutes:
                 reasoning_output_tokens: 0,
                 total_tokens: 0,
                 estimated_cost_usd: None,
+                unpriced_requests: 0,
             });
         row.event_count += 1;
         row.input_tokens += entry.input_tokens;
@@ -309,7 +266,8 @@ pub fn aggregate(entries: Vec<Entry>, worktrees: &[WorktreeRef], offset_minutes:
         row.output_tokens += entry.output_tokens;
         row.reasoning_output_tokens += entry.reasoning_output_tokens;
         row.total_tokens += entry.total_tokens;
-        row.estimated_cost_usd = plus_cost(row.estimated_cost_usd, entry.estimated_cost_usd);
+        row.estimated_cost_usd = sum_cost(row.estimated_cost_usd, entry.estimated_cost_usd);
+        row.unpriced_requests += u64::from(entry.estimated_cost_usd.is_none());
     }
 
     let mut ledger = Ledger {
@@ -351,7 +309,8 @@ pub fn merge(into: &mut Ledger, from: Ledger) {
         held.output_tokens += session.output_tokens;
         held.reasoning_output_tokens += session.reasoning_output_tokens;
         held.total_tokens += session.total_tokens;
-        held.estimated_cost_usd = plus_cost(held.estimated_cost_usd, session.estimated_cost_usd);
+        held.estimated_cost_usd = sum_cost(held.estimated_cost_usd, session.estimated_cost_usd);
+        held.unpriced_requests += session.unpriced_requests;
         for model in session.model_breakdown {
             match held
                 .model_breakdown
@@ -412,7 +371,8 @@ pub fn merge(into: &mut Ledger, from: Ledger) {
         held.output_tokens += row.output_tokens;
         held.reasoning_output_tokens += row.reasoning_output_tokens;
         held.total_tokens += row.total_tokens;
-        held.estimated_cost_usd = plus_cost(held.estimated_cost_usd, row.estimated_cost_usd);
+        held.estimated_cost_usd = sum_cost(held.estimated_cost_usd, row.estimated_cost_usd);
+        held.unpriced_requests += row.unpriced_requests;
     }
 }
 
@@ -492,7 +452,6 @@ pub fn report(
     range: Range,
     now_ms: i64,
     offset_minutes: i32,
-    dollars: Dollars,
 ) -> Report {
     let cutoff = range_cutoff(range, now_ms, offset_minutes);
     let cutoff = cutoff.as_deref();
@@ -510,13 +469,14 @@ pub fn report(
         reasoning_output_tokens: 0,
         total_tokens: 0,
         estimated_cost_usd: None,
+        unpriced_requests: 0,
         top_model: None,
         top_project: None,
         has_any_data: !sessions.is_empty() || !daily_rows.is_empty(),
     };
     let mut by_model: BTreeMap<String, i64> = BTreeMap::new();
     let mut by_project: BTreeMap<String, i64> = BTreeMap::new();
-    let mut cost: Option<f64> = None;
+    let mut cost = CostTotal::default();
     for row in &daily_rows {
         summary.events += row.event_count;
         summary.input_tokens += row.input_tokens;
@@ -536,15 +496,12 @@ pub fn report(
             )
             .or_insert(0) += weight;
         *by_project.entry(row.project_label.clone()).or_insert(0) += weight;
-        cost = plus_cost(
-            cost,
-            dollars.of(
-                row.estimated_cost_usd,
-                row.model.as_deref(),
-                row.input_tokens,
-                row.cached_input_tokens,
-                row.output_tokens,
-            ),
+        cost.merge(
+            CostTotal {
+                cost_usd: row.estimated_cost_usd,
+                unpriced_requests: row.unpriced_requests,
+            }
+            .for_requests(row.event_count),
         );
     }
     let heaviest = |counts: BTreeMap<String, i64>| {
@@ -555,7 +512,8 @@ pub fn report(
     };
     summary.top_model = heaviest(by_model);
     summary.top_project = heaviest(by_project);
-    summary.estimated_cost_usd = cost;
+    summary.estimated_cost_usd = cost.cost_usd;
+    summary.unpriced_requests = cost.unpriced_requests;
 
     let mut by_day: BTreeMap<String, DailyPoint> = BTreeMap::new();
     for row in &daily_rows {
@@ -577,8 +535,8 @@ pub fn report(
     Report {
         summary,
         daily: by_day.into_values().collect(),
-        model_breakdown: breakdown(&daily_rows, &sessions, scope, true, dollars),
-        project_breakdown: breakdown(&daily_rows, &sessions, scope, false, dollars),
+        model_breakdown: breakdown(&daily_rows, &sessions, scope, true),
+        project_breakdown: breakdown(&daily_rows, &sessions, scope, false),
         recent_sessions: recent_sessions(&sessions, scope, 12),
     }
 }
@@ -589,7 +547,6 @@ fn breakdown(
     sessions: &[&Session],
     scope: Scope,
     by_model: bool,
-    dollars: Dollars,
 ) -> Vec<BreakdownRow> {
     let mut rows: BTreeMap<String, BreakdownRow> = BTreeMap::new();
     for row in daily_rows {
@@ -613,13 +570,20 @@ fn breakdown(
             output_tokens: 0,
             total_tokens: 0,
             estimated_cost_usd: None,
+            unpriced_requests: 0,
         });
         held.events += row.event_count;
         held.input_tokens += row.input_tokens;
         held.cached_input_tokens += row.cached_input_tokens;
         held.output_tokens += row.output_tokens;
         held.total_tokens += row.total_tokens;
-        held.estimated_cost_usd = plus_cost(held.estimated_cost_usd, row.estimated_cost_usd);
+        held.estimated_cost_usd = sum_cost(held.estimated_cost_usd, row.estimated_cost_usd);
+        held.unpriced_requests += CostTotal {
+            cost_usd: row.estimated_cost_usd,
+            unpriced_requests: row.unpriced_requests,
+        }
+        .for_requests(row.event_count)
+        .unpriced_requests;
     }
 
     for session in sessions {
@@ -649,20 +613,6 @@ fn breakdown(
     }
 
     let mut rows: Vec<BreakdownRow> = rows.into_values().collect();
-    // A row priced from a table needs a model to look up, so only the model
-    // list can be priced that way. A project's dollars exist when the vendor
-    // reported them per turn, and those were summed above.
-    if by_model {
-        for row in &mut rows {
-            row.estimated_cost_usd = dollars.of(
-                row.estimated_cost_usd,
-                Some(&row.key),
-                row.input_tokens,
-                row.cached_input_tokens,
-                row.output_tokens,
-            );
-        }
-    }
     rows.sort_by(|left, right| right.total_tokens.cmp(&left.total_tokens));
     rows
 }
@@ -723,14 +673,6 @@ mod tests {
 
     const KST: i32 = 9 * 60;
 
-    /// A stand-in price table: a dollar per thousand input tokens, and nothing
-    /// for a model it has never met. The real tables live with their vendors.
-    fn table() -> Dollars {
-        Dollars::FromTable(|model, input, _cached, _output| {
-            (model == Some("priced-model")).then_some(input as f64 / 1_000.0)
-        })
-    }
-
     fn entry(session: &str, when: &str, cwd: &str, input: i64) -> Entry {
         Entry {
             session_id: session.to_string(),
@@ -738,7 +680,7 @@ mod tests {
             event_key: format!("{session}{when}"),
             model: Some("priced-model".to_string()),
             cwd: Some(cwd.to_string()),
-            estimated_cost_usd: None,
+            estimated_cost_usd: Some(input as f64 / 1_000.0),
             input_tokens: input,
             cached_input_tokens: input / 2,
             output_tokens: 10,
@@ -769,7 +711,7 @@ mod tests {
         );
         let now = epoch_ms_of_iso("2026-08-19T02:00:00Z").expect("stamp");
 
-        let everything = report(&ledger, Scope::All, Range::All, now, KST, table());
+        let everything = report(&ledger, Scope::All, Range::All, now, KST);
         assert_eq!(everything.summary.sessions, 2);
         assert_eq!(everything.summary.input_tokens, 150);
         assert_eq!(everything.summary.events, 2);
@@ -793,7 +735,7 @@ mod tests {
             "the reported total became the sum of the parts, which double counts"
         );
 
-        let ours = report(&ledger, Scope::Zerocode, Range::All, now, KST, table());
+        let ours = report(&ledger, Scope::Zerocode, Range::All, now, KST);
         assert_eq!(
             ours.summary.sessions, 1,
             "an unmanaged session survived the scope"
@@ -803,7 +745,7 @@ mod tests {
         assert_eq!(ours.summary.top_model.as_deref(), Some("priced-model"));
         assert!(ours.summary.estimated_cost_usd.is_some());
 
-        let week = report(&ledger, Scope::All, Range::Week, now, KST, table());
+        let week = report(&ledger, Scope::All, Range::Week, now, KST);
         assert_eq!(
             week.summary.sessions, 1,
             "a session outside the range was counted"
@@ -811,14 +753,7 @@ mod tests {
         assert_eq!(week.recent_sessions.len(), 1);
         assert_eq!(week.recent_sessions[0].project_label, "repo");
 
-        let empty = report(
-            &Ledger::default(),
-            Scope::All,
-            Range::All,
-            now,
-            KST,
-            table(),
-        );
+        let empty = report(&Ledger::default(), Scope::All, Range::All, now, KST);
         assert!(!empty.summary.has_any_data);
         assert_eq!(empty.summary.estimated_cost_usd, None);
     }
@@ -832,14 +767,7 @@ mod tests {
         second.model = Some("late-model".to_string());
         let ledger = aggregate(vec![first, second], &[managed()], KST);
         let now = epoch_ms_of_iso("2026-08-19T03:00:00Z").expect("stamp");
-        let answer = report(
-            &ledger,
-            Scope::All,
-            Range::All,
-            now,
-            KST,
-            Dollars::AsReported,
-        );
+        let answer = report(&ledger, Scope::All, Range::All, now, KST);
 
         assert_eq!(answer.summary.sessions, 1, "one session used two models");
         assert_eq!(answer.model_breakdown.len(), 2);
@@ -862,14 +790,7 @@ mod tests {
         let ledger = aggregate(vec![paid, also], &[managed()], KST);
         let now = epoch_ms_of_iso("2026-08-19T03:00:00Z").expect("stamp");
 
-        let answer = report(
-            &ledger,
-            Scope::All,
-            Range::All,
-            now,
-            KST,
-            Dollars::AsReported,
-        );
+        let answer = report(&ledger, Scope::All, Range::All, now, KST);
         assert_eq!(answer.summary.estimated_cost_usd, Some(1.0));
         assert_eq!(answer.model_breakdown[0].estimated_cost_usd, Some(1.0));
         assert_eq!(
@@ -877,10 +798,6 @@ mod tests {
             Some(1.0),
             "a reported cost reaches the project list too"
         );
-
-        // A table that would have priced these rows must not be consulted.
-        let table_priced = report(&ledger, Scope::All, Range::All, now, KST, table());
-        assert_eq!(table_priced.summary.estimated_cost_usd, Some(0.2));
     }
 
     /// A conversation keeps what its turns reported, summed across the files
@@ -896,14 +813,9 @@ mod tests {
         let mut later = entry("paid", "2026-08-19T02:00:00Z", "/w/repo", 100);
         later.estimated_cost_usd = Some(0.5);
         merge(&mut ledger, aggregate(vec![later], &[managed()], KST));
-        merge(
-            &mut ledger,
-            aggregate(
-                vec![entry("free", "2026-08-19T01:00:00Z", "/w/repo", 100)],
-                &[managed()],
-                KST,
-            ),
-        );
+        let mut unpriced = entry("unpriced", "2026-08-19T01:00:00Z", "/w/repo", 100);
+        unpriced.estimated_cost_usd = None;
+        merge(&mut ledger, aggregate(vec![unpriced], &[managed()], KST));
         let cost = |id: &str| {
             ledger
                 .sessions
@@ -912,28 +824,30 @@ mod tests {
                 .map(|session| session.estimated_cost_usd)
         };
         assert_eq!(cost("paid"), Some(Some(0.75)));
-        assert_eq!(cost("free"), Some(None));
+        assert_eq!(cost("unpriced"), Some(None));
     }
 
-    /// Nobody reporting a price is not the same as a price of zero.
     #[test]
-    fn an_unpriced_ledger_says_nothing_rather_than_free() {
-        let ledger = aggregate(
-            vec![entry("free", "2026-08-19T01:00:00Z", "/w/repo", 100)],
-            &[managed()],
-            KST,
-        );
-        let now = epoch_ms_of_iso("2026-08-19T02:00:00Z").expect("stamp");
-        let answer = report(
-            &ledger,
-            Scope::All,
-            Range::All,
-            now,
-            KST,
-            Dollars::AsReported,
-        );
-        assert_eq!(answer.summary.estimated_cost_usd, None);
-        assert_eq!(answer.model_breakdown[0].estimated_cost_usd, None);
+    fn a_report_distinguishes_unpriced_usage_from_a_reported_zero() {
+        let mut unpriced = entry("unpriced", "2026-08-19T01:00:00Z", "/w/repo", 100);
+        unpriced.model = Some("synthetic-unpriced".to_string());
+        unpriced.estimated_cost_usd = None;
+        let mut free = entry("free", "2026-08-19T02:00:00Z", "/w/repo", 100);
+        free.model = Some("synthetic-free".to_string());
+        free.estimated_cost_usd = Some(0.0);
+        let ledger = aggregate(vec![unpriced, free], &[managed()], KST);
+        let now = epoch_ms_of_iso("2026-08-19T03:00:00Z").unwrap();
+        let answer = report(&ledger, Scope::All, Range::All, now, KST);
+        let json = serde_json::to_value(&answer).unwrap();
+        assert_eq!(json["summary"]["estimated_cost_usd"], 0.0);
+        assert_eq!(json["summary"]["unpriced_requests"], 1);
+        let unknown = answer
+            .model_breakdown
+            .iter()
+            .find(|row| row.key == "synthetic-unpriced")
+            .unwrap();
+        assert_eq!(unknown.estimated_cost_usd, None);
+        assert_eq!(unknown.unpriced_requests, 1);
     }
 
     /// The heaviest model is the one that moved the most tokens the vendor
@@ -953,14 +867,7 @@ mod tests {
 
         let ledger = aggregate(vec![cached_heavy, fresh], &[managed()], KST);
         let now = epoch_ms_of_iso("2026-08-19T02:00:00Z").expect("stamp");
-        let answer = report(
-            &ledger,
-            Scope::All,
-            Range::All,
-            now,
-            KST,
-            Dollars::AsReported,
-        );
+        let answer = report(&ledger, Scope::All, Range::All, now, KST);
         assert_eq!(answer.summary.top_model.as_deref(), Some("cache-heavy"));
         assert_eq!(
             answer.model_breakdown[0].key, "cache-heavy",

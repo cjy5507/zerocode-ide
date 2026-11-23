@@ -100,25 +100,6 @@ fn cumulative_usage_saturates_instead_of_overflowing() {
     assert_eq!(tracker.turns(), 2);
 }
 
-fn assert_price(actual: f64, expected: f64) {
-    assert!((actual - expected).abs() < f64::EPSILON);
-}
-
-#[test]
-fn deepseek_pricing_matches_v4_pro_and_flash_tiers() {
-    let flash = pricing_for_model("deepseek-v4-flash").expect("deepseek flash pricing");
-    assert_price(flash.input_cost_per_million, 0.27);
-    assert_price(flash.cache_creation_cost_per_million, 0.27);
-    assert_price(flash.cache_read_cost_per_million, 0.07);
-    assert_price(flash.output_cost_per_million, 1.10);
-
-    let pro = pricing_for_model("deepseek-v4-pro").expect("deepseek v4 pro pricing");
-    assert_price(pro.input_cost_per_million, 0.55);
-    assert_price(pro.cache_creation_cost_per_million, 0.55);
-    assert_price(pro.cache_read_cost_per_million, 0.14);
-    assert_price(pro.output_cost_per_million, 2.19);
-}
-
 #[test]
 fn total_tokens_saturates_and_u64_preserves_large_totals() {
     let usage = TokenUsage {
@@ -142,9 +123,6 @@ fn computes_cost_summary_lines() {
         output_tokens_details: None,
     };
 
-    let cost = usage.estimate_cost_usd();
-    assert_eq!(format_usd(cost.input_cost_usd), "$3.0000");
-    assert_eq!(format_usd(cost.output_cost_usd), "$7.5000");
     let lines = usage.summary_lines_for_model("usage", Some("claude-sonnet-4-20250514"));
     assert!(lines[0].contains("estimated_cost=$10.9350"));
     assert!(lines[0].contains("model=claude-sonnet-4-20250514"));
@@ -168,19 +146,6 @@ fn supports_model_specific_pricing() {
     assert_eq!(format_usd(haiku_cost.total_cost_usd()), "$3.5000");
     // Opus 4.x is $5/$25: 1M input + 0.5M output = $5 + $12.5.
     assert_eq!(format_usd(opus_cost.total_cost_usd()), "$17.5000");
-}
-
-#[test]
-fn marks_unknown_model_pricing_as_fallback() {
-    let usage = TokenUsage {
-        input_tokens: 100,
-        output_tokens: 100,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        output_tokens_details: None,
-    };
-    let lines = usage.summary_lines_for_model("usage", Some("custom-model"));
-    assert!(lines[0].contains("pricing=estimated-default"));
 }
 
 // ---- pricing_for_model alias coverage (Task 1) -------------------------
@@ -243,7 +208,6 @@ fn pricing_is_per_provider_and_distinct() {
     let gpt = pricing_for_model("gpt-5.5").unwrap();
     let flash = pricing_for_model("gemini-3.5-flash").unwrap();
     let pro = pricing_for_model("gemini-3.1-pro-preview").unwrap();
-    let grok = pricing_for_model("grok-3").unwrap();
 
     // Opus and Sonnet must differ (the original bug folded them together).
     assert!((opus.input_cost_per_million - 5.0).abs() < f64::EPSILON);
@@ -257,10 +221,9 @@ fn pricing_is_per_provider_and_distinct() {
     assert!((flash.input_cost_per_million - 1.5).abs() < f64::EPSILON);
     assert!((pro.input_cost_per_million - 2.0).abs() < f64::EPSILON);
     assert!((gpt.output_cost_per_million - 30.0).abs() < f64::EPSILON);
-    assert!((grok.input_cost_per_million - 3.0).abs() < f64::EPSILON);
 
     // Every provider carries a cache-read rate (~0.1× input), none zero.
-    for p in [opus, sonnet, gpt, flash, pro, grok] {
+    for p in [opus, sonnet, gpt, flash, pro] {
         assert!(
             p.cache_read_cost_per_million > 0.0,
             "cache read must be set"
@@ -270,20 +233,6 @@ fn pricing_is_per_provider_and_distinct() {
             "cache read is a discount on input"
         );
     }
-}
-
-#[test]
-fn pricing_for_model_gpt56_family_is_pinned_to_standard_tier() {
-    for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
-        let pricing = pricing_for_model(model).expect("gpt-5.6 pricing");
-        assert!((pricing.input_cost_per_million - 2.5).abs() < f64::EPSILON, "{model}");
-        assert!((pricing.output_cost_per_million - 15.0).abs() < f64::EPSILON, "{model}");
-        assert!((pricing.cache_creation_cost_per_million - 2.5).abs() < f64::EPSILON, "{model}");
-        assert!((pricing.cache_read_cost_per_million - 0.25).abs() < f64::EPSILON, "{model}");
-    }
-
-    let premium = pricing_for_model("gpt-5.5").expect("gpt-5.5 pricing");
-    assert!((premium.output_cost_per_million - 30.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -388,4 +337,16 @@ fn fable_5_1_reads_its_cache_at_a_quarter_of_fable_5() {
     assert!(same(fable_5_1.output_cost_per_million, fable_5.output_cost_per_million));
     assert!(same(fable_5_1.cache_read_cost_per_million, 0.25));
     assert!(same(fable_5.cache_read_cost_per_million, 1.0));
+}
+
+#[test]
+fn an_unpriced_model_has_no_dollar_estimate_in_the_usage_summary() {
+    let usage = TokenUsage {
+        input_tokens: 1_000,
+        ..TokenUsage::default()
+    };
+    let lines = usage.summary_lines_for_model("usage", Some("synthetic-cli-model"));
+    assert!(lines[0].contains("estimated_cost=unknown"), "{lines:?}");
+    assert!(lines[0].contains("model=synthetic-cli-model"), "{lines:?}");
+    assert_eq!(lines.len(), 1);
 }

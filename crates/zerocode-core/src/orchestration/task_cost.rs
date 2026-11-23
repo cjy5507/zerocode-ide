@@ -183,13 +183,7 @@ impl SessionBook {
                     output_tokens: session.total_output_tokens,
                     cache_read_tokens: session.total_cache_read_tokens,
                     cache_write_tokens: session.total_cache_write_tokens,
-                    usd: usage_stats::estimate_cost_usd(
-                        session.model.as_deref(),
-                        session.total_input_tokens,
-                        session.total_output_tokens,
-                        session.total_cache_read_tokens,
-                        session.total_cache_write_tokens,
-                    ),
+                    usd: session.cost.complete_cost(),
                     mixed_models: false,
                     gaps: ReadGaps::default(),
                     invalid_usage: false,
@@ -198,13 +192,8 @@ impl SessionBook {
         }
     }
 
-    /// Codex's rollouts, read at `scanned_at`: the cached input is a SHARE of
-    /// the input and the reasoning is inside the output
-    /// ([`usage_stats_codex::estimate_cost_usd`]), so the fresh input is the
-    /// difference; priced from Codex's own table at the conversation's
-    /// model, and mixed where its ledger saw more than one — a turn it could
-    /// not name counts as one more, since pricing that turn at the
-    /// conversation's model would be a guess.
+    /// Codex usage includes cached input in the input total. The reader
+    /// has already priced each request it could identify.
     pub fn read_codex(&mut self, ledger: &usage_ledger::Ledger, scanned_at: i64) {
         self.scanned_at.insert(UsageSource::Codex, scanned_at);
         for session in &ledger.sessions {
@@ -223,12 +212,9 @@ impl SessionBook {
                     output_tokens: session.output_tokens,
                     cache_read_tokens: cached,
                     cache_write_tokens: 0,
-                    usd: usage_stats_codex::estimate_cost_usd(
-                        session.model.as_deref(),
-                        session.input_tokens,
-                        session.cached_input_tokens,
-                        session.output_tokens,
-                    ),
+                    usd: (session.unpriced_requests == 0)
+                        .then_some(session.estimated_cost_usd)
+                        .flatten(),
                     mixed_models: session.model_breakdown.len() > 1,
                     gaps: ReadGaps::default(),
                     invalid_usage: fresh.is_none()
