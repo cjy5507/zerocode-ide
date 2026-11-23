@@ -17,8 +17,9 @@
 //! a call's kind and file are read where every transcript's are.
 //!
 //! Hooks identify a turn by `prompt_id`. The document identifies it by its
-//! question and terminal result, in order. Only that content lets a provisional
-//! turn go ([`LiveTurnBuffer::reconcile`]). File metadata only avoids opening an
+//! question and terminal result, in order ([`LiveTurnBuffer::reconcile`]).
+//! A later match retires earlier provisional rows, and a session keeps only
+//! its most recent provisional turns. File metadata only avoids opening an
 //! unchanged document.
 //!
 //! A hook of a turn that has ended — its `Stop` heard, a newer turn begun, or
@@ -28,7 +29,7 @@
 //! already draws nothing. Nothing here branches on an agent's name or touches
 //! the disk.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::hook::{normalized_event, worker_call_id_in};
 use crate::payload::HookPayload;
@@ -38,6 +39,9 @@ use crate::transcript::{
 
 /// The file's size and modification time, used to schedule or skip a read.
 pub type DocStamp = (u64, Option<std::time::SystemTime>);
+
+/// The most recent turns for which a session can keep provisional rows.
+const TURNS_KEPT: usize = 4;
 
 /// The cursor of a parsed document and the file stamp for that read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +205,12 @@ impl LiveTurn {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinishedTurn {
+    Written,
+    Unconfirmed,
+}
+
 /// The turns a pane's CLI is running or has ended and not written yet, as its
 /// hooks told them — and the document as the page last read it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -210,10 +220,11 @@ pub struct LiveTurnBuffer {
     session_id: Option<String>,
     /// Turns awaiting the document or the first Stop, oldest first.
     turns: Vec<LiveTurn>,
-    /// Finished prompts whose document rows already replaced the live ones.
-    written: HashSet<String>,
+    /// Finished prompts whose provisional rows were released, with or without
+    /// a match in the document.
+    finished: HashMap<String, FinishedTurn>,
     /// Calls in those turns, for the fallback when a result has no prompt id.
-    written_calls: HashSet<String>,
+    finished_calls: HashSet<String>,
     /// The document cursor after the last matched turn.
     matched_through: usize,
     /// The last cursor delivered and whether it withheld an incomplete turn.
@@ -278,7 +289,7 @@ impl LiveTurnBuffer {
     pub fn document_holds(&self, session_id: Option<&str>, prompt_id: Option<&str>) -> bool {
         self.session_id.as_deref() == session_id
             && prompt_id.is_some_and(|id| {
-                self.written.contains(id)
+                self.finished.get(id) == Some(&FinishedTurn::Written)
                     || self
                         .turns
                         .iter()
@@ -290,8 +301,8 @@ impl LiveTurnBuffer {
     /// still belong to the conversation until its document can replace them.
     pub fn forget_finished(&mut self, session_id: Option<&str>) {
         if self.session_id.as_deref() == session_id {
-            self.written.clear();
-            self.written_calls.clear();
+            self.finished.clear();
+            self.finished_calls.clear();
         }
     }
 
@@ -335,10 +346,10 @@ impl LiveTurnBuffer {
         let call_id = worker_call_id_in(tree);
         if prompt_id
             .as_ref()
-            .is_some_and(|id| self.written.contains(id))
+            .is_some_and(|id| self.finished.contains_key(id))
             || (prompt_id.is_none()
                 && call_id.as_ref().is_some_and(|id| {
-                    self.written_calls.contains(id)
+                    self.finished_calls.contains(id)
                         && !self.turns.iter().any(|turn| turn.drew_call(id))
                 }))
         {
@@ -371,7 +382,7 @@ impl LiveTurnBuffer {
                 }
                 let drawn = !turn.written && turn.note_answer(tree, at_ms);
                 self.recheck |= self.held_back && (!late || drawn);
-                self.remember_written_turns();
+                self.remember_finished_turns(0);
                 HookFold { drawn, late }
             }
             _ => HookFold {
@@ -385,9 +396,10 @@ impl LiveTurnBuffer {
         }
     }
 
-    /// Match successive questions and their outcomes against the parsed steps.
-    /// Keep the cursor before a matched question whose outcome is still
-    /// missing, so the page can swap its whole provisional turn in one paint.
+    /// Match questions and outcomes in order, looking past unconfirmed turns.
+    /// A match retires older provisional rows. Keep the cursor before a
+    /// remaining question whose outcome is still missing, so the page can
+    /// swap its whole provisional turn in one paint.
     /// A read of another session can trail a new hook and leaves it alone.
     pub fn reconcile(
         &mut self,
@@ -409,8 +421,16 @@ impl LiveTurnBuffer {
         }
         let mut visible = read.settled;
         let mut from = self.matched_through;
-        for turn in self.turns.iter_mut().filter(|turn| !turn.written) {
-            let Some(question) = &turn.said else { break };
+        let mut discard_before = 0;
+        for (index, turn) in self
+            .turns
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, turn)| !turn.written)
+        {
+            let Some(question) = &turn.said else {
+                continue;
+            };
             let floor = turn.base.max(from);
             let rows = &brought[brought.partition_point(|(place, _)| *place < floor)..];
             let mut prompts = rows
@@ -418,7 +438,6 @@ impl LiveTurnBuffer {
                 .enumerate()
                 .filter(|(_, (_, row))| row.role == "user")
                 .peekable();
-            let mut matched = false;
             while let Some((at, (place, row))) = prompts.next() {
                 if !same_words(&row.text, question) {
                     continue;
@@ -443,16 +462,15 @@ impl LiveTurnBuffer {
                     from = prompts
                         .peek()
                         .map_or(read.settled, |(_, (place, _))| *place);
-                    matched = true;
+                    discard_before = index;
+                    // Older turns no longer have provisional rows to swap.
+                    visible = read.settled;
                     break;
                 }
                 if end == rows.len() {
                     visible = visible.min(*place);
                     break;
                 }
-            }
-            if !matched {
-                break;
             }
         }
         self.matched_through = from;
@@ -462,22 +480,30 @@ impl LiveTurnBuffer {
         });
         self.held_back = visible < read.settled;
         self.recheck = false;
-        self.remember_written_turns();
+        self.remember_finished_turns(discard_before);
         visible
     }
 
-    fn remember_written_turns(&mut self) {
+    fn remember_finished_turns(&mut self, discard_before: usize) {
+        let mut index = 0;
         self.turns.retain_mut(|turn| {
             // The first Stop can still change pane state if the file won the
             // race to the page, so keep that turn until Stop or a newer prompt.
-            if !turn.written || turn.stopped.is_none() {
+            let discard = index < discard_before || (turn.written && turn.stopped.is_some());
+            index += 1;
+            if !discard {
                 return true;
             }
             if let Some(id) = turn.prompt_id.take() {
-                self.written.insert(id);
+                let status = if turn.written {
+                    FinishedTurn::Written
+                } else {
+                    FinishedTurn::Unconfirmed
+                };
+                self.finished.insert(id, status);
             }
-            self.written_calls.extend(turn.calls.drain(..));
-            self.written_calls.extend(turn.results.drain(..));
+            self.finished_calls.extend(turn.calls.drain(..));
+            self.finished_calls.extend(turn.results.drain(..));
             false
         });
     }
@@ -555,7 +581,14 @@ impl LiveTurnBuffer {
         {
             turn.stopped = Some(None);
         }
-        self.remember_written_turns();
+        let expired = self
+            .turns
+            .iter()
+            .filter(|turn| !turn.written)
+            .count()
+            .saturating_sub(TURNS_KEPT - 1);
+        self.remember_finished_turns(expired);
+        self.recheck |= self.held_back && expired > 0;
         self.turns.push(LiveTurn {
             prompt_id,
             base: self.read.map_or(0, |read| read.settled),
@@ -1069,6 +1102,105 @@ mod tests {
         }
     }
 
+    fn assert_turn_reconciles_after_a_gap(
+        mut buffer: LiveTurnBuffer,
+        mut steps: Vec<(usize, TranscriptTurn)>,
+    ) {
+        hook(
+            &mut buffer,
+            "UserPromptSubmit",
+            &prompt("second question", "p-2"),
+            None,
+        );
+        hook(&mut buffer, "Stop", &stop("p-2", "second answer"), None);
+        read(&mut buffer, 10, 3, &steps);
+        let words: Vec<_> = buffer.rows().into_iter().map(|row| row.text).collect();
+        assert!(words.ends_with(&["second question".into(), "second answer".into()]));
+        assert!(!buffer.document_holds(Some(SESSION), Some("p-2")));
+
+        steps.extend([(3, user("second question")), (4, answer("second answer"))]);
+        read(&mut buffer, 11, 5, &steps);
+        assert!(buffer.document_holds(Some(SESSION), Some("p-2")));
+        assert!(!buffer.document_holds(Some(SESSION), Some("p-1")));
+        assert!(
+            buffer.is_empty(),
+            "neither turn should have provisional rows"
+        );
+        assert_eq!(
+            hook(&mut buffer, "Stop", &stop("p-1", "late answer"), None),
+            HookFold {
+                drawn: false,
+                late: true
+            },
+        );
+    }
+
+    #[test]
+    fn a_turn_reconciles_after_a_gap_with_an_interrupted_turn() {
+        let mut buffer = LiveTurnBuffer::default();
+        hook(
+            &mut buffer,
+            "UserPromptSubmit",
+            &prompt("first question", "p-1"),
+            None,
+        );
+        hook(&mut buffer, "PreToolUse", &call("c-1", "p-1"), None);
+        assert_turn_reconciles_after_a_gap(buffer, vec![(1, user("first question"))]);
+    }
+
+    #[test]
+    fn a_turn_reconciles_after_a_gap_with_a_different_question() {
+        let mut buffer = LiveTurnBuffer::default();
+        hook(
+            &mut buffer,
+            "UserPromptSubmit",
+            &prompt("first question", "p-1"),
+            None,
+        );
+        hook(&mut buffer, "Stop", &stop("p-1", "first answer"), None);
+        assert_turn_reconciles_after_a_gap(
+            buffer,
+            vec![(1, user("changed question")), (2, answer("first answer"))],
+        );
+    }
+
+    #[test]
+    fn a_turn_reconciles_after_a_gap_without_a_prompt_hook() {
+        let mut buffer = LiveTurnBuffer::default();
+        hook(&mut buffer, "Stop", &stop("p-1", "first answer"), None);
+        assert_turn_reconciles_after_a_gap(
+            buffer,
+            vec![(1, user("first question")), (2, answer("first answer"))],
+        );
+    }
+
+    #[test]
+    fn a_gap_keeps_only_the_latest_provisional_turns() {
+        let mut buffer = LiveTurnBuffer::default();
+        hook(&mut buffer, "PreToolUse", &call("c-0", "p-0"), None);
+        for at in 0..=TURNS_KEPT {
+            let id = format!("p-{at}");
+            hook(&mut buffer, "UserPromptSubmit", &prompt(&id, &id), None);
+            hook(&mut buffer, "Stop", &stop(&id, "done"), None);
+        }
+        let words: Vec<_> = buffer.rows().into_iter().map(|row| row.text).collect();
+        let expected: Vec<_> = (1..=TURNS_KEPT)
+            .flat_map(|at| [format!("p-{at}"), "done".into()])
+            .collect();
+        assert_eq!(words, expected);
+        assert!(!buffer.document_holds(Some(SESSION), Some("p-0")));
+
+        let mut bare = result("c-0", "p-0", true);
+        bare.as_object_mut().expect("an object").remove("prompt_id");
+        assert_eq!(
+            hook(&mut buffer, "PostToolUse", &bare, None),
+            HookFold {
+                drawn: false,
+                late: true
+            },
+        );
+    }
+
     #[test]
     fn a_shrunk_document_needs_the_questions_outcome() {
         let mut buffer = LiveTurnBuffer::default();
@@ -1271,7 +1403,7 @@ mod tests {
                 &[(2 * at, user(&question)), (2 * at + 1, answer("done"))],
             );
         }
-        assert_eq!(buffer.written.len(), 7);
+        assert_eq!(buffer.finished.len(), 7);
         assert!(buffer.turns.is_empty(), "documented turns retain no rows");
         assert!(
             hook(
@@ -1303,7 +1435,7 @@ mod tests {
                 )
                 .drawn
         );
-        assert!(buffer.written.is_empty());
+        assert!(buffer.finished.is_empty());
         assert_eq!(
             buffer.rows_of(Some("another-session"))[0].text,
             "the new session"
