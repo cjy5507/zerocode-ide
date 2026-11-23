@@ -52,8 +52,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage, recordBootPhases } from "./window-boot.mjs";
+import { chromium, createWindowServer, openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 import { installBoardWaits } from "./board-waits.mjs";
+import { installHarnessWaits } from "./harness-waits.mjs";
 import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
 import { frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
 
@@ -1976,14 +1977,16 @@ const ORBIT_MAIN_NAME_READY_MS = ORBIT_SETTLE_MS + ORBIT_ACTION_MS;
 
 async function openMainNameOrbit(page, fixture) {
   // A boot that is still restoring tabs can hide the board when its first terminal takes focus.
-  await page.waitForFunction(() => window.__BOOT_PHASES__.includes("browser_tabs_restored"));
+  await waitBootSettled(page);
+  await installHarnessWaits(page);
   const opened = await page.evaluate(mainNameFixture, fixture);
-  await page.waitForFunction(
-    (term) => agentOrbitFrames > 0
+  await page.evaluate(({ term, timeout }) => window.__UNTIL__(
+    () => agentOrbitFrames > 0
       && document.querySelector(`#board-view:not([hidden]) [data-orbit-key="agent:term:${term}"]`)
       && document.querySelector(`.wt-agent[data-term="${term}"] .wt-agent-name`),
-    opened.lead, { timeout: ORBIT_MAIN_NAME_READY_MS },
-  );
+    "the first 3D frame, visible board agent label, and sidebar agent name",
+    timeout,
+  ), { term: opened.lead, timeout: ORBIT_MAIN_NAME_READY_MS });
   return opened;
 }
 
