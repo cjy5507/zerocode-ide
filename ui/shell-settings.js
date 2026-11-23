@@ -11229,6 +11229,7 @@ function setSettingsOpen(on, focus = null) {
  * as `aria-current` rather than as a class because that is the fact being
  * drawn, and somebody on a screen reader is owed it too. */
 function paintNavCurrent() {
+  const covered = !autoView.hidden || !settingsView.hidden || !spaceView.hidden;
   const showing = {
     // 작업은 가운데 탭이다 — 그 탭이 무대의 앞에 선 동안만 「여기」다(renderTabs와 같은 사실).
     "nav-tasks": activeTabId === TASKS_TAB.id,
@@ -11239,10 +11240,21 @@ function paintNavCurrent() {
     // The page, now that there is one. This used to read a settings section,
     // because 자동화 opened a field rather than a screen.
     "nav-automations": !autoView.hidden,
+    "nav-inbox": activeTabId === "inbox",
+    "nav-vault": activeTabId === "vault",
+    "nav-artifacts": activeTabId === "artifacts",
+    "nav-skills": activeTabId === "skills",
+    "nav-knowledge": activeTabId === "knowledge",
+    "nav-agents": activeTabId === "board",
+    "nav-jev": activeTabId === "jev",
+    "nav-board": activeTabId === "workspaces",
   };
   for (const [id, on] of Object.entries(showing)) {
-    if (on) el(id).setAttribute("aria-current", "page");
-    else el(id).removeAttribute("aria-current");
+    const node = el(id);
+    if (!node) continue;
+    const active = id === "nav-automations" ? on : (!covered && on);
+    if (active) node.setAttribute("aria-current", "page");
+    else node.removeAttribute("aria-current");
   }
   // Orca shows the history arrows on the terminal, 작업 and 자동화 and hides
   // them on the settings page (`shouldShowWorktreeHistoryControls`,

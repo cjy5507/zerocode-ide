@@ -386,6 +386,50 @@ export async function testMarkdownDiagrams(browser, origin, ok) {
       check.again.drawn === 1 && check.again.code === 0 && check.again.asked === 0,
       JSON.stringify(check.again),
     );
+    const checkOrder = await page.evaluate(() => {
+      checksOpen.clear();
+      checksDetails.clear();
+      checksPassedOpen = false;
+      checksReport = {
+        review: { number: 18, state: "open", title: "order", url: "https://example.test/pull/18", owner_repo: "acme/app" },
+        checks: [
+          { name: "ci/pass-1", status: "completed", conclusion: "success", check_run_id: 1 },
+          { name: "ci/pass-2", status: "completed", conclusion: "success", check_run_id: 2 },
+          { name: "ci/fail-1", status: "completed", conclusion: "failure", check_run_id: 3 },
+          { name: "ci/wait-1", status: "in_progress", conclusion: null, check_run_id: 4 },
+        ],
+        at_page_limit: false,
+      };
+      const failKey = checkKey(checksReport.checks[2], 2);
+      checksOpen.add(failKey);
+      checksDetails.set(failKey, {
+        details: {
+          name: "ci/fail-1", status: "completed", conclusion: "failure",
+          annotations: [{ path: "ui/shell.css", start_line: 42, annotation_level: "failure", message: "bad rule" }],
+          jobs: [],
+        },
+      });
+      paintChecks();
+      const firstHost = document.querySelector("#checks-list .check-host");
+      paintChecks();
+      const reused = firstHost === document.querySelector("#checks-list .check-host");
+      const namesBefore = [...document.querySelectorAll("#checks-list .check-name")].map((n) => n.textContent);
+      const fold = document.querySelector("#checks-list .checks-pass-fold");
+      const foldText = fold?.textContent ?? "";
+      const linkBtn = document.querySelector("#checks-list button.check-path--link")?.textContent ?? null;
+      fold?.click();
+      const namesAfter = [...document.querySelectorAll("#checks-list .check-name")].map((n) => n.textContent);
+      return { reused, namesBefore, foldText, linkBtn, namesAfter };
+    });
+    ok(
+      "CI checks sort failures then pending first, fold passing checks until expanded, reuse keyed hosts, and link annotation file:line",
+      checkOrder.reused
+        && checkOrder.namesBefore.join(",") === "ci/fail-1,ci/wait-1"
+        && checkOrder.foldText.includes("2")
+        && checkOrder.linkBtn === "ui/shell.css:42"
+        && checkOrder.namesAfter.length === 4,
+      JSON.stringify(checkOrder),
+    );
 
     // A notebook: a Markdown cell and a Markdown output (`notebookCellEl`, `notebookItemEl`).
     const notebook = await page.evaluate(async () => {

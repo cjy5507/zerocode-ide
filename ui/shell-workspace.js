@@ -9731,11 +9731,13 @@ function paintWorkspaceBoardStage() {
  * neighbours do (`renderTabs`): pressed, and 「여기」 like the 작업 row. */
 function paintWorkspaceBoardDoor() {
   workspaceBoardOpen = activeTabId === WORKSPACE_BOARD_TAB.id;
+  const covered = !autoView.hidden || !settingsView.hidden || !spaceView.hidden;
   // Painted on every pass over the tabs: each attribute is written only when it moved (v1.1.149).
   if (el("nav-board").getAttribute("aria-pressed") !== String(workspaceBoardOpen)) {
     el("nav-board").setAttribute("aria-pressed", String(workspaceBoardOpen));
   }
-  if (workspaceBoardOpen) {
+  const current = workspaceBoardOpen && !covered;
+  if (current) {
     if (el("nav-board").getAttribute("aria-current") !== "page") el("nav-board").setAttribute("aria-current", "page");
   } else if (el("nav-board").hasAttribute("aria-current")) el("nav-board").removeAttribute("aria-current");
 }
@@ -15570,6 +15572,7 @@ function setSpaceOpen(on) {
     recordNavVisit(activeWorktreePath);
   }
   spaceView.hidden = !on;
+  if (typeof paintNavCurrent === "function") paintNavCurrent();
   spaceClock.sync();
   if (on) {
     paintSpace();

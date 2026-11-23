@@ -4720,22 +4720,11 @@ function renderTabs() {
   const jevDoor = el("nav-jev");
   const jevPressed = String(activeTabId === JEV_TAB.id);
   if (jevDoor.getAttribute("aria-pressed") !== jevPressed) jevDoor.setAttribute("aria-pressed", jevPressed);
-  // 작업의 행도 같다 — 그 탭이 무대의 앞이면 「여기」.
-  const tasksDoor = el("nav-tasks");
-  const onTasks = activeTabId === TASKS_TAB.id;
-  if (tasksDoor.hasAttribute("aria-current") !== onTasks) {
-    if (onTasks) tasksDoor.setAttribute("aria-current", "page");
-    else tasksDoor.removeAttribute("aria-current");
-  }
-  // The inbox's row in the sidebar says the same of its page: it is the screen on stage.
-  const inboxDoor = el("nav-inbox");
-  const onInbox = activeTabId === INBOX_TAB.id;
-  if (inboxDoor.hasAttribute("aria-current") !== onInbox) {
-    if (onInbox) inboxDoor.setAttribute("aria-current", "page");
-    else inboxDoor.removeAttribute("aria-current");
-  }
   // And the workspace board's door, now that the board is a tab too.
   paintWorkspaceBoardDoor();
+  // One place owns every sidebar nav row's `aria-current="page"` (and clears
+  // underlying tabs whenever a full-screen route covers the stage).
+  if (typeof paintNavCurrent === "function") paintNavCurrent();
   // The machine figures ride along, bounded — a render is a fine moment to
   // notice they are stale, and a terrible one to spawn `lsof`.
   paintMachineFigures();

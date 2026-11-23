@@ -13890,6 +13890,53 @@ body.is-dragging-pane {
   color: var(--ink-mist);
 }
 
+.check-path--link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.check-path--link:hover {
+  color: var(--ink-chalk);
+  text-decoration: underline;
+}
+
+.check-path--link:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.checks-pass-fold {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-top: var(--rule-width) solid var(--edge-rule);
+  background: transparent;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.checks-pass-fold:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.checks-pass-fold:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+
 .check-level {
   flex: none;
   font-size: var(--text-2xs);
@@ -29887,7 +29934,8 @@ progress:indeterminate::-webkit-progress-bar {
     color var(--motion-fast) var(--ease-standard);
 }
 
-.auto-paused-fold:last-child {
+.auto-paused-fold:last-child,
+.auto-paused-fold-row:last-child .auto-paused-fold {
   border-bottom: 0;
 }
 
@@ -30035,7 +30083,7 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .auto-table {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   overflow: auto;
   border: var(--rule-width) solid var(--edge-rule);

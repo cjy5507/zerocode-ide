@@ -19100,11 +19100,20 @@ await test("automations owed strip, paused fold, inline failure reasons, lazy ca
       owedChips: [...document.querySelectorAll("#auto-owed .auto-owed-chip")].map((n) => [n.dataset.autoId, n.dataset.tone]),
       visibleRows: [...document.querySelectorAll("#auto-list > .auto-row")].map((n) => n.dataset.autoId),
       foldText: document.querySelector("#auto-list .auto-paused-fold")?.textContent ?? "",
+      navCurrents: [...document.querySelectorAll('.nav-row[aria-current="page"]')].map((n) => n.id),
+      gapToKeys: Math.round(
+        document.getElementById("auto-keys").getBoundingClientRect().top
+        - document.getElementById("auto-table").getBoundingClientRect().bottom,
+      ),
+      vaultLabel: tabLabel({ kind: "vault" }),
     }));
     assertEqual(listSnap.owedHidden, false, "owed strip stayed hidden");
     assertEqual(listSnap.owedChips, [["ux-approve", "you"], ["ux-fail", "halt"]], "owed strip chips/tones");
     assertEqual(listSnap.visibleRows, ["ux-approve", "ux-fail", "ux-ok"], "paused row was not folded");
     assert(listSnap.foldText.includes("1"), "paused fold count missing", listSnap.foldText);
+    assertEqual(listSnap.navCurrents, ["nav-automations"], "sidebar kept a second active nav item under automations");
+    assert(listSnap.gapToKeys >= 0 && listSnap.gapToKeys <= 32, "auto-keys drifted away from the compact table", listSnap);
+    assertEqual(listSnap.vaultLabel, "Vault", "vault tab fell back to terminal label");
 
     // DOM identity survives repaint (reconcileElementOrder).
     const sameNode = await pageA.evaluate(() => {

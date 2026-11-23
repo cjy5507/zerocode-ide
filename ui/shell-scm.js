@@ -4407,6 +4407,7 @@ let checksHeight = CHECKS_HEIGHT_DEFAULT;
 /* Whether the list is folded away. The summary row is the control, and it
  * stays visible either way — that is why the counts live in it. */
 let checksExpanded = true;
+let checksPassedOpen = false;
 
 /* ---- the beat that brings checks by itself (t-2733) ----
  *
@@ -4967,10 +4968,16 @@ function paintChecksSummary(checks) {
   el("checks-spin").hidden = !checksLoading;
 }
 
+function checkSortRank(check) {
+  const verdict = checkVerdict(check);
+  if (["failure", "cancelled", "timed_out", "action_required"].includes(verdict)) return 0;
+  if (verdict === "pending") return 1;
+  return 2;
+}
+
 /* The rows, and the grip that gives them a ceiling. */
 function paintChecksBody(checks) {
   const list = el("checks-list");
-  list.replaceChildren();
   const showing = checksExpanded && checks.length > 0;
   list.hidden = !showing;
   // Orca constrains the list only while nothing is expanded (:1921): once a
@@ -4981,8 +4988,71 @@ function paintChecksBody(checks) {
   list.style.maxHeight = capped ? `${checksHeight}px` : "";
   el("checks-grip").hidden = !capped;
   el("checks-cap").hidden = !(showing && checksReport?.at_page_limit);
-  if (!showing) return;
-  checks.forEach((check, index) => list.appendChild(checkRow(check, index)));
+  if (!showing) {
+    if (list.childElementCount > 0) list.replaceChildren();
+    return;
+  }
+  const held = new Map(
+    [...list.querySelectorAll(":scope > .check-host")].map((node) => [node.dataset.checkKey, node]),
+  );
+  const heldFold = list.querySelector(":scope > .checks-pass-fold");
+  const indexed = checks.map((check, index) => ({
+    check,
+    index,
+    key: checkKey(check, index),
+    rank: checkSortRank(check),
+  }));
+  const active = indexed.filter((one) => one.rank < 2).sort((a, b) => a.rank - b.rank || a.index - b.index);
+  const quiet = indexed.filter((one) => one.rank === 2);
+  const foldQuiet = active.length > 0 && quiet.length > 0;
+  const toHost = ({ check, index, key }) => {
+    const open = checksOpen.has(key);
+    const detail = open ? checksDetails.get(key) ?? null : null;
+    const sig = JSON.stringify([
+      locale, check.name, check.status, check.conclusion, check.url ?? "",
+      check.check_run_id ?? null, check.workflow_run_id ?? null, open,
+      detail ? [Boolean(detail.loading), detail.error ?? null, detail.details ?? null] : null,
+    ]);
+    const reused = held.get(key);
+    if (reused && reused.dataset.checkSig === sig) return reused;
+    const built = checkRow(check, index);
+    built.dataset.checkKey = key;
+    built.dataset.checkSig = sig;
+    return built;
+  };
+  const wanted = [];
+  for (const one of active) wanted.push(toHost(one));
+  if (foldQuiet) {
+    const openQuiet = quiet.filter((one) => checksOpen.has(one.key));
+    const foldedQuiet = quiet.filter((one) => !checksOpen.has(one.key));
+    for (const one of openQuiet) wanted.push(toHost(one));
+    if (foldedQuiet.length > 0) {
+      let fold = heldFold;
+      if (!fold) {
+        fold = document.createElement("button");
+        fold.type = "button";
+        fold.className = "checks-pass-fold";
+        fold.addEventListener("click", () => {
+          checksPassedOpen = !checksPassedOpen;
+          paintChecks();
+        });
+      }
+      writeAttribute(fold, "aria-expanded", String(checksPassedOpen));
+      writeTextContent(
+        fold,
+        checksPassedOpen
+          ? t("checks.passedUnfold", "통과한 검사 {{count}}개 — 접기", { count: foldedQuiet.length })
+          : t("checks.passedFold", "통과한 검사 {{count}}개 — 펼치기", { count: foldedQuiet.length }),
+      );
+      wanted.push(fold);
+      if (checksPassedOpen) {
+        for (const one of foldedQuiet) wanted.push(toHost(one));
+      }
+    }
+  } else {
+    for (const one of quiet) wanted.push(toHost(one));
+  }
+  reconcileElementOrder(list, wanted);
 }
 
 /* One check: the row, and its details pane when open.
@@ -5226,10 +5296,23 @@ function checkAnnotationsEl(annotations) {
     item.className = "check-annotation";
     const where = document.createElement("div");
     where.className = "check-where";
-    const path = document.createElement("span");
-    path.className = "check-path";
     const line = note.start_line ? `:${note.start_line}` : "";
-    path.textContent = `${note.path ?? t("checks.annotation", "주석")}${line}`;
+    const label = `${note.path ?? t("checks.annotation", "주석")}${line}`;
+    let path;
+    if (note.path && typeof openDocLink === "function" && activeWorktreePath) {
+      path = document.createElement("button");
+      path.type = "button";
+      path.className = "check-path check-path--link";
+      path.textContent = label;
+      path.dataset.tip = label;
+      path.addEventListener("click", () => {
+        void openDocLink(activeWorktreePath, note.path, note.start_line ?? null);
+      });
+    } else {
+      path = document.createElement("span");
+      path.className = "check-path";
+      path.textContent = label;
+    }
     where.appendChild(path);
     if (note.annotation_level) {
       const level = document.createElement("span");
