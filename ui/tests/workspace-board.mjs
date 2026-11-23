@@ -222,6 +222,18 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       await page.locator(".workspace-board-card").count() === 21,
       String(await page.locator(".workspace-board-card").count()));
     await page.evaluate(() => { workspaceBoardRestOpen.clear(); paintWorkspaceBoard(); });
+    const pinnedResting = await page.evaluate(async () => {
+      const target = workspaceBoardWorktrees().find((worktree) =>
+        workspaceBoardResting(worktree) && !workspaceBoardCardMeta(worktree.path).pinned);
+      await patchWorkspaceBoardItems([target.path], { pinned: true });
+      const standing = [...document.querySelectorAll(".workspace-board-card")].map((card) => card.dataset.worktreePath);
+      const foldedCount = document.querySelector(".workspace-board-restfold")?.textContent ?? "";
+      await patchWorkspaceBoardItems([target.path], { pinned: false });
+      return { path: target.path, standing: standing.includes(target.path), count: standing.length, foldedCount };
+    });
+    ok("pinned empty cards stay standing instead of folding into resting",
+      pinnedResting.standing && pinnedResting.count === 4 && pinnedResting.foldedCount.includes("17"),
+      JSON.stringify(pinnedResting));
     ok("kanban keeps every stage as a destination, folds the empty ones and keeps the saved planning assignments",
       lanes.length === 4 && emptyLanes.length === 2 && fullLanes.length === 2 &&
       emptyLanes.every((lane) => lane.add > 0 && lane.cards === "none") &&
