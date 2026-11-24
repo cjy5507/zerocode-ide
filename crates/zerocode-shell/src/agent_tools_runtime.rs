@@ -3407,6 +3407,7 @@ pub(super) async fn computer_loop(
                             &argv,
                             &argv,
                             &answer,
+                            None,
                         );
                         let _ = request.answer.send(answer);
                         return;
@@ -3466,14 +3467,30 @@ pub(super) async fn computer_loop(
                     });
                     if let Err(error) = computer_use::browser_route::command(&command) {
                         let answer = computer_cli_error(command.json, &error.code, &error.message);
-                        leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
+                        leave_step(
+                            &app,
+                            &root,
+                            evidence.as_deref(),
+                            &argv,
+                            &argv,
+                            &answer,
+                            None,
+                        );
                         let _ = reply.send(answer);
                         return;
                     }
                     if let Err(error) = computer_use::input_policy::current().prepare(&mut command)
                     {
                         let answer = computer_cli_error(command.json, &error.code, &error.message);
-                        leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
+                        leave_step(
+                            &app,
+                            &root,
+                            evidence.as_deref(),
+                            &argv,
+                            &argv,
+                            &answer,
+                            None,
+                        );
                         let _ = reply.send(answer);
                         return;
                     }
@@ -3505,7 +3522,15 @@ pub(super) async fn computer_loop(
                                 )
                             },
                             |step, refusal| {
-                                leave_step(&app, &root, evidence.as_deref(), step, step, refusal)
+                                leave_step(
+                                    &app,
+                                    &root,
+                                    evidence.as_deref(),
+                                    step,
+                                    step,
+                                    refusal,
+                                    None,
+                                )
                             },
                             || !reply.is_closed(),
                             |n| {
@@ -3585,7 +3610,15 @@ pub(super) async fn computer_loop(
                                 }
                             },
                             |step, logged, refusal| {
-                                leave_step(&app, &root, evidence.as_deref(), step, logged, refusal)
+                                leave_step(
+                                    &app,
+                                    &root,
+                                    evidence.as_deref(),
+                                    step,
+                                    logged,
+                                    refusal,
+                                    None,
+                                )
                             },
                             |level| {
                                 if let Some(dir) = dir.as_deref() {
@@ -3682,7 +3715,15 @@ pub(super) async fn computer_loop(
                         } else {
                             said_envelope(&command, evidence_report(&command, dir.as_deref()))
                         };
-                    leave_step(&app, &root, evidence.as_deref(), &line, &line, &answer);
+                    leave_step(
+                        &app,
+                        &root,
+                        evidence.as_deref(),
+                        &line,
+                        &line,
+                        &answer,
+                        None,
+                    );
                     answer
                 })
                 .await
@@ -3712,6 +3753,7 @@ pub(super) async fn computer_loop(
                     &argv,
                     &argv,
                     &answer,
+                    None,
                 );
                 answer
             } else {
@@ -3780,7 +3822,7 @@ pub(super) fn desktop_step(
         )
         .unwrap_or_default(),
         || {
-            leave_acted_step(
+            leave_step(
                 app,
                 local_data_root,
                 presented_evidence,
@@ -3794,34 +3836,15 @@ pub(super) fn desktop_step(
     answer
 }
 
-/// `leave_acted_step` for a line no act of which was heard: a refusal at
-/// the door, a walk's refused step, a line of the window's own.
-pub(super) fn leave_step(
-    app: &AppHandle,
-    local_data_root: &Path,
-    presented_evidence: Option<&str>,
-    argv: &[String],
-    logged: &[String],
-    answer: &zerocode_hookd::TeamAnswer,
-) {
-    leave_acted_step(
-        app,
-        local_data_root,
-        presented_evidence,
-        argv,
-        logged,
-        answer,
-        None,
-    );
-}
-
 /// What follows every answered command line (§1.4): its evidence — in the
 /// run's folder when the shell presented one, else the session's — and, for
 /// a desktop action, the band's count, the operator's memory of its hands,
 /// and the activity event. `argv` is what ran; `logged` what the log and the
 /// operator's memory keep of it; `acted` what its act did, as the helper
-/// answered it, which its evidence is framed by.
-fn leave_acted_step(
+/// answered it, which its evidence is framed by — `None` for a line no act
+/// of which was heard: a refusal at the door, a walk's refused step, a line
+/// of the window's own (I-t123731-rc1).
+pub(super) fn leave_step(
     app: &AppHandle,
     local_data_root: &Path,
     presented_evidence: Option<&str>,
@@ -4253,7 +4276,7 @@ fn run_parallel(
                 &batch,
                 left_ms(),
                 step,
-                |step, refusal| leave_step(app, root, evidence, step, step, refusal),
+                |step, refusal| leave_step(app, root, evidence, step, step, refusal, None),
                 caller_waits,
                 // A parallel group's apps are the whole request's: held to its end.
                 |_| {},
