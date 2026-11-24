@@ -222,6 +222,22 @@ pub fn requested(params: &Map<String, Value>) -> bool {
     params.get(BACKGROUND) == Some(&Value::Bool(true))
 }
 
+/// Whether a step that ran went down the background road, read off the
+/// words that ran (I-t123731-rc1): the policy every request is prepared
+/// under sends a step that names its app (or a pinned mark) to its window,
+/// and an app or a page it opens comes up behind — the two policies alike —
+/// while a step that took the desk (`--foreground`, `--restore-window`)
+/// could run only under the shared one, which sends it to the desktop. So a
+/// step's evidence knows the road whether or not its answer printed one.
+/// Where there is no background road, no step went down it.
+#[must_use]
+pub fn went_in_the_background(command: &ComputerCommand) -> bool {
+    let mut prepared = command.clone();
+    HAS_BACKGROUND_ROAD
+        && InputPolicy::Background.prepare(&mut prepared).is_ok()
+        && prepared.params.as_object().is_some_and(requested)
+}
+
 #[must_use]
 pub fn unavailable() -> ProviderError {
     ProviderError::new(
@@ -581,6 +597,54 @@ mod tests {
         prepare_shared(&mut background, true).unwrap();
         assert_eq!(background.params[BACKGROUND], true);
         assert!(background.params.get(MAY_BORROW_DESKTOP).is_none());
+    }
+
+    /// The road a step that ran went down, read off its words — what its
+    /// evidence is framed by (I-t123731-rc1). An app's act and an app it
+    /// opens went to the background under either policy; a step that took
+    /// the desk did not, nor a look at the screen; and where there is no
+    /// background road, nothing did.
+    #[test]
+    fn a_step_that_ran_says_whether_it_went_down_the_background_road() {
+        for words in [
+            vec!["click", "--app", "Fixture", "--element-index", "3"],
+            vec!["type-text", "--app", "Fixture", "--text", "hello"],
+            vec!["press-key", "--app", "Fixture", "--key", "Return"],
+            vec!["click", "--mark", "1", "--look", "fixture"],
+            vec!["launch", "--app", "Fixture"],
+        ] {
+            let ran = command(&words);
+            assert_eq!(
+                went_in_the_background(&ran),
+                HAS_BACKGROUND_ROAD,
+                "{words:?}"
+            );
+            // The shared policy marks it the same way.
+            let mut shared = ran.clone();
+            prepare_shared(&mut shared, HAS_BACKGROUND_ROAD).unwrap();
+            assert_eq!(
+                requested(shared.params.as_object().unwrap()),
+                HAS_BACKGROUND_ROAD,
+                "shared {words:?}"
+            );
+        }
+        for words in [
+            vec![
+                "click",
+                "--app",
+                "Fixture",
+                "--element-index",
+                "3",
+                "--foreground",
+            ],
+            vec!["get-app-state", "--app", "Fixture", "--restore-window"],
+            vec!["mouse-click", "--x", "1", "--y", "1", "--foreground"],
+            vec!["key", "--key", "tab", "--foreground"],
+            vec!["quit", "--app", "Fixture"],
+            vec!["screenshot"],
+        ] {
+            assert!(!went_in_the_background(&command(&words)), "{words:?}");
+        }
     }
 
     #[test]

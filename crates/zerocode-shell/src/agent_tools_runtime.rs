@@ -3813,6 +3813,7 @@ pub(super) fn leave_step(
     if let Some(dir) = run_dir.or(session_dir) {
         evidence_runtime::leave_computer_evidence(
             &dir,
+            argv,
             logged,
             answer,
             capped,

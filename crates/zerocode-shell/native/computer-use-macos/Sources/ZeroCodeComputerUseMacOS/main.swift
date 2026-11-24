@@ -8165,11 +8165,12 @@ enum DesktopScreen {
         ]
     }
 
-    /// The whole desktop, one display, or one region of it, as a screenshot
-    /// payload of the same shape an app observation carries (`data`, `width`,
-    /// `height`, `scale`) plus where on the desktop its top-left sits — so a
-    /// coordinate read off the picture goes back to the desktop by
-    /// `origin + pixel / scale`. A zoom asks for `fullRes`: no bounding.
+    /// The whole desktop, one display, one region of it, or one window alone
+    /// (`windowOnly`), as a screenshot payload of the same shape an app
+    /// observation carries (`data`, `width`, `height`, `scale`) plus where on
+    /// the desktop its top-left sits — so a coordinate read off the picture
+    /// goes back to the desktop by `origin + pixel / scale`. A zoom asks for
+    /// `fullRes`: no bounding.
     /// The pixels of a display, or of a region of it, with where they sit on
     /// the screen — what a screenshot encodes and what OCR reads.
     struct Frame {
@@ -8179,6 +8180,9 @@ enum DesktopScreen {
         let pointsHeight: CGFloat
         let display: Display
         let displayIndex: Int
+        /// The window this is a picture of, alone, when one was asked for
+        /// (`windowOnly`); nil for the screen.
+        var windowOnly: CGWindowID? = nil
     }
 
     static func capture(params: [String: JSONValue]) throws -> [String: Any] {
@@ -8196,7 +8200,7 @@ enum DesktopScreen {
             }
             png = bounded
         }
-        return [
+        var answer: [String: Any] = [
             "screenshot": [
                 "data": png.data.base64EncodedString(),
                 "width": png.width,
@@ -8206,6 +8210,13 @@ enum DesktopScreen {
             "origin": ["x": frame.origin.x, "y": frame.origin.y],
             "display": render(frame.display, index: frame.displayIndex),
         ]
+        // A window pictured alone says which (I-t123731-rc1): its caller keeps
+        // no picture that does not, so a picture of the screen around the
+        // window is never taken for one.
+        if let alone = frame.windowOnly {
+            answer[windowOnlyKey] = Int(alone)
+        }
+        return answer
     }
 
     /// `pointScale` as sent: absent is nil, a number is it, anything else is
@@ -8240,6 +8251,9 @@ enum DesktopScreen {
         }
         let all = displays()
         guard !all.isEmpty else { throw ProviderError.coded("accessibility_error", "no active display") }
+        if params[windowOnlyKey] != nil {
+            return try windowOnly(params: params, among: all)
+        }
         let region: CGRect? = try params["region"].flatMap { value in
             guard case let .object(fields) = value,
                   let x = fields["x"]?.number, let y = fields["y"]?.number,
@@ -8309,6 +8323,50 @@ enum DesktopScreen {
             pointsHeight: pointsHeight,
             display: chosen,
             displayIndex: all.firstIndex { $0.id == chosen.id } ?? 0
+        )
+    }
+
+    /// What a request names to be pictured as one window alone, by its number.
+    static let windowOnlyKey = "windowOnly"
+
+    /// One window, alone (I-t123731-rc1): the window server's picture of the
+    /// window `windowOnly` numbers, through the capture an app's look takes
+    /// (`WindowCapture.captureImage`) — what another window covers drawn as
+    /// the window itself draws it — placed where the window stands. What a
+    /// step sent in the background is framed by: never the screen around its
+    /// window, where a person's own window may stand. A window that is gone,
+    /// or is this helper's, or whose picture the server will not give, is a
+    /// refusal; nothing of the screen is taken in its place.
+    private static func windowOnly(params: [String: JSONValue], among all: [Display]) throws -> Frame {
+        guard params["region"] == nil, params["display"] == nil, params["pointScale"] == nil,
+              let number = params[windowOnlyKey]?.number, number > 0,
+              let id = boundedInteger(number, as: UInt32.self)
+        else {
+            throw ProviderError.coded(
+                "invalid_argument",
+                "\(windowOnlyKey) names one window by its number, with no region, display or pointScale"
+            )
+        }
+        let windowId = CGWindowID(id)
+        guard let owner = DesktopWindows.ownerPid(windowId: windowId),
+              let bounds = DesktopWindows.bounds(windowId: windowId, ownerPid: owner),
+              bounds.width > 0, bounds.height > 0
+        else {
+            throw ProviderError.coded("window_not_found", "no window \(windowId) on this desktop")
+        }
+        try ShareControlPanel.refuseHelper(pid: owner)
+        guard let captured = WindowCapture.captureImage(windowId: windowId, bounds: bounds) else {
+            throw ProviderError.coded("accessibility_error", "capturing window \(windowId) failed")
+        }
+        let index = desktopDisplayIndex(showing: bounds, among: all.map(\.bounds))
+        return Frame(
+            image: captured.image,
+            origin: bounds.origin,
+            pointsWidth: bounds.width,
+            pointsHeight: bounds.height,
+            display: all[index],
+            displayIndex: index,
+            windowOnly: windowId
         )
     }
 }

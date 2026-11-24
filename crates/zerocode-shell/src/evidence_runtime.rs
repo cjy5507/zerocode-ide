@@ -18,11 +18,14 @@
 //!
 //! Three rules keep the writer honest. A verb that reads or writes the step
 //! log (`verdict`, `evidence`, `recipe-save`) waits for it to be written
-//! first ([`written`]). A desktop frame is a picture of the screen — the
-//! acted app's window region, or the whole display — never a `getAppState`,
-//! which would replace the element indices the agent was just given. And a
-//! writer that falls behind drops frames before lines, bounds every capture
-//! by a timeout, and is started again if it ever dies.
+//! first ([`written`]). A desktop frame is a picture the helper takes — the
+//! acted window alone after a step sent in the background, so a person's own
+//! window over it never lands in the folder (I-t123731-rc1); the window's
+//! region of the screen, or the whole display, after one that took the desk
+//! — never a `getAppState`, which would replace the element indices the
+//! agent was just given. And a writer that falls behind drops frames before
+//! lines, bounds every capture by a timeout, and is started again if it ever
+//! dies.
 //!
 //! A walk (a batch, a recipe) speaks to the same writer (plan D4·D10): it
 //! says when it begins in a folder and whether its steps are framed — its
@@ -50,6 +53,9 @@ const BACKLOG_FRAMES: usize = 8;
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest a log reader waits for the writer to catch up.
 const WRITTEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// What the helper's `screenshotDesktop` is asked with to picture one window
+/// alone, by its number: the frame of a step sent in the background.
+const WINDOW_ONLY: &str = "windowOnly";
 
 /// A frame taken: the picture, and where it sits on the screen.
 struct Picture {
@@ -91,8 +97,10 @@ enum Frame<S> {
 
 /// How a settled surface is framed.
 enum Capture {
-    /// A picture of the screen through the helper's `screenshotDesktop`: the
-    /// whole display, or the acted window's region of it.
+    /// A picture through the helper's `screenshotDesktop`, asked with
+    /// `params`: the acted window alone (`windowOnly`) after a step sent in
+    /// the background; the whole display, or the acted window's region of
+    /// it, after one that took the desk.
     Desktop { params: serde_json::Value },
     Emulator {
         platform: zerocode_core::computer_use::EmulatorPlatform,
@@ -108,8 +116,9 @@ enum Capture {
 impl Surface for Capture {
     fn key(&self) -> String {
         match self {
-            // The acted window's region and the whole display are one
-            // screen: an action in one is in a picture of the other.
+            // The acted window — alone or as its region — and the whole
+            // display are one screen: a later action on it may be in a
+            // picture of any of them, so it supersedes them alike.
             Self::Desktop { .. } => "computer".to_string(),
             Self::Emulator { platform, device } => format!("emulator:{platform:?}:{device}"),
             Self::Browser { label, .. } => format!("browser:{label}"),
@@ -118,17 +127,24 @@ impl Surface for Capture {
 
     async fn take(self) -> Result<Picture, FrameSkipped> {
         match self {
-            Self::Desktop { params } => tauri::async_runtime::spawn_blocking(move || {
-                let answer = computer_use::call("screenshotDesktop", params).ok()?;
-                Some(Picture {
-                    png: computer_use::screenshot_png(&answer)?,
-                    placed: ShotFrame::from_answer(&answer).unwrap_or(ShotFrame::UNIT),
+            Self::Desktop { params } => {
+                // A window asked for alone that cannot be pictured says so:
+                // nothing of the screen is taken in its place.
+                let alone = params.get(WINDOW_ONLY).cloned();
+                let failed = if alone.is_some() {
+                    FrameSkipped::WindowUnavailable
+                } else {
+                    FrameSkipped::CaptureFailed
+                };
+                tauri::async_runtime::spawn_blocking(move || {
+                    let answer = computer_use::call("screenshotDesktop", params).ok()?;
+                    desktop_picture(alone.as_ref(), &answer)
                 })
-            })
-            .await
-            .ok()
-            .flatten()
-            .ok_or(FrameSkipped::CaptureFailed),
+                .await
+                .ok()
+                .flatten()
+                .ok_or(failed)
+            }
             Self::Emulator { platform, device } => emulator_screenshot_bytes(platform, &device)
                 .await
                 .ok()
@@ -148,6 +164,24 @@ impl Surface for Capture {
             }
         }
     }
+}
+
+/// The picture a `screenshotDesktop` answer carries, placed where the answer
+/// says it sits. A window asked for `alone` is kept only when the answer says
+/// that window was pictured alone (`windowOnly`): a helper that does not know
+/// the request answers with the screen around it, which is never kept in its
+/// place (I-t123731-rc1).
+fn desktop_picture(
+    alone: Option<&serde_json::Value>,
+    answer: &serde_json::Value,
+) -> Option<Picture> {
+    if alone.is_some() && answer.get(WINDOW_ONLY) != alone {
+        return None;
+    }
+    Some(Picture {
+        png: computer_use::screenshot_png(answer)?,
+        placed: ShotFrame::from_answer(answer).unwrap_or(ShotFrame::UNIT),
+    })
 }
 
 /// One step, as the caller saw it happen.
@@ -387,11 +421,11 @@ fn own_frame(result: Option<&serde_json::Value>) -> Option<Picture> {
     })
 }
 
-/// Where a desktop step is framed: the region of the window an app action
-/// answered in its result (the screen as a person would see it there), or
-/// the whole display. Never `getAppState`: that would replace the element
-/// indices the agent was just handed, from a writer running behind its
-/// answers.
+/// Where a desktop step that took the desk is framed: the region of the
+/// window an app action answered in its result (the screen as a person would
+/// see it there), or the whole display. Never `getAppState`: that would
+/// replace the element indices the agent was just handed, from a writer
+/// running behind its answers.
 fn desktop_capture(result: Option<&serde_json::Value>) -> Capture {
     let window = result.and_then(|result| {
         let window = result.pointer("/snapshot/window")?;
@@ -411,9 +445,36 @@ fn desktop_capture(result: Option<&serde_json::Value>) -> Capture {
     }
 }
 
-/// Where a desktop step is framed, by the road it went down.
-fn desktop_frame(_argv: &[String], result: Option<&serde_json::Value>) -> Frame<Capture> {
-    Frame::After(desktop_capture(result))
+/// Where a desktop step is framed, by the road it went down (I-t123731-rc1).
+/// A step sent in the background is framed as its window alone, by the
+/// window's number — what another window covers drawn as the window itself
+/// draws it — never as the screen around it, where a person's own window
+/// may stand: the window its answer names (the look after the act, or the
+/// window the act went to), else the one the step named. With none there is
+/// no picture, and the line says why. A step that took the desk is framed
+/// as before (`desktop_capture`). `argv` is the words that ran — a walk's
+/// step as it was sent, which may name the app its recipe's words do not.
+fn desktop_frame(argv: &[String], result: Option<&serde_json::Value>) -> Frame<Capture> {
+    let Some(ran) = zerocode_core::computer_use::parse_command(argv)
+        .ok()
+        .filter(zerocode_core::computer_use_protocol::execution::went_in_the_background)
+    else {
+        return Frame::After(desktop_capture(result));
+    };
+    let answered = result.and_then(|result| {
+        ["/snapshot/window/id", "/action/targetWindowId"]
+            .into_iter()
+            .find_map(|at| result.pointer(at)?.as_u64())
+    });
+    match answered
+        .or_else(|| ran.params.get("windowId")?.as_u64())
+        .filter(|id| *id > 0)
+    {
+        Some(id) => Frame::After(Capture::Desktop {
+            params: serde_json::json!({ WINDOW_ONLY: id }),
+        }),
+        None => Frame::Skipped(FrameSkipped::WindowUnavailable),
+    }
 }
 
 fn emulator_capture(argv: &[String]) -> Option<Capture> {
@@ -469,14 +530,14 @@ pub(super) fn leave_browser_evidence(
 /// (§1.4): none for a refusal or a verb that frames nothing (`frames`); a
 /// session folder past its table says `capped`; a picture the answer
 /// exported is the step's own — kept at once, whatever follows it; else the
-/// surface `after` names from the answer's result is framed once it has
-/// settled. The envelope is read once, for both.
+/// frame `after` names from the answer's result: a surface framed once it
+/// has settled, or why there is none. The envelope is read once, for both.
 fn frame_of<S>(
     dir: &Path,
     frames: bool,
     capped: bool,
     answer: &zerocode_hookd::TeamAnswer,
-    after: impl FnOnce(Option<&serde_json::Value>) -> Option<S>,
+    after: impl FnOnce(Option<&serde_json::Value>) -> Frame<S>,
 ) -> Frame<S> {
     if answer.exit_code != 0 || !frames {
         return Frame::None;
@@ -491,7 +552,7 @@ fn frame_of<S>(
         .and_then(|envelope| envelope.get("result"));
     match own_frame(result) {
         Some(picture) => Frame::Own(picture),
-        None => after(result).map_or(Frame::None, Frame::After),
+        None => after(result),
     }
 }
 
@@ -512,7 +573,9 @@ pub(super) fn leave_emulator_evidence(
     let Some(frames) = run_evidence::captures("emulator", verb) else {
         return;
     };
-    let frame = frame_of(dir, frames, false, answer, |_| emulator_capture(argv));
+    let frame = frame_of(dir, frames, false, answer, |_| {
+        emulator_capture(argv).map_or(Frame::None, Frame::After)
+    });
     send(Message::Step(Job::new(
         dir,
         "emulator",
@@ -525,17 +588,21 @@ pub(super) fn leave_emulator_evidence(
 
 /// A run's step on the desktop road: the line, and the frame of the surface
 /// it acted on (`frame_of`) — a picture the answer exported is the step's own
-/// frame; else the acted window's region, or the whole screen after a
-/// desktop action. An `ssh` command is not a surface, and the emulator has
-/// its own road (`leave_emulator_evidence`).
+/// frame; else, by the road the step went down (`desktop_frame`), its window
+/// alone after a step sent in the background, or the acted window's region
+/// or the whole screen after one that took the desk. `argv` is the words
+/// that ran, which say the road; `logged` the words its line keeps. An `ssh`
+/// command is not a surface, and the emulator has its own road
+/// (`leave_emulator_evidence`).
 pub(super) fn leave_computer_evidence(
     dir: &Path,
     argv: &[String],
+    logged: &[String],
     answer: &zerocode_hookd::TeamAnswer,
     capped: bool,
     observation: Option<serde_json::Value>,
 ) {
-    let verb = match argv.first().map(String::as_str) {
+    let verb = match logged.first().map(String::as_str) {
         Some("ssh") | Some("emulator") | None => return,
         Some(verb) => verb,
     };
@@ -543,12 +610,12 @@ pub(super) fn leave_computer_evidence(
         return;
     };
     let frame = frame_of(dir, frames, capped, answer, |result| {
-        Some(desktop_capture(result))
+        desktop_frame(argv, result)
     });
     send(Message::Step(Job::new(
         dir,
         "computer",
-        argv,
+        logged,
         answer,
         frame,
         observation,
@@ -854,7 +921,7 @@ mod tests {
         assert!(own_frame(result_of(&unpictured).as_ref()).is_none());
         let framed_by = |answer: &zerocode_hookd::TeamAnswer, frames: bool| {
             frame_of(dir.path(), frames, false, answer, |_| {
-                Some(Fixed("computer"))
+                Frame::After(Fixed("computer"))
             })
         };
         assert!(matches!(framed_by(&pictured, true), Frame::Own(_)));
@@ -888,7 +955,7 @@ mod tests {
                 .unwrap();
             for _ in 0..20 {
                 let frame = frame_of(folder.path(), true, false, answer, |_| {
-                    Some(Fixed("computer"))
+                    Frame::After(Fixed("computer"))
                 });
                 writer
                     .send(Message::Step(Job::new(
@@ -1080,6 +1147,47 @@ mod tests {
                 "{step:?}: no window to name, so no picture — never the whole display"
             );
         }
+    }
+
+    /// A window asked for alone is kept only when the helper's answer says
+    /// it pictured that window alone: an answer that does not say so — a
+    /// helper that does not know the request pictures the screen instead —
+    /// or that names another window keeps nothing (I-t123731-rc1). A picture
+    /// of the screen asked for as such is kept as before.
+    #[test]
+    fn a_window_asked_for_alone_is_kept_only_when_the_helper_says_it_pictured_it_alone() {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(PNG);
+        let helper_said = |alone: Option<u64>| {
+            let mut said = serde_json::json!({
+                "screenshot": { "data": data, "width": 1, "height": 1, "scale": 2.0 },
+                "origin": { "x": 10.0, "y": 20.0 },
+            });
+            if let Some(id) = alone {
+                said[WINDOW_ONLY] = id.into();
+            }
+            said
+        };
+        let seven = serde_json::json!(7);
+        let kept = desktop_picture(Some(&seven), &helper_said(Some(7))).expect("the window alone");
+        assert_eq!(kept.png, PNG);
+        assert_eq!(
+            kept.placed,
+            ShotFrame::new((10.0, 20.0), 2.0).unwrap(),
+            "placed where the window stands"
+        );
+        assert!(
+            desktop_picture(Some(&seven), &helper_said(None)).is_none(),
+            "an answer that does not say so is of the screen: not kept"
+        );
+        assert!(
+            desktop_picture(Some(&seven), &helper_said(Some(8))).is_none(),
+            "a picture of another window: not kept"
+        );
+        assert!(
+            desktop_picture(None, &helper_said(None)).is_some(),
+            "the screen, asked for as such, is kept as before"
+        );
     }
 
     /// The walk's own record is the writer's to place: it lands after the
