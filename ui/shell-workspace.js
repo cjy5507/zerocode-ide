@@ -15203,15 +15203,16 @@ function paintSpaceBreakdown() {
     say(note, () => t("space.breakdownFailed", "이 워크스페이스는 재지 못했습니다."));
     return;
   }
-  if (row.entries.length === 0) {
+  const entries = Array.isArray(row.entries) ? row.entries : [];
+  if (entries.length === 0) {
     note.hidden = false;
     say(note, () => t("space.breakdownEmpty", "파일이 없습니다."));
     return;
   }
   note.hidden = true;
   say(note, null);
-  const biggest = row.entries[0].size_bytes || 1;
-  for (const entry of row.entries.slice(0, SPACE_BREAKDOWN_ROWS)) {
+  const biggest = entries[0].size_bytes || 1;
+  for (const entry of entries.slice(0, SPACE_BREAKDOWN_ROWS)) {
     const line = document.createElement("div");
     line.className = "space-break-row";
     const name = document.createElement("span");

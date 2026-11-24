@@ -1311,11 +1311,6 @@ async function reconcileRemoteWorkspaceMutation(error, expectation) {
   return true;
 }
 
-function selectedRemoteWorkspace() {
-  const id = el("remote-workspace-id").value;
-  return remoteWorkspaceReport.workspaces.find((workspace) => workspace.id === id) ?? null;
-}
-
 function populateRemoteWorkspaceHosts(selectedId = "") {
   const picker = el("remote-workspace-host");
   picker.replaceChildren(...sshHostReport.hosts.map((host) => {

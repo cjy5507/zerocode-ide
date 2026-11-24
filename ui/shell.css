@@ -31517,7 +31517,7 @@ progress:indeterminate::-webkit-progress-bar {
  * state in the same column as one with three. */
 .auto-runs-list {
   display: grid;
-  grid-template-columns: 150px minmax(140px, 1fr) 120px auto;
+  grid-template-columns: 150px minmax(140px, 1fr) minmax(120px, auto) auto;
   overflow: hidden;
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-edge);

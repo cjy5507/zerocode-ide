@@ -8358,10 +8358,6 @@ function artifactPathUnder(path, root) {
   return path.startsWith(`${base}/`) || path.startsWith(`${base}\\`);
 }
 
-function artifactInRoots(row, roots) {
-  return artifactOriginInRoots(row.origin ?? {}, roots);
-}
-
 function artifactOriginInRoots(origin, roots) {
   return [origin.project, origin.worktree].some((path) => roots.some((root) => artifactPathUnder(path, root)));
 }

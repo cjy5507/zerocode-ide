@@ -4431,10 +4431,6 @@ function chatFindParts(turn, run) {
   ];
 }
 
-function chatFindWords(turn, run) {
-  return chatFindParts(turn, run).map((part) => part.text).join("\n");
-}
-
 function chatFindHits(run, query) {
   const needle = query.toLowerCase();
   const hits = [];

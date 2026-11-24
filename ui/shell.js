@@ -6922,41 +6922,6 @@ function wireGraphDrag(surface, { grabbed, onGrab, onDrag, onEnd } = {}) {
   };
 }
 
-/* The far corner of what is actually drawn inside `host`.
- *
- * Neither a canvas nor a band head can answer this on the ontology: both are
- * stretched to the width of the scrollport, so dividing by either one says
- * "already fitted" no matter how small the graph really is — which is why a
- * fit could only ever zoom OUT. The host's own rectangle is read once, not
- * per node: measuring one picture must not read one rectangle per card twice. */
-function graphDrawnSize(host, selector) {
-  let wide = 0;
-  let tall = 0;
-  const frame = host.getBoundingClientRect();
-  for (const drawn of host.querySelectorAll(selector)) {
-    const box = drawn.getBoundingClientRect();
-    wide = Math.max(wide, box.right - frame.left);
-    tall = Math.max(tall, box.bottom - frame.top);
-  }
-  return { wide, tall };
-}
-
-/* The width a picture has to fit into.
- *
- * The padding is the scrollport's own rather than a number written twice:
- * `clientWidth` includes it, and a surface whose padding moved would otherwise
- * fit its picture outside itself (measured on the ontology: padding 40 fitted
- * a 463px picture into a 429px seat). */
-function graphFitRoom(scroll) {
-  const dress = getComputedStyle(scroll);
-  return scroll.clientWidth
-    - Number.parseFloat(dress.paddingLeft) - Number.parseFloat(dress.paddingRight);
-}
-
-/* One ResizeObserver for every graph canvas in this window, and one callback
- * per canvas. Registered once per element — a repaint passes through here on
- * every hook event, and an observer added per repaint is a leak that grows
- * with how busy the surface is. */
 let graphResizeObserver = null;
 const graphResizeRuns = new WeakMap();
 

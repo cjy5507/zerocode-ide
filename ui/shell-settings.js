@@ -3394,10 +3394,6 @@ el("orch-recheck").addEventListener("click", () => {
  * 백엔드가 답의 주인이고, 여기 폴백은 그 답을 받지 못했을 때의 짐작이다. */
 let agentTeamsMode = "panes";
 
-async function refreshTeamsMode() {
-  await refreshSettingsSnapshot({ reportError: true });
-}
-
 el("orch-teams-mode").addEventListener("change", (event) => {
   agentTeamsMode = event.target.value;
   void commitSetting("agent_teams_mode", "set_agent_teams_mode", { mode: agentTeamsMode });
@@ -11085,13 +11081,6 @@ el("term-allow-osc52-clipboard").addEventListener("change", (event) => {
  * runs in it is your call. */
 const terminalCommandField = el("terminal-command");
 let terminalCommand = "";
-
-/* The line comes back already quoted. Rust owns both halves of that round
- * trip — the window quoting it a second time is how the two rules drifted
- * apart and started rewriting argv on save. */
-function loadTerminalCommand() {
-  return refreshSettingsSnapshot();
-}
 
 terminalCommandField.addEventListener("change", async () => {
   const line = terminalCommandField.value.trim();
