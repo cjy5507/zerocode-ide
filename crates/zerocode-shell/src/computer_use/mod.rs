@@ -21,6 +21,7 @@
 //! it on a transport failure so the next request gets a clean start, keep it
 //! on a provider refusal so the snapshots survive.
 
+pub(crate) mod acted;
 pub mod arena;
 pub(crate) mod browser_route;
 mod permissions;
@@ -259,11 +260,17 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     }
     input_policy::ensure_current()?;
     let acts = acts_on_something(method);
+    let background = params
+        .as_object()
+        .is_some_and(zerocode_core::computer_use_protocol::execution::requested);
     match session.request(method, params) {
         Ok(answer) => {
             // A look's answer names the app it read: where that app is in
             // use, the share counts the look as a use of it (t-109874).
             share::heard(&answer);
+            // An act's answer says where it went: the step's evidence is
+            // framed by that, not by its words (I-t123731-rc1).
+            acted::heard(method, background, &answer);
             Ok(answer)
         }
         Err(SessionFailure::Provider(error)) => {

@@ -3757,15 +3757,19 @@ pub(super) fn desktop_step(
 ) -> zerocode_hookd::TeamAnswer {
     let began = std::time::Instant::now();
     // A command that panicked is answered and left like any refusal: its
-    // line, the operator's memory and the band still hear of it.
-    let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        answer_computer_command(argv, Some(app), asking, workspace)
-    }))
-    .unwrap_or_else(|panic| {
-        computer_refused(format!(
-            "computer task failed: {}",
-            crate::system_runtime::panic_payload(panic.as_ref())
-        ))
+    // line, the operator's memory and the band still hear of it. What its
+    // act did is heard as the helper answers it: its evidence is framed by
+    // that, not by its words (I-t123731-rc1).
+    let (answer, acted) = computer_use::acted::during(|| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            answer_computer_command(argv, Some(app), asking, workspace)
+        }))
+        .unwrap_or_else(|panic| {
+            computer_refused(format!(
+                "computer task failed: {}",
+                crate::system_runtime::panic_payload(panic.as_ref())
+            ))
+        })
     });
     run_evidence::observing(
         run_evidence::measured(
@@ -3776,24 +3780,22 @@ pub(super) fn desktop_step(
         )
         .unwrap_or_default(),
         || {
-            leave_step(
+            leave_acted_step(
                 app,
                 local_data_root,
                 presented_evidence,
                 argv,
                 logged,
                 &answer,
+                acted,
             )
         },
     );
     answer
 }
 
-/// What follows every answered command line (§1.4): its evidence — in the
-/// run's folder when the shell presented one, else the session's — and, for
-/// a desktop action, the band's count, the operator's memory of its hands,
-/// and the activity event. `argv` is what ran; `logged` what the log and the
-/// operator's memory keep of it.
+/// `leave_acted_step` for a line no act of which was heard: a refusal at
+/// the door, a walk's refused step, a line of the window's own.
 pub(super) fn leave_step(
     app: &AppHandle,
     local_data_root: &Path,
@@ -3801,6 +3803,32 @@ pub(super) fn leave_step(
     argv: &[String],
     logged: &[String],
     answer: &zerocode_hookd::TeamAnswer,
+) {
+    leave_acted_step(
+        app,
+        local_data_root,
+        presented_evidence,
+        argv,
+        logged,
+        answer,
+        None,
+    );
+}
+
+/// What follows every answered command line (§1.4): its evidence — in the
+/// run's folder when the shell presented one, else the session's — and, for
+/// a desktop action, the band's count, the operator's memory of its hands,
+/// and the activity event. `argv` is what ran; `logged` what the log and the
+/// operator's memory keep of it; `acted` what its act did, as the helper
+/// answered it, which its evidence is framed by.
+fn leave_acted_step(
+    app: &AppHandle,
+    local_data_root: &Path,
+    presented_evidence: Option<&str>,
+    argv: &[String],
+    logged: &[String],
+    answer: &zerocode_hookd::TeamAnswer,
+    acted: Option<zerocode_core::computer_use_protocol::execution::Acted>,
 ) {
     let run_dir = run_evidence::fenced_dir(local_data_root, presented_evidence);
     let is_desktop = !argv
@@ -3816,6 +3844,7 @@ pub(super) fn leave_step(
             argv,
             logged,
             answer,
+            acted,
             capped,
             run_evidence::observation(),
         );

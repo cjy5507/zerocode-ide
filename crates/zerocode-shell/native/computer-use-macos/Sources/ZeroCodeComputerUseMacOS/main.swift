@@ -130,6 +130,9 @@ final class RequestContext {
     var personWait: DesktopBorrow.Wait?
     /// How long the app itself took to perform the action, in ms.
     var appActionMs: Int?
+    /// The window this request acts in, as it was chosen when the act was
+    /// checked against it; nil until an act chose one.
+    var actedWindow: ActedWindow?
 
     private static let key = "dev.zerocode.computer-use.request"
 
@@ -147,6 +150,20 @@ final class RequestContext {
         context.mayBorrowDesktop = params["mayBorrowDesktop"]?.bool == true
         Thread.current.threadDictionary[key] = context
     }
+}
+
+/// The window an act went to, as the request chose it when it acted: its
+/// number and the process that owned it (I-t123731-rc1). The act's answer
+/// names it (`action.actedWindow`), and the act's evidence pictures it
+/// alone — whatever window the look after the act chooses by focus and
+/// order, and never a window that number names for another process since.
+struct ActedWindow {
+    /// The word an act's answer names it by, in its `action`.
+    static let key = "actedWindow"
+    let id: CGWindowID
+    let pid: pid_t
+
+    var answer: [String: Any] { ["id": Int(id), "pid": Int(pid)] }
 }
 
 protocol PressApplicationFacts {
@@ -1114,6 +1131,9 @@ final class Provider {
         let before = try? cachedSnapshot(params: params)
         let acting = Date()
         var action = try runAction()
+        if let acted = RequestContext.current.actedWindow {
+            action[ActedWindow.key] = acted.answer
+        }
         if params["timing"]?.bool == true {
             action["actMs"] = Int(Date().timeIntervalSince(acting) * 1_000)
             action["appActionMs"] = RequestContext.current.appActionMs as Any
@@ -1319,6 +1339,15 @@ final class Provider {
     }
 
     private func currentSnapshot(params: [String: JSONValue]) throws -> Snapshot {
+        let snapshot = try snapshotUpToNow(params: params)
+        // Every act is checked against this snapshot: its window is the one
+        // the act goes to, and the act's answer names it — not the window a
+        // look after the act lands on (I-t123731-rc1).
+        RequestContext.current.actedWindow = ActedWindow(id: snapshot.windowId, pid: snapshot.app.pid)
+        return snapshot
+    }
+
+    private func snapshotUpToNow(params: [String: JSONValue]) throws -> Snapshot {
         pruneSnapshotCache()
         if let standing = try standingSnapshot(params: params) { return standing }
         let cached = try cachedSnapshot(params: params)
@@ -8328,31 +8357,38 @@ enum DesktopScreen {
 
     /// What a request names to be pictured as one window alone, by its number.
     static let windowOnlyKey = "windowOnly"
+    /// The process that window is held to: the one the act found owning it
+    /// (`action.actedWindow`). A number the window server gave out again
+    /// since names another window, and is refused.
+    static let windowOwnerKey = "windowOwner"
 
     /// One window, alone (I-t123731-rc1): the window server's picture of the
     /// window `windowOnly` numbers, through the capture an app's look takes
     /// (`WindowCapture.captureImage`) — what another window covers drawn as
-    /// the window itself draws it — placed where the window stands. What a
-    /// step sent in the background is framed by: never the screen around its
-    /// window, where a person's own window may stand. A window that is gone,
-    /// or is this helper's, or whose picture the server will not give, is a
-    /// refusal; nothing of the screen is taken in its place.
+    /// the window itself draws it — placed where the window stands. What an
+    /// act that went no further than its window is framed by: never the
+    /// screen around it, where a person's own window may stand. A window that
+    /// is gone, or no longer the process's `windowOwner` names, or is this
+    /// helper's, or whose picture the server will not give, is a refusal;
+    /// nothing of the screen is taken in its place.
     private static func windowOnly(params: [String: JSONValue], among all: [Display]) throws -> Frame {
         guard params["region"] == nil, params["display"] == nil, params["pointScale"] == nil,
               let number = params[windowOnlyKey]?.number, number > 0,
-              let id = boundedInteger(number, as: UInt32.self)
+              let id = boundedInteger(number, as: UInt32.self),
+              let named = params[windowOwnerKey]?.number, named > 0,
+              let expected = boundedInteger(named, as: pid_t.self)
         else {
             throw ProviderError.coded(
                 "invalid_argument",
-                "\(windowOnlyKey) names one window by its number, with no region, display or pointScale"
+                "\(windowOnlyKey) names one window by its number and \(windowOwnerKey) the process that owns it, with no region, display or pointScale"
             )
         }
         let windowId = CGWindowID(id)
-        guard let owner = DesktopWindows.ownerPid(windowId: windowId),
+        guard let owner = DesktopWindows.ownerPid(windowId: windowId), owner == expected,
               let bounds = DesktopWindows.bounds(windowId: windowId, ownerPid: owner),
               bounds.width > 0, bounds.height > 0
         else {
-            throw ProviderError.coded("window_not_found", "no window \(windowId) on this desktop")
+            throw ProviderError.coded("window_not_found", "no window \(windowId) of process \(expected) on this desktop")
         }
         try ShareControlPanel.refuseHelper(pid: owner)
         guard let captured = WindowCapture.captureImage(windowId: windowId, bounds: bounds) else {
@@ -9066,6 +9102,8 @@ private enum DesktopWindows {
         let frame = absoluteFrame(element)
         return [
             "windowId": Int(windowId),
+            // Whose window it is: what the act's evidence holds the number to.
+            "pid": Int(pid),
             "action": action.rawValue,
             "frame": frame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
         ]
