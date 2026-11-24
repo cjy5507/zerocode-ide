@@ -53306,20 +53306,16 @@ button.board-build-failure-part:focus-visible {
  * 여덟 칸의 색은 토큰이 들고(라이트 판의 뒤집기도 토큰이 한다), 이 매핑이 사는
  * 자리는 여기 한 곳뿐이다 — 점과 칩과 성운과 목록의 줄이 저마다 제 매핑을 들고
  * 있으면 아홉째 색이 생기는 날 다섯 곳 중 넷만 고쳐진다. 물드는 쪽은
- * `--knowledge-tint`와 세 채움만 읽는다. 군집이 없는 점은 물들지 않는다 — 색은
+ * `--knowledge-tint`만 읽는다. 군집이 없는 점은 물들지 않는다 — 색은
  * 구분이지 장식이 아니다. */
-.knowledge-view [data-hue="0"] { --knowledge-tint: var(--knowledge-hue-0); --knowledge-node-fill: url(#knowledge-node-gradient-0); --knowledge-halo-fill: url(#knowledge-halo-gradient-0); }
-.knowledge-view [data-hue="1"] { --knowledge-tint: var(--knowledge-hue-1); --knowledge-node-fill: url(#knowledge-node-gradient-1); --knowledge-halo-fill: url(#knowledge-halo-gradient-1); }
-.knowledge-view [data-hue="2"] { --knowledge-tint: var(--knowledge-hue-2); --knowledge-node-fill: url(#knowledge-node-gradient-2); --knowledge-halo-fill: url(#knowledge-halo-gradient-2); }
-.knowledge-view [data-hue="3"] { --knowledge-tint: var(--knowledge-hue-3); --knowledge-node-fill: url(#knowledge-node-gradient-3); --knowledge-halo-fill: url(#knowledge-halo-gradient-3); }
-.knowledge-view [data-hue="4"] { --knowledge-tint: var(--knowledge-hue-4); --knowledge-node-fill: url(#knowledge-node-gradient-4); --knowledge-halo-fill: url(#knowledge-halo-gradient-4); }
-.knowledge-view [data-hue="5"] { --knowledge-tint: var(--knowledge-hue-5); --knowledge-node-fill: url(#knowledge-node-gradient-5); --knowledge-halo-fill: url(#knowledge-halo-gradient-5); }
-.knowledge-view [data-hue="6"] { --knowledge-tint: var(--knowledge-hue-6); --knowledge-node-fill: url(#knowledge-node-gradient-6); --knowledge-halo-fill: url(#knowledge-halo-gradient-6); }
-.knowledge-view [data-hue="7"] { --knowledge-tint: var(--knowledge-hue-7); --knowledge-node-fill: url(#knowledge-node-gradient-7); --knowledge-halo-fill: url(#knowledge-halo-gradient-7); }
-
-/* 그라데이션의 불투명도. 수는 토큰의 것이고 `<stop>`은 클래스로 그것을 읽는다. */
-.knowledge-stop-halo-core { stop-opacity: var(--knowledge-halo-core); }
-.knowledge-stop-fade { stop-opacity: 0; }
+.knowledge-view [data-hue="0"] { --knowledge-tint: var(--knowledge-hue-0); }
+.knowledge-view [data-hue="1"] { --knowledge-tint: var(--knowledge-hue-1); }
+.knowledge-view [data-hue="2"] { --knowledge-tint: var(--knowledge-hue-2); }
+.knowledge-view [data-hue="3"] { --knowledge-tint: var(--knowledge-hue-3); }
+.knowledge-view [data-hue="4"] { --knowledge-tint: var(--knowledge-hue-4); }
+.knowledge-view [data-hue="5"] { --knowledge-tint: var(--knowledge-hue-5); }
+.knowledge-view [data-hue="6"] { --knowledge-tint: var(--knowledge-hue-6); }
+.knowledge-view [data-hue="7"] { --knowledge-tint: var(--knowledge-hue-7); }
 
 /* 주제의 원반과 그 이름 (성좌 배치, 09-16).
  *

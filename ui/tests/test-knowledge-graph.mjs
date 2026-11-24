@@ -344,7 +344,6 @@ const brain = await page.evaluate(async () => {
       };
     })(),
     overlappingDots,
-    gradients: view.querySelectorAll("defs radialGradient[id^='knowledge-node-gradient-']").length,
     halos: view.querySelectorAll(".knowledge-halo").length,
     haloRatio: Number(hubHalo?.getAttribute("r") ?? 0)
       / Number(hub?.querySelector(".knowledge-dot")?.getAttribute("r") ?? 1),
@@ -411,7 +410,6 @@ ok(
     Math.abs(brain.initialFitRatio - brain.initialFitWanted) < 0.02 &&
     brain.initialEdgeRoom >= brain.initialEdgeWanted - 1 &&
     brain.overlappingDots === 0 &&
-    brain.gradients === 8 &&
     brain.halos === brain.nodeCount &&
     Math.abs(brain.haloRatio - 1.8) < 0.01 &&
     brain.hubHaloDisplay === "none" &&

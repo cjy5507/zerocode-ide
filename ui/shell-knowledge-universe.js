@@ -1377,7 +1377,6 @@ function knowledgeUniverseBurst(model, community, rank, list, hold) {
 function knowledgeUniverseMap(layout, inks) {
   const U = knowledgeUniverseTuning(layout.view);
   const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
-  const CURVE = KNOWLEDGE_UNIVERSE_CURVE;
   const { model, count, community, communitySize, namedCount, communityHomeX, communityHomeY, communityCore,
     communityHue } = layout;
   let pages = 0;

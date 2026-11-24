@@ -531,7 +531,6 @@ let knowledgeTopologyGeneration = 0;
  * 에이전트 그래프의 `agentGraphLayoutRuns`와 같은 자리. */
 let knowledgeLayoutRuns = 0;
 let knowledgeNodeCreations = 0;
-let knowledgeFirstPaintMs = 0;
 
 /* FNV-1a. 해시가 필요한 곳은 두 곳뿐이다 — 첫 자리의 지터와 태그의 색 칸 —
  * 그리고 둘 다 **같은 입력에 같은 답**이 요구의 절반이다. */
@@ -938,29 +937,12 @@ function paintKnowledgeEntry() {
   if (row) row.hidden = secondBrainVault === "";
 }
 
-/* 색 칸마다 그라데이션 둘 — 점의 채움(가운데 밝게)과 허브의 halo(가운데에서 가장자리로 사라지는 원) — 과
- * 지향성 관계의 화살표. `related`와 `mentions`는 방향을 그리지 않는다. 그라데이션의 불투명도는 숫자가 아니라
- * `<stop>`의 클래스다: 그 수는 토큰에 산다(`--knowledge-halo-core`). 색 칸이 없는 허브(군집이 아닌 점)는 중립
- * halo를 쓴다. 군집의 성운은 그라데이션이 아니라 평평한 한 겹이다(t-12029, CSS의 `.knowledge-nebula`). */
 function knowledgeDefsHtml() {
-  const stop = (offset, color, className) =>
-    `<stop offset="${offset}" stop-color="${color}" class="${className}"></stop>`;
-  const disc = (id, color, coreClass) => `<radialGradient id="${id}">`
-    + stop(0, color, coreClass) + stop(1, color, "knowledge-stop-fade") + `</radialGradient>`;
-  const gradients = Array.from({ length: KNOWLEDGE_HUES }, (unused, hue) =>
-    `<radialGradient id="knowledge-node-gradient-${hue}">`
-      + `<stop offset="0" stop-color="var(--knowledge-hue-${hue}-center)"></stop>`
-      + `<stop offset="1" stop-color="var(--knowledge-hue-${hue})"></stop>`
-      + `</radialGradient>`
-    + disc(`knowledge-halo-gradient-${hue}`, `var(--knowledge-hue-${hue})`, "knowledge-stop-halo-core"))
-    .join("");
-  const neutral = disc("knowledge-halo-gradient-neutral", "var(--ink-figure)", "knowledge-stop-halo-core");
-  const arrows = KNOWLEDGE_EDGE_DIRECTED.map((kind) =>
+  return KNOWLEDGE_EDGE_DIRECTED.map((kind) =>
     `<marker id="knowledge-arrow-${kind}" viewBox="0 0 1 1" refX="1" refY="0.5" `
     + `markerUnits="userSpaceOnUse" orient="auto-start-reverse">`
     + `<polygon points="0 0, 1 .5, 0 1" fill="var(--knowledge-typed-${kind.replace("_", "-")})">`
     + `</polygon></marker>`).join("");
-  return gradients + neutral + arrows;
 }
 
 /* 범례의 모양 표본 — 그림의 점과 같은 기하(`KNOWLEDGE_SHAPES`)를 같은 문
@@ -4519,7 +4501,7 @@ function placeKnowledgeLabels(view, layout, box, inverse, project = layout.proje
   shown.fill(0);
   layout.labelWhere.fill(-1);
   const drawn = layout.drawn;
-  const { radius, labelEm, community, tier } = layout;
+  const { radius, labelEm, community } = layout;
   const cellOf = (value) => Math.floor(value / cell);
   /* 그림 좌표 → 판 픽셀. 이름표의 크기는 화면 픽셀로 고정되어 있으므로 상자는
    * 언제나 같은 크기이고, 바뀌는 것은 점들 사이의 거리다.

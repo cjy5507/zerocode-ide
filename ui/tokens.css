@@ -1811,9 +1811,6 @@
   --knowledge-node-stroke: 1;
   --knowledge-node-selected-stroke: 2;
   --knowledge-edge-lit-width: 1.5;
-  /* The hub halo is a soft disc, not a ring: a radial gradient from this
-   * opacity at the centre to nothing at the rim — Obsidian's dark glow without
-   * an SVG filter. `lift` is how much it grows under the pointer. */
   --knowledge-halo-core: 0.85;
   --knowledge-halo-lift: 1.12;
   /* One nebula per cluster (3차): a disc behind the members, sized from their
