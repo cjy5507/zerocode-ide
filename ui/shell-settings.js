@@ -4553,18 +4553,28 @@ el("flow-open-page").addEventListener("click", () => {
 
 function paintFlowRoster(flows) {
   const roster = el("flow-roster");
-  roster.replaceChildren();
+  const held = new Map([...roster.querySelectorAll(":scope > .flow-row")].map((node) => [node.dataset.slug, node]));
+  const wanted = [];
   for (const flow of flows) {
+    const words = flowChipWords(flow);
+    const selected = flow.slug === flowSelected;
+    const sig = JSON.stringify([locale, flow.slug, flow.name, selected, words]);
+    const existing = held.get(flow.slug);
+    if (existing && existing.dataset.flowSig === sig) {
+      wanted.push(existing);
+      continue;
+    }
     const item = document.createElement("div");
     item.className = "flow-row";
     item.dataset.slug = flow.slug;
-    if (flow.slug === flowSelected) item.setAttribute("aria-current", "true");
+    item.dataset.flowSig = sig;
+    if (selected) item.setAttribute("aria-current", "true");
     const name = document.createElement("span");
     name.className = "flow-row-name";
     name.textContent = flow.name;
     const chips = document.createElement("span");
     chips.className = "flow-row-chips";
-    for (const word of flowChipWords(flow)) {
+    for (const word of words) {
       const chip = document.createElement("span");
       chip.className = "flow-chip";
       chip.textContent = word;
@@ -4574,8 +4584,9 @@ function paintFlowRoster(flows) {
     // The shared helper wires the mouse AND the keyboard (role, tabindex,
     // Enter/Space), so a Flow is selectable without a pointer.
     actsAsButton(item, () => { flowSelected = flow.slug; paintFlows(); });
-    roster.append(item);
+    wanted.push(item);
   }
+  reconcileElementOrder(roster, wanted);
 }
 
 /* The roster's one-line read: where it is bound (hosts, else apps) and how many
@@ -14196,12 +14207,12 @@ listen("automation:completed", (event) => {
   }
 });
 
-// 1분 주기 자동 갱신: 자동화 화면이 열려 있을 때 일정이 지난 작업을 재계산하고 오늘 하이라이트/달력을 최신화
-setInterval(() => {
-  if (!autoView.hidden && document.visibilityState === "visible") {
-    void refreshAutomations();
-  }
-}, 60000);
+// 1분 주기 자동 갱신: 자동화 화면이 열려 있고 창이 보일 때만 타이머를 돌린다(닫히면 타이머 정지).
+const autoClock = idlePoller({
+  wanted: () => !autoView.hidden,
+  every: 60_000,
+  tick: () => void refreshAutomations(),
+});
 
 /* Notification and browser controls are views over the same canonical
  * settings document as theme and terminal. The OS probe is deliberately not
@@ -14667,12 +14678,18 @@ function setAutoOpen(on) {
     recordNavVisit(activeWorktreePath);
   }
   autoView.hidden = !on;
+  autoClock.sync();
   if (!on) {
     closeAutoForm();
     autoAllRuns = [];
     autoJustToggledIds.clear();
     autoPausedOpen = false;
     autoRunsFilter = "all";
+    el("auto-list")?.replaceChildren();
+    el("auto-runs-list")?.replaceChildren();
+    el("auto-cal-days")?.replaceChildren();
+    el("auto-cal-selected-list")?.replaceChildren();
+    el("flow-roster")?.replaceChildren();
   }
   paintRouteWidth();
   paintNavCurrent();

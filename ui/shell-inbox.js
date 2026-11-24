@@ -984,6 +984,11 @@ async function sendInboxReply(item) {
   }
 }
 
+function releaseInboxView(tab) {
+  const host = groups.get(tab.pane)?.inboxView;
+  host?.querySelector(".inbox-list")?.replaceChildren();
+}
+
 /* Close a question without an answer, as the run's seat — the ledger's `question-close`, on the
  * person's one line of why. A question the ledger already holds closed (answered, or closed from the
  * other side) answers `already` and reads the same: closed, with the words given here. */

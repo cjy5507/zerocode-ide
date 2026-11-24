@@ -7056,7 +7056,12 @@ let sidebarTeamAsking = false;
 let sidebarTeamAgain = false;
 let sidebarTeamStood = false;
 let sidebarTeamFrame = 0;
-let sidebarTeamClock = 0;
+let sidebarTeamClockActive = false;
+const sidebarTeamPoller = idlePoller({
+  wanted: () => sidebarTeamClockActive,
+  every: TEAM_CLOCK_MS,
+  tick: scheduleSidebarTeamPaint,
+});
 /* The row nodes by key (`c:<run>`, `w:<run>/<worker>`, and the four lines), the panes' last lines read for
  * tips, and the row the keyboard stands on. */
 const sidebarTeamNodes = new Map();
@@ -7147,12 +7152,13 @@ function standSidebarLayout({ rebuild }) {
 /* The rows' clocks are said again on a slow beat while the team stands — a paint whose words did not move writes
  * nothing. The beat only schedules that paint: it asks the backend nothing. */
 function startSidebarTeamClock() {
-  if (!sidebarTeamClock) sidebarTeamClock = window.setInterval(scheduleSidebarTeamPaint, TEAM_CLOCK_MS);
+  sidebarTeamClockActive = true;
+  sidebarTeamPoller.sync();
 }
 
 function stopSidebarTeamClock() {
-  if (sidebarTeamClock) clearInterval(sidebarTeamClock);
-  sidebarTeamClock = 0;
+  sidebarTeamClockActive = false;
+  sidebarTeamPoller.sync();
 }
 
 /* The words of a time past, as a row's clock says it: 「방금」 under a minute, 「N분 전」 after. */
@@ -15338,8 +15344,26 @@ function paintSpaceTable() {
   for (const id of [...space.picked]) if (!visible.has(id)) space.picked.delete(id);
 
   const host = el("space-rows");
-  host.replaceChildren();
-  for (const row of rows) host.appendChild(spaceTableRow(row));
+  const held = new Map([...host.querySelectorAll(":scope > .space-row")].map((node) => [node.dataset.id, node]));
+  const wanted = [];
+  for (const row of rows) {
+    const picked = space.picked.has(row.id);
+    const selected = row.id === space.selected;
+    const failed = space.errors[row.id] ?? "";
+    const sig = JSON.stringify([
+      locale, row.id, row.name, row.path, row.project_name, row.status, row.size_text,
+      row.ready, row.last_activity_ms, picked, selected, space.busy, failed,
+    ]);
+    const existing = held.get(row.id);
+    if (existing && existing.dataset.spaceSig === sig) {
+      wanted.push(existing);
+      continue;
+    }
+    const built = spaceTableRow(row);
+    built.dataset.spaceSig = sig;
+    wanted.push(built);
+  }
+  reconcileElementOrder(host, wanted);
 
   const empty = el("space-empty");
   const nothing = rows.length === 0;
@@ -15572,6 +15596,12 @@ function setSpaceOpen(on) {
     recordNavVisit(activeWorktreePath);
   }
   spaceView.hidden = !on;
+  if (!on) {
+    el("space-rows")?.replaceChildren();
+    el("space-map")?.replaceChildren();
+    el("space-breakdown")?.replaceChildren();
+    el("space-errors")?.replaceChildren();
+  }
   if (typeof paintNavCurrent === "function") paintNavCurrent();
   spaceClock.sync();
   if (on) {
