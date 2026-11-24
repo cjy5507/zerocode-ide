@@ -666,7 +666,7 @@ impl TaskRegistry {
         if finished {
             inner.background_output.remove(task_id);
         }
-        if !output.is_empty() {
+        if truncated || !output.is_empty() {
             let _ = self.append_task_output(&mut inner, task_id, &output, truncated);
         }
     }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use plugins::bounded_child::note_reaped;
 #[cfg(unix)]
-use plugins::bounded_child::{Group, GroupEnd};
+use plugins::bounded_child::{end_group, Group, GroupEnd};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use tokio::runtime::Builder;
@@ -508,6 +508,34 @@ fn spawn_background_task_watcher(
 
     std::thread::spawn(move || {
         loop {
+            if registry
+                .get(&task_id)
+                .is_some_and(|task| task.status == TaskStatus::Stopped)
+            {
+                // Stop the group before reaping its leader. The leader's pid
+                // still belongs to this child while we send both signals.
+                #[cfg(unix)]
+                let ended = end_group(
+                    child.id(),
+                    Group::Terminate { grace: BASH_GROUP_GRACE },
+                )
+                .is_ok();
+                #[cfg(windows)]
+                let ended = end_process_tree_command(child.id())
+                    .status()
+                    .is_ok_and(|status| status.success());
+                #[cfg(not(any(unix, windows)))]
+                let ended = false;
+                if !ended {
+                    let _ = child.kill();
+                }
+                if child.wait().is_ok() {
+                    registry.refresh_background_output(&task_id, true);
+                    let _ = registry.append_output(&task_id, "[killed by TaskStop]\n");
+                    registry.confirm_background_exit(&task_id);
+                    break;
+                }
+            }
             match child.try_wait() {
                 Ok(Some(status)) => {
                     registry.refresh_background_output(&task_id, true);
@@ -528,18 +556,6 @@ fn spawn_background_task_watcher(
                     break;
                 }
                 Ok(None) => {
-                    if registry
-                        .get(&task_id)
-                        .is_some_and(|task| task.status == TaskStatus::Stopped)
-                    {
-                        let _ = child.kill();
-                        if child.wait().is_ok() {
-                            registry.refresh_background_output(&task_id, true);
-                            let _ = registry.append_output(&task_id, "[killed by TaskStop]\n");
-                            registry.confirm_background_exit(&task_id);
-                            break;
-                        }
-                    }
                     registry.refresh_background_output(&task_id, false);
                     std::thread::sleep(BACKGROUND_WATCH_SLICE);
                 }
@@ -566,6 +582,11 @@ impl TaskRegistry {
         session_id: Option<&str>,
     ) -> io::Result<(String, u32)> {
         let capture = crate::background_log::Capture::redirect(&mut command)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
         let child = command.stdin(Stdio::null()).spawn()?;
         drop(command);
         let pid = child.id();
@@ -2506,6 +2527,48 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn task_stop_kills_the_background_shells_child() {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("child.fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(fifo)
+            .unwrap();
+
+        // The outer shell waits for its child, then runs `:` itself. The
+        // child's pipe stays open until it exits, even if the shell is gone.
+        let command = "sh -c 'printf child-ready; sleep 10' > child.fifo; :";
+        let mut request = unsandboxed(command, SPAWN_TEST_TIMEOUT_MS);
+        request.cwd = Some(dir.path().to_path_buf());
+        request.run_in_background = Some(true);
+        let registry = TaskRegistry::new_in_memory();
+        let started = execute_bash_with_tasks(request, Some(&registry), None).unwrap();
+        let task_id = started.background_task_id.unwrap();
+        let mut bytes = [0; 32];
+        let length = wait_for(Duration::from_secs(5), || {
+            reader.read(&mut bytes).ok().filter(|&length| length > 0)
+        });
+        assert_eq!(&bytes[..length], b"child-ready");
+
+        registry.stop(&task_id).expect("stop the background task");
+        wait_for(Duration::from_secs(3), || {
+            registry
+                .output(&task_id)
+                .ok()
+                .filter(|log| log.ends_with("[killed by TaskStop]\n"))
+        });
+        wait_for(Duration::from_secs(2), || {
+            matches!(reader.read(&mut bytes), Ok(0)).then_some(())
+        });
+    }
+
     #[test]
     fn background_spawn_failure_never_increments_live_count() {
         let registry = TaskRegistry::new_in_memory();
@@ -3278,7 +3341,7 @@ const TAIL_OUTPUT_BYTES: usize = 4 * 1024;
 /// A spill stops growing here; past it the file is removed and the run keeps
 /// only its in-memory head and tail, as before. Sixty-four MiB is far past any
 /// test log and short of a `find /`.
-const RAW_SPILL_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const RAW_SPILL_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Spill files older than this are removed whenever a new one is opened.
 const RAW_SPILL_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -3387,11 +3450,16 @@ fn raw_spill_dir() -> PathBuf {
     std::env::temp_dir().join("zo-bash-raw")
 }
 
-fn open_raw_spill_file() -> io::Result<(std::fs::File, PathBuf)> {
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn prepare_raw_spill_dir() -> io::Result<PathBuf> {
     let dir = raw_spill_dir();
     std::fs::create_dir_all(&dir)?;
     prune_raw_spills(&dir);
+    Ok(dir)
+}
+
+fn open_raw_spill_file() -> io::Result<(std::fs::File, PathBuf)> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = prepare_raw_spill_dir()?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_millis());

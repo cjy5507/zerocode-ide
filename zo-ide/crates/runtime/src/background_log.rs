@@ -27,8 +27,10 @@
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::path::Path;
 use std::process::Command;
 
+use crate::bash::{prepare_raw_spill_dir, RAW_SPILL_LIMIT_BYTES};
 use crate::task_registry::{TaskReach, BACKGROUND_TASK_LIMITS};
 
 /// The name a background bash task carries — its registry description and
@@ -60,8 +62,9 @@ pub(crate) struct Capture {
 
 impl Capture {
     pub(crate) fn redirect(command: &mut Command) -> io::Result<Self> {
-        let (stdout, stdout_writer) = Stream::open()?;
-        let (stderr, stderr_writer) = Stream::open()?;
+        let dir = prepare_raw_spill_dir()?;
+        let (stdout, stdout_writer) = Stream::open(&dir)?;
+        let (stderr, stderr_writer) = Stream::open(&dir)?;
         command.stdout(stdout_writer).stderr(stderr_writer);
         Ok(Self { stdout, stderr })
     }
@@ -88,47 +91,54 @@ struct Stream {
 }
 
 impl Stream {
-    fn open() -> io::Result<(Self, File)> {
+    fn open(dir: &Path) -> io::Result<(Self, File)> {
         let spool = tempfile::Builder::new()
+            .prefix("background-")
+            .suffix(".log")
             .append(true)
-            .tempfile()?;
-        // Reopen for an independent read position, then remove the name.
-        // Unix unlinks immediately. Windows releases a deleted file on close.
+            .tempfile_in(dir)?;
+        // Reopen for an independent cursor and keep the path for spill cleanup
+        // and for the person managing the server after zo exits.
         let file = spool.reopen()?;
-        let (writer, path) = spool.into_parts();
-        path.close()?;
+        let (writer, _) = spool.keep().map_err(|error| error.error)?;
         Ok((Self { file, offset: 0 }, writer))
     }
 
     fn read(&mut self, text: &mut String, label: Option<&str>, finished: bool) -> io::Result<bool> {
         let end = self.file.metadata()?.len();
         let start = self.offset.max(end.saturating_sub(BACKGROUND_TASK_LIMITS.tail_bytes as u64));
-        if start >= end {
-            return Ok(false);
-        }
-
-        // Limit the read to a snapshot of the file. A busy child can keep
-        // appending while TaskOutput or the watcher reads.
-        self.file.seek(SeekFrom::Start(start))?;
-        let mut bytes = Vec::new();
-        self.file.by_ref().take(end - start).read_to_end(&mut bytes)?;
-        if !finished {
-            let last_line_end = bytes.iter().rposition(|&byte| byte == b'\n');
-            bytes.truncate(last_line_end.map_or(0, |end| end + 1));
-        }
-        if bytes.is_empty() {
-            return Ok(false);
-        }
-
-        for line in String::from_utf8_lossy(&bytes).lines() {
-            if let Some(label) = label {
-                text.push_str(&tagged_line(label, line));
-            } else {
-                let _ = writeln!(text, "{line}");
+        let mut skipped = false;
+        let size = if start < end {
+            // A busy child can keep appending while we read this snapshot.
+            self.file.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            self.file.by_ref().take(end - start).read_to_end(&mut bytes)?;
+            if !finished {
+                let last_line_end = bytes.iter().rposition(|&byte| byte == b'\n');
+                bytes.truncate(last_line_end.map_or(0, |end| end + 1));
             }
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                if let Some(label) = label {
+                    text.push_str(&tagged_line(label, line));
+                } else {
+                    let _ = writeln!(text, "{line}");
+                }
+            }
+            if !bytes.is_empty() {
+                skipped = start > self.offset;
+                self.offset = start + bytes.len() as u64;
+            }
+            self.file.metadata().map_or(end, |metadata| metadata.len())
+        } else {
+            end
+        };
+
+        // Reclaim space after reading the available tail. An unfinished
+        // line may be discarded, and the writer still appends at EOF.
+        if size > RAW_SPILL_LIMIT_BYTES as u64 && self.file.set_len(0).is_ok() {
+            skipped |= self.offset < size;
+            self.offset = 0;
         }
-        let skipped = start > self.offset;
-        self.offset = start + bytes.len() as u64;
         Ok(skipped)
     }
 }
@@ -304,8 +314,9 @@ mod tests {
 
         let registry = TaskRegistry::new_in_memory();
         let task_id = registry.create_background_process("command", None, None).task_id;
-        let (stdout, mut stdout_writer) = Stream::open().unwrap();
-        let (stderr, mut stderr_writer) = Stream::open().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let (stdout, mut stdout_writer) = Stream::open(directory.path()).unwrap();
+        let (stderr, mut stderr_writer) = Stream::open(directory.path()).unwrap();
         registry.capture_background_output(&task_id, Capture { stdout, stderr });
 
         stdout_writer.write_all(b"first\npart").unwrap();
@@ -324,6 +335,41 @@ mod tests {
         assert_eq!(
             registry.output(&task_id).unwrap(),
             "first\n[stderr] warning\npartial\n[exit 0]\n",
+        );
+    }
+
+    #[test]
+    fn background_output_resumes_after_truncating_an_oversized_file() {
+        use crate::task_registry::TaskRegistry;
+        use std::io::Write as _;
+
+        let registry = TaskRegistry::new_in_memory();
+        let task_id = registry.create_background_process("command", None, None).task_id;
+        let directory = tempfile::tempdir().unwrap();
+        let (stdout, mut writer) = Stream::open(directory.path()).unwrap();
+        let (stderr, _) = Stream::open(directory.path()).unwrap();
+        let output_file = stdout.file.try_clone().unwrap();
+        registry.capture_background_output(&task_id, Capture { stdout, stderr });
+
+        writer.write_all(b"before\n").unwrap();
+        assert_eq!(registry.output(&task_id).unwrap(), "before\n");
+        output_file.set_len(RAW_SPILL_LIMIT_BYTES as u64).unwrap();
+        writer.write_all(b"partial").unwrap();
+
+        let log = registry.output(&task_id).unwrap();
+        assert_eq!(
+            output_file.metadata().unwrap().len(),
+            0,
+            "the oversized file is still on disk"
+        );
+        assert_eq!(log, OLDER_OUTPUT_TRUNCATED);
+
+        let next_line = b"after\n";
+        writer.write_all(next_line).unwrap();
+        assert_eq!(output_file.metadata().unwrap().len(), next_line.len() as u64);
+        assert_eq!(
+            registry.output(&task_id).unwrap(),
+            format!("{OLDER_OUTPUT_TRUNCATED}after\n")
         );
     }
 

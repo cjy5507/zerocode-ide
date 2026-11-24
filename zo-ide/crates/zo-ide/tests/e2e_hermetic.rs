@@ -10369,8 +10369,8 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.send_response(500 if errors else 200)
         if self.path == "/health":
             files = [os.fstat(fd) for fd in (1, 2)]
-            self.send_header("X-Anonymous-Output", str(all(
-                stat.S_ISREG(file.st_mode) and file.st_nlink == 0 for file in files
+            self.send_header("X-Regular-Output", str(all(
+                stat.S_ISREG(file.st_mode) for file in files
             )))
         self.end_headers()
         self.wfile.write(b"ready")
@@ -10412,13 +10412,19 @@ with HTTPServer(("127.0.0.1", 0), ServerHandler) as server:
             fs::read_to_string(layout.cwd.join("server-write-errors.txt")).ok());
         if path == "health" {
             assert_eq!(
-                response.headers().get("x-anonymous-output").and_then(|header| header.to_str().ok()),
+                response.headers().get("x-regular-output").and_then(|header| header.to_str().ok()),
                 Some("True"),
-                "both output files survive zo with their names removed",
+                "both output streams point to regular files",
             );
         }
         assert_eq!(response.text().await.unwrap(), "ready");
     }
+    let output_dir = layout.state.join("zo-bash-raw");
+    let files: Vec<_> = fs::read_dir(output_dir)
+        .expect("the background output files stay named after zo exits")
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(files, ["served request\nserved request\n"; 2]);
 }
 
 /// t-80732: the 10-28 shape — an example `pkill -f` in backticks inside a
