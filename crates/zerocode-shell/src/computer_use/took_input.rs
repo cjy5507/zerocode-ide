@@ -4,8 +4,9 @@
 //!
 //! Letting an act go and naming the window it went to are two judgements.
 //! The click fence lets a press through over a window the target owns — its
-//! menu, its dropdown — as the target's own, and the focus check lets keys
-//! go while the target stands in front; but a step's evidence is a picture
+//! menu, its dropdown — as the target's own, the focus check lets keys go
+//! while the target stands in front, and the target's accessibility tree
+//! shows elements of a popup of its own; but a step's evidence is a picture
 //! of the window its answer names, so an act names a window only where it
 //! saw that window take the input, and none where it only aimed there.
 //!
@@ -117,11 +118,10 @@ pub(super) enum Road {
 /// How a road sees which window took its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Check<'a> {
-    /// The calls answered: the window they went to is the act's own, by the
-    /// act's word alone — the element's own window is not read.
-    Answered(&'a ElementCalls),
     /// The element its calls went to lives in the act's window — the root
-    /// of its own window handle is that window — and a call answered.
+    /// of its own window handle is that window — and a call answered. An
+    /// element of a popup, or one with no handle of its own, may live
+    /// elsewhere, and a call nobody answered may still have acted there.
     ElementWindow(&'a ElementCalls),
     /// Every press found the act's window itself in front and under the
     /// point, looked at just before it.
@@ -138,8 +138,9 @@ pub(super) enum Check<'a> {
 enum Sight {
     /// It saw the act's window take its input.
     Took,
-    /// It saw nothing take its input, and none of it can have gone to
-    /// another window.
+    /// It saw nothing take its input and leaves the window to the act's
+    /// other roads: none of its input can have gone to another window, or
+    /// it goes with another road that names the window (`Check::Beside`).
     Quiet,
     /// Its input went to another window, or may have.
     Elsewhere,
@@ -152,16 +153,18 @@ impl Road {
     #[must_use]
     pub(super) fn check(&self) -> Check<'_> {
         match self {
-            // Calls on an element of the act's window's tree.
+            // Calls on an element of the act's window's tree, which shows
+            // the elements of a popup of its own too (review t-129079 §1),
+            // and on the element that holds the focus: the window the
+            // element lives in, by its own window handle.
             Self::PressPattern(calls)
             | Self::SecondaryAction(calls)
             | Self::SetText(calls)
             | Self::SetRange(calls)
             | Self::Toggles(calls)
-            | Self::PageScroll(calls) => Check::Answered(calls),
-            // Calls on the element that holds the focus, whose own window
-            // handle the focus check read.
-            Self::FocusedWrite(calls) | Self::SelectAllText(calls) => Check::ElementWindow(calls),
+            | Self::PageScroll(calls)
+            | Self::FocusedWrite(calls)
+            | Self::SelectAllText(calls) => Check::ElementWindow(calls),
             // Presses through the click fence, which looks before each one.
             Self::PressAtElementCentre(presses) | Self::PressAtPoint(presses) => {
                 Check::PressLooks(presses)
@@ -192,19 +195,12 @@ impl Road {
 
     /// What this road says of `window`, the act's window, by its check.
     fn sight(&self, window: u64) -> Sight {
-        let answered = |calls: &ElementCalls| {
-            if calls.answered > 0 {
-                Sight::Took
-            } else {
-                Sight::Quiet
-            }
-        };
         match self.check() {
-            Check::Answered(calls) => answered(calls),
             // A call nobody answered may still have acted — in the element's
             // window, which is the act's own or another.
             Check::ElementWindow(calls) => match calls.window {
-                Some(own) if own == window => answered(calls),
+                Some(own) if own == window && calls.answered > 0 => Sight::Took,
+                Some(own) if own == window => Sight::Quiet,
                 Some(_) | None => Sight::Elsewhere,
             },
             Check::PressLooks(presses) => {

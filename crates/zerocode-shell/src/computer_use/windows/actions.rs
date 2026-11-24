@@ -214,12 +214,17 @@ impl Provider {
                     ));
                 }
             }
-            if modifiers.is_empty() && count <= 1 && button == MouseButton::Left {
-                let performed = uia::primary_click_action(&record.actions)
-                    .filter(|action| uia::perform_action(element, action).is_ok())
-                    .map(str::to_string);
-                if let Some(action) = performed {
-                    self.sent_by(Road::PressPattern(calls_on(element, 1)));
+            if modifiers.is_empty()
+                && count <= 1
+                && button == MouseButton::Left
+                && let Some(action) = uia::primary_click_action(&record.actions)
+            {
+                let answered = uia::perform_action(element, action).is_ok();
+                // On the record either way: a press the element did not
+                // answer may still have acted, in the element's window, and
+                // the presses below follow it.
+                self.sent_by(Road::PressPattern(calls_on(element, usize::from(answered))));
+                if answered {
                     return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
                 }
             }
