@@ -3338,9 +3338,9 @@ fn session_system_prompt(
     if let Some(stored) = stored {
         return Ok(stored.sections);
     }
-    let built = build()?;
-    store_system_prompt(session_path, &built, tool_list, profile);
-    Ok(built)
+    let prompt = build()?;
+    store_system_prompt(session_path, &prompt, tool_list, profile);
+    Ok(prompt)
 }
 
 /// Headless runs share the runtime's boundary inbox; interactive runs keep
