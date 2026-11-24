@@ -15346,7 +15346,7 @@ function paintSpaceTable() {
       row.status, row.size_bytes, row.size_text, row.ready, row.git_checked ?? false,
       row.dirty_files ?? null, row.ahead ?? null, row.lanes ?? null,
       row.blockers ?? null, row.reasons ?? null, row.last_activity_ms,
-      counts.terms, counts.unsaved, picked, selected, space.busy, failed,
+      counts.terminals, counts.unsaved, picked, selected, space.busy, failed,
     ]);
     const existing = held.get(row.id);
     if (existing && existing._spaceSig === sig) {

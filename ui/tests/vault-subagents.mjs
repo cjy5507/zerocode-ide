@@ -100,11 +100,10 @@ export async function testVaultSubagents(page) {
       noteText: vaultViewEl.querySelector(".vault-note").textContent,
     };
     const rowsBeforeClose = vaultViewEl.querySelectorAll(".vault-list .vault-row").length;
-    closeTab(tabs.find(t => t.kind === "vault"));
+    closeTab(tabs.find(t => t.kind === "vault").id);
     const rowsWhileClosed = vaultViewEl.querySelectorAll(".vault-list .vault-row").length;
     openVault();
     const rowsAfterReopen = vaultViewEl.querySelectorAll(".vault-list .vault-row").length;
-    closeTab(tabs.find(t => t.kind === "vault"));
     seen.vaultReopen = { rowsBeforeClose, rowsWhileClosed, rowsAfterReopen };
 
     return seen;
