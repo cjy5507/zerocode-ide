@@ -72,6 +72,17 @@ const PERSON_ONLY_TEXT: &str = "# Clarifying questions";
 const SKILL_LINE_WORDS: &str = "read artifact-design with Skill";
 /// The line a background command starts with while the task tools reach it.
 const TASK_TOOLS_LINE: &str = "Poll output with TaskOutput(task_id), stop with TaskStop.";
+/// The experiment switch of the headless core profile: `core` is its one value.
+const CORE_SWITCH: &str = "ZO_EXPERIMENT_HEADLESS_PROFILE";
+/// The model the core profile's written bytes name: a model the catalog does
+/// not list, at a person's own endpoint — it edits with `apply_patch` and its
+/// identity names no maker, as the measured model's does.
+const CORE_MODEL: &str = "acme-coder-1";
+/// The core profile as its design wrote it, byte for byte: the system text
+/// before its `# Environment` section (with this model's name where the
+/// measured one stood) and the six tools.
+const CORE_PROMPT_STATIC: &str = include_str!("fixtures/headless-core/prompt-static.txt");
+const CORE_TOOLS: &str = include_str!("fixtures/headless-core/tools-apply-patch.json");
 
 /// A catalog overlay that declares `harness` for the measured model.
 fn overlay(harness: Value) -> String {
@@ -172,26 +183,35 @@ fn the_finish_rule_closes_task_work_when_on_and_leaves_no_trace_when_off() {
 
 /// A loopback chat-completions endpoint: every POST is answered with one short
 /// streamed reply, every GET with an empty model list, and each request body
-/// is kept.
+/// is kept as it arrived.
 struct ChatServer {
     base: String,
-    bodies: Arc<Mutex<Vec<Value>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ChatServer {
     fn new() -> Self {
-        Self::answering(None)
+        Self::answering(Vec::new(), false)
     }
 
     /// The endpoint, but a turn that offers tools and holds no tool result yet
     /// is answered with one `Bash` call of `arguments`.
     fn calling_bash(arguments: &Value) -> Self {
-        Self::answering(Some(arguments.to_string()))
+        Self::answering(vec![("Bash".to_string(), arguments.to_string())], false)
     }
 
-    fn answering(bash_arguments: Option<String>) -> Self {
+    /// The endpoint, but a turn request that offers tools and holds `k` tool
+    /// results is answered with the `k`-th of `calls` (a tool's name and its
+    /// arguments), and once they are spent with the short reply. With
+    /// `reasoned`, every answer streams a line of reasoning first, so the
+    /// requests after it carry that reasoning back.
+    fn calling(calls: &[(&str, Value)], reasoned: bool) -> Self {
+        Self::answering(calls.iter().map(|(name, arguments)| ((*name).to_string(), arguments.to_string())).collect(), reasoned)
+    }
+
+    fn answering(calls: Vec<(String, String)>, reasoned: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
         listener.set_nonblocking(true).expect("nonblocking");
         let base = format!("http://{}/v1", listener.local_addr().expect("address"));
@@ -208,14 +228,18 @@ impl ChatServer {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                 let request = read_request(&mut stream);
                 let response = if request.starts_with("POST ") {
-                    let body: Option<Value> = request.split_once("\r\n\r\n").and_then(|(_, body)| serde_json::from_str(body).ok());
-                    let calls = bash_arguments
-                        .as_deref()
-                        .filter(|_| body.as_ref().is_some_and(|body| body.get("tools").is_some() && !holds_tool_result(body)));
-                    if let Some(body) = body {
-                        kept.lock().expect("bodies").push(body);
+                    let raw = request.split_once("\r\n\r\n").map(|(_, body)| body.to_string());
+                    let body: Option<Value> = raw.as_deref().and_then(|body| serde_json::from_str(body).ok());
+                    let step = body.as_ref().filter(|body| body.get("tools").is_some()).map(tool_results);
+                    let call = step.and_then(|step| calls.get(step).map(|call| (step, call)));
+                    let reasoning = reasoned.then(|| format!("Step {} reasoning.", step.unwrap_or_default()));
+                    if let (Some(raw), Some(_)) = (raw, body) {
+                        kept.lock().expect("bodies").push(raw);
                     }
-                    let events = calls.map_or_else(reply_events, bash_call_events);
+                    let events = call.map_or_else(
+                        || reply_events(reasoning.as_deref()),
+                        |(step, (name, arguments))| call_events(step, name, arguments, reasoning.as_deref()),
+                    );
                     let mut stream_body = String::new();
                     for event in &events {
                         stream_body.push_str("data: ");
@@ -236,7 +260,17 @@ impl ChatServer {
 
     /// The bodies kept since the last call, and forget them.
     fn take(&self) -> Vec<Value> {
+        Self::parsed(self.take_raw())
+    }
+
+    /// The bodies kept since the last call as they arrived, byte for byte, and
+    /// forget them.
+    fn take_raw(&self) -> Vec<String> {
         std::mem::take(&mut *self.bodies.lock().expect("bodies"))
+    }
+
+    fn parsed(raw: Vec<String>) -> Vec<Value> {
+        raw.iter().map(|body| serde_json::from_str(body).expect("a kept body is JSON")).collect()
     }
 }
 
@@ -249,28 +283,41 @@ impl Drop for ChatServer {
     }
 }
 
-fn holds_tool_result(body: &Value) -> bool {
-    body["messages"].as_array().is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"))
+/// How many tool results a request carries: the step of its turn it is.
+fn tool_results(body: &Value) -> usize {
+    body["messages"].as_array().map_or(0, |messages| messages.iter().filter(|message| message["role"] == "tool").count())
+}
+
+/// The reasoning an answer streams before its text or call, as a delta of its own.
+fn reasoning_event(id: &str, reasoning: Option<&str>) -> Option<Value> {
+    reasoning.map(|text| json!({"id": id, "choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": null}]}))
 }
 
 /// One short streamed reply that ends the turn.
-fn reply_events() -> Vec<Value> {
-    vec![
-        json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": null}]}),
-        json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
-    ]
+fn reply_events(reasoning: Option<&str>) -> Vec<Value> {
+    reasoning_event("c1", reasoning)
+        .into_iter()
+        .chain([
+            json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": null}]}),
+            json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                   "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
+        ])
+        .collect()
 }
 
-/// One streamed `Bash` call with `arguments` (JSON text).
-fn bash_call_events(arguments: &str) -> Vec<Value> {
-    vec![
-        json!({"id": "c2", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
-            {"index": 0, "id": "call_bash", "type": "function", "function": {"name": "Bash", "arguments": arguments}}
-        ]}, "finish_reason": null}]}),
-        json!({"id": "c2", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
-    ]
+/// One streamed call of the tool `name` with `arguments` (JSON text), the
+/// turn's `step`-th.
+fn call_events(step: usize, name: &str, arguments: &str, reasoning: Option<&str>) -> Vec<Value> {
+    reasoning_event("c2", reasoning)
+        .into_iter()
+        .chain([
+            json!({"id": "c2", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                {"index": 0, "id": format!("call_{step}"), "type": "function", "function": {"name": name, "arguments": arguments}}
+            ]}, "finish_reason": null}]}),
+            json!({"id": "c2", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                   "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
+        ])
+        .collect()
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> String {
@@ -312,13 +359,38 @@ impl Scene {
     fn new() -> Self {
         let root = tempfile::tempdir().expect("scene root");
         let (cwd, home, store) = (root.path().join("workspace"), root.path().join("home"), root.path().join("store"));
-        for path in [&cwd, &home, &store.join("sessions")] {
+        Self::lay_out(&cwd, &home, &store);
+        let cwd = cwd.canonicalize().expect("workspace path");
+        Self { _root: root, cwd, home, store }
+    }
+
+    /// The scene's folders as a new scene has them: empty, and the settings
+    /// every run of the scene reads.
+    fn lay_out(cwd: &Path, home: &Path, store: &Path) {
+        for path in [cwd, home, &store.join("sessions")] {
             std::fs::create_dir_all(path).expect("scene folders");
         }
         std::fs::write(home.join("settings.json"), json!({"smart": {"autoClassifier": "off", "orchestration": "model"}}).to_string())
             .expect("settings");
-        let cwd = cwd.canonicalize().expect("workspace path");
-        Self { _root: root, cwd, home, store }
+    }
+
+    /// Put the scene back as new, at the same paths: what one run left
+    /// (sessions, state, files) is gone before the next.
+    fn reset(&self) {
+        for path in [&self.cwd, &self.home, &self.store] {
+            std::fs::remove_dir_all(path).expect("a scene folder is removed");
+        }
+        Self::lay_out(&self.cwd, &self.home, &self.store);
+    }
+
+    /// Merge `settings` into the scene's settings file.
+    fn add_settings(&self, settings: &Value) {
+        let path = self.home.join("settings.json");
+        let mut merged: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("settings")).expect("settings json");
+        for (key, value) in settings.as_object().expect("settings object") {
+            merged[key] = value.clone();
+        }
+        std::fs::write(&path, merged.to_string()).expect("settings");
     }
 
     fn command(&self, binary: &Path) -> Command {
@@ -346,32 +418,32 @@ impl Scene {
         command
     }
 
+    /// One headless run of `binary` on the scene's endpoint, serving `model`:
+    /// every request body it sends as it arrived, in order, and what it printed.
+    fn run(&self, binary: &Path, server: &ChatServer, model: &str, env: &[(&str, &str)], args: &[&str]) -> Run {
+        let providers = json!([{"name": "Acme", "base_url": server.base, "requires_auth": false, "models": [model]}]).to_string();
+        let mut command = self.command(binary);
+        command.env(api::CUSTOM_PROVIDERS_ENV, providers).envs(env.iter().copied());
+        command.args(["--plain", "--model", &format!("Acme/{model}")]).args(args).arg("x");
+        let output = finish(command);
+        Run {
+            bodies: server.take_raw(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
     /// Every request body one headless run sends, in order, and what it printed.
     fn bodies(&self, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> (Vec<Value>, String) {
-        let providers = json!([{"name": "Acme", "base_url": server.base, "requires_auth": false, "models": [MODEL]}]).to_string();
-        let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_zo")));
-        command.env(api::CUSTOM_PROVIDERS_ENV, providers).envs(env.iter().copied());
-        command.args(["--plain", "--model", &format!("Acme/{MODEL}")]).args(args).arg("x");
-        let output = finish(command);
-        let told = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        (server.take(), told)
+        let run = self.run(Path::new(env!("CARGO_BIN_EXE_zo")), server, MODEL, env, args);
+        let told = run.told();
+        (ChatServer::parsed(run.bodies), told)
     }
 
     /// The system text and the tools of the turn request one headless run sends.
     fn request(&self, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> (Vec<Value>, Value) {
         let (bodies, told) = self.bodies(server, env, &[&["--permission-mode", "workspace-write"][..], args].concat());
-        let turn = bodies
-            .into_iter()
-            .find(|body| body.get("tools").is_some())
-            .unwrap_or_else(|| panic!("no turn request reached the endpoint:\n{told}"));
-        let system = turn["messages"]
-            .as_array()
-            .expect("messages")
-            .iter()
-            .filter(|message| matches!(message["role"].as_str(), Some("system" | "developer")))
-            .cloned()
-            .collect();
-        (system, turn["tools"].clone())
+        turn_of(bodies).unwrap_or_else(|| panic!("no turn request reached the endpoint:\n{told}"))
     }
 
     /// The text of the first tool result a headless run sends back, the run
@@ -405,6 +477,46 @@ impl Scene {
         settings["mcpServers"] = json!({"scene-docs": {"command": self.home.join("no-such-mcp-server").display().to_string(), "args": []}});
         std::fs::write(&path, settings.to_string()).expect("settings");
     }
+}
+
+/// What one headless run sent and printed ([`Scene::run`]).
+struct Run {
+    /// Every request body, byte for byte as it arrived.
+    bodies: Vec<String>,
+    stdout: String,
+    stderr: String,
+}
+
+impl Run {
+    /// The run's stdout and stderr, for a failure message.
+    fn told(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+
+    /// The system messages and the tools of the run's first turn request.
+    fn turn(&self) -> (Vec<Value>, Value) {
+        turn_of(ChatServer::parsed(self.bodies.clone()))
+            .unwrap_or_else(|| panic!("no turn request reached the endpoint:\n{}", self.told()))
+    }
+
+    /// The lines the run printed to stderr that name `words`.
+    fn stderr_naming(&self, words: &str) -> Vec<&str> {
+        self.stderr.lines().filter(|line| line.contains(words)).collect()
+    }
+}
+
+/// The system messages and the tools of the first turn request among
+/// `bodies` (the first that offers tools).
+fn turn_of(bodies: Vec<Value>) -> Option<(Vec<Value>, Value)> {
+    let turn = bodies.into_iter().find(|body| body.get("tools").is_some())?;
+    let system = turn["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| matches!(message["role"].as_str(), Some("system" | "developer")))
+        .cloned()
+        .collect();
+    Some((system, turn["tools"].clone()))
 }
 
 /// A message's text, whether its content is a string or a list of parts.
@@ -447,14 +559,19 @@ fn finish(mut command: Command) -> std::process::Output {
 }
 
 fn tool_names(tools: &Value) -> Vec<String> {
-    let mut names: Vec<String> = tools
+    let mut names = tool_order(tools);
+    names.sort();
+    names
+}
+
+/// The tools' names in the order the request lists them.
+fn tool_order(tools: &Value) -> Vec<String> {
+    tools
         .as_array()
         .expect("a tool list")
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").or_else(|| tool.get("name")).and_then(Value::as_str).map(str::to_string))
-        .collect();
-    names.sort();
-    names
+        .collect()
 }
 
 /// What the experiment measured is what a profile ships: `prompt_set: core` +
@@ -795,4 +912,228 @@ fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
     println!("{}", lines.join("\n"));
     println!("compared {compared} of {} names, {moved} moved ({why})", names.len());
     assert!(compared * 4 >= names.len() * 3, "too few names opened to compare: {compared} of {}", names.len());
+}
+
+/// A run of this build in `scene`: `--permission-mode workspace-write`, then
+/// `args`.
+fn core_scene_run(scene: &Scene, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> Run {
+    let args = [&["--permission-mode", "workspace-write"][..], args].concat();
+    scene.run(Path::new(env!("CARGO_BIN_EXE_zo")), server, CORE_MODEL, env, &args)
+}
+
+/// The value of the environment bullet `label` (`Working directory: `) as the
+/// full text writes it (` - Working directory: /w`).
+fn environment_value<'a>(text: &'a str, label: &str) -> &'a str {
+    text.lines()
+        .find_map(|line| line.strip_prefix(" - ").and_then(|rest| rest.strip_prefix(label)))
+        .unwrap_or_else(|| panic!("no `{label}` bullet in:\n{text}"))
+}
+
+/// The text of the first tool result among `run`'s requests.
+fn first_tool_result(run: &Run) -> String {
+    ChatServer::parsed(run.bodies.clone())
+        .iter()
+        .filter_map(|body| body["messages"].as_array())
+        .flatten()
+        .find(|message| message["role"] == "tool")
+        .map(|message| content_text(&message["content"]))
+        .unwrap_or_else(|| panic!("no tool result reached the endpoint:\n{}", run.told()))
+}
+
+/// E2 of the headless core profile: a run nobody attends and no window holds,
+/// given `ZO_EXPERIMENT_HEADLESS_PROFILE=core`, sends the profile its design
+/// wrote — the short system text byte for byte, then one `# Environment`
+/// section with the working directory, the date, the platform and the sandbox
+/// line the full text carries (less its model line), and six tools: the shell,
+/// `Read`, `Write`, the model's edit shape and the two that reach a background
+/// task. It says so once on stderr; a run without the switch says nothing.
+#[test]
+fn the_core_switch_sends_the_written_core_text_and_six_tools() {
+    let server = ChatServer::new();
+    let scene = Scene::new();
+    let full = core_scene_run(&scene, &server, &[], &[]);
+    let core = core_scene_run(&scene, &server, &[(CORE_SWITCH, "core")], &[]);
+
+    let (core_system, core_tools) = core.turn();
+    assert_eq!(
+        tool_order(&core_tools),
+        ["Bash", "Read", "Write", "apply_patch", "TaskStop", "TaskOutput"],
+        "the core run's six tools, in the registry's order:\n{}",
+        core.told()
+    );
+    let written: Value = serde_json::from_str(CORE_TOOLS).expect("the written tools");
+    assert_eq!(core_tools, written, "the six tools as the design wrote them");
+
+    let text = system_text(&core_system);
+    let full_text = system_text(&full.turn().0);
+    let environment = text
+        .strip_prefix(CORE_PROMPT_STATIC)
+        .unwrap_or_else(|| panic!("the core text opens with the written text, byte for byte:\n{text}"));
+    let expected = ["Working directory: ", "Date: ", "Platform: ", "Sandbox: "]
+        .iter()
+        .fold("# Environment".to_string(), |section, label| {
+            format!("{section}\n- {label}{}", environment_value(&full_text, label))
+        });
+    assert_eq!(environment, expected, "one environment section: the full text's lines, less its model line");
+    assert_eq!(core.stderr_naming(CORE_SWITCH).len(), 1, "the arm says so once:\n{}", core.stderr);
+    assert!(full.stderr_naming(CORE_SWITCH).is_empty(), "a run without the switch says nothing of it:\n{}", full.stderr);
+}
+
+/// E4 of the headless core profile: a value the switch does not know leaves
+/// every request as it was, byte for byte, and is named once on stderr.
+#[test]
+fn a_core_switch_value_zo_does_not_know_leaves_every_request_as_it_was() {
+    let server = ChatServer::new();
+    let scene = Scene::new();
+    let off = core_scene_run(&scene, &server, &[], &[]);
+    assert!(!off.bodies.is_empty(), "the run reached the endpoint:\n{}", off.told());
+    for value in ["foo", "all"] {
+        scene.reset();
+        let unknown = core_scene_run(&scene, &server, &[(CORE_SWITCH, value)], &[]);
+        assert_eq!(unknown.bodies, off.bodies, "{CORE_SWITCH}={value} leaves every request as it was");
+        let said = unknown.stderr_naming(CORE_SWITCH);
+        assert!(said.len() == 1 && said[0].contains(value), "{CORE_SWITCH}={value} is named once:\n{}", unknown.stderr);
+    }
+}
+
+/// E5 of the headless core profile, the part a scene can stage: a run given the
+/// switch that a person or a window may be part of — a launch tool list, an MCP
+/// server or a skill the person attached, a hook, an output style, a pane, an
+/// event channel's address file, a second brain — sends what it sends without
+/// the switch, byte for byte, and says once on stderr why the switch was not
+/// read. (An attached MCP server's discovery runs behind the turn, so that run
+/// is held to its turn request's text and tools.)
+#[test]
+fn the_core_switch_leaves_a_run_a_person_or_a_window_may_be_part_of_as_it_was() {
+    let server = ChatServer::new();
+    let outside = tempfile::tempdir().expect("a folder outside the scene");
+    let vault = outside.path().display().to_string();
+    let addr_file = outside.path().join("events.addr").display().to_string();
+    let hook = |scene: &Scene| scene.add_settings(&json!({"hooks": {"PreToolUse": ["true"]}}));
+    let style = |scene: &Scene| scene.add_settings(&json!({"outputStyle": "Explanatory"}));
+    let nothing = |_: &Scene| {};
+    let cases: [(&str, &dyn Fn(&Scene), Vec<(&str, &str)>, &[&str]); 8] = [
+        ("a launch tool list", &nothing, vec![], &["--allowed-tools", "bash,read_file"]),
+        ("an MCP server", &Scene::attach_mcp_server, vec![], &[]),
+        ("a skill", &Scene::install_skill, vec![], &[]),
+        ("a settings hook", &hook, vec![], &[]),
+        ("an output style", &style, vec![], &[]),
+        ("a pane", &nothing, vec![("ZEROCODE_PANE_KEY", "e5")], &[]),
+        ("an event channel's address file", &nothing, vec![("ZO_EVENTS_ADDR_FILE", addr_file.as_str())], &[]),
+        ("a second brain", &nothing, vec![("ZEROCODE_SECOND_BRAIN", vault.as_str())], &[]),
+    ];
+    for (what, stage, env, args) in cases {
+        let scene = Scene::new();
+        stage(&scene);
+        let off = core_scene_run(&scene, &server, &env, args);
+        scene.reset();
+        stage(&scene);
+        let switched: Vec<(&str, &str)> = env.iter().copied().chain([(CORE_SWITCH, "core")]).collect();
+        let on = core_scene_run(&scene, &server, &switched, args);
+        assert_eq!(
+            serde_json::to_string(&on.turn()).expect("turn"),
+            serde_json::to_string(&off.turn()).expect("turn"),
+            "{what}: the switch leaves the turn request's text and tools as they were"
+        );
+        if what != "an MCP server" {
+            assert_eq!(on.bodies, off.bodies, "{what}: the switch leaves every request as it was");
+        }
+        assert_eq!(on.stderr_naming(CORE_SWITCH).len(), 1, "{what}: one line says why the switch was not read:\n{}", on.stderr);
+        assert!(off.stderr_naming(CORE_SWITCH).is_empty(), "{what}: a run without the switch says nothing of it:\n{}", off.stderr);
+    }
+}
+
+/// The reopen side of the core profile. A core run reopened by a run nobody
+/// attends, without the switch, sends the text and the six tools it opened on,
+/// byte for byte (E5-R2). A run opened without the switch and reopened with it
+/// sends what that reopen sends without it, and says once that the switch was
+/// not read (E5-12): a reopened run keeps what it stored.
+#[test]
+fn a_core_run_reopens_on_what_it_opened_on_and_a_reopen_reads_no_switch() {
+    let server = ChatServer::new();
+    let scene = Scene::new();
+    let opened = core_scene_run(&scene, &server, &[(CORE_SWITCH, "core")], &[]);
+    let reopened = core_scene_run(&scene, &server, &[], &["--continue"]);
+    assert_eq!(tool_order(&opened.turn().1).len(), 6, "the run opened on the core profile:\n{}", opened.told());
+    assert_eq!(
+        serde_json::to_string(&reopened.turn()).expect("turn"),
+        serde_json::to_string(&opened.turn()).expect("turn"),
+        "a reopened core run sends the text and the tools it opened on"
+    );
+    assert!(reopened.stderr_naming(CORE_SWITCH).is_empty(), "nothing to say without the switch:\n{}", reopened.stderr);
+
+    let scene = Scene::new();
+    core_scene_run(&scene, &server, &[], &[]);
+    let plain = core_scene_run(&scene, &server, &[], &["--continue"]);
+    let switched = core_scene_run(&scene, &server, &[(CORE_SWITCH, "core")], &["--continue"]);
+    assert_eq!(
+        serde_json::to_string(&switched.turn()).expect("turn"),
+        serde_json::to_string(&plain.turn()).expect("turn"),
+        "the switch leaves a reopened run as it was"
+    );
+    assert_eq!(switched.stderr_naming(CORE_SWITCH).len(), 1, "one line says why:\n{}", switched.stderr);
+}
+
+/// E6 of the headless core profile: a background command started in a core run
+/// is told to read and stop it with the two task tools the run is given.
+#[test]
+fn a_core_run_reaches_a_background_command_through_the_task_tools() {
+    let server = ChatServer::calling_bash(&json!({"command": "sleep 3", "run_in_background": true}));
+    let scene = Scene::new();
+    let run = scene.run(
+        Path::new(env!("CARGO_BIN_EXE_zo")),
+        &server,
+        CORE_MODEL,
+        &[(CORE_SWITCH, "core")],
+        &["--permission-mode", "danger-full-access"],
+    );
+    let result = first_tool_result(&run);
+    assert!(result.contains("Started background task") && result.contains(TASK_TOOLS_LINE), "{result}");
+}
+
+/// E7 of the headless core profile, the shell's half: the arguments the core
+/// shell does not show are not read — a call that carries one, even of a type
+/// the full shell refuses, runs as its shown arguments say.
+#[test]
+fn a_core_run_reads_no_shell_argument_it_does_not_show() {
+    let hidden = json!({"command": "echo shown-only", "description": 7, "dangerouslyDisableSandbox": "yes"});
+    let args = ["--permission-mode", "danger-full-access"];
+    let zo = Path::new(env!("CARGO_BIN_EXE_zo"));
+    let core = Scene::new().run(zo, &ChatServer::calling_bash(&hidden), CORE_MODEL, &[(CORE_SWITCH, "core")], &args);
+    let full = Scene::new().run(zo, &ChatServer::calling_bash(&hidden), CORE_MODEL, &[], &args);
+    let (core_result, full_result) = (first_tool_result(&core), first_tool_result(&full));
+    assert!(core_result.lines().any(|line| line.trim() == "shown-only"), "the core shell ran the command:\n{core_result}");
+    assert!(!full_result.lines().any(|line| line.trim() == "shown-only"), "the full shell reads what it shows:\n{full_result}");
+}
+
+/// E1 of the headless core profile: without the switch, this build sends what
+/// the baseline build sends, byte for byte — a run's first request, and every
+/// request of a five-step run (four shell calls and an answer, each streamed
+/// after a line of reasoning, so the later requests carry that reasoning
+/// back). `ZO_BASELINE_BIN` names a `zo` built from the commit before the
+/// change (1.1.174 for the change that brought the switch); each build runs in
+/// the scene as new, at the same paths.
+#[test]
+#[ignore = "needs ZO_BASELINE_BIN: a zo built from the commit before the change"]
+fn without_the_core_switch_a_run_sends_what_the_baseline_build_sends() {
+    let baseline = PathBuf::from(std::env::var_os("ZO_BASELINE_BIN").expect("ZO_BASELINE_BIN names the baseline zo"));
+    let this_build = Path::new(env!("CARGO_BIN_EXE_zo"));
+    let steps: Vec<(&str, Value)> = ["pwd", "ls", "echo three", "printf 'four\\n'"]
+        .into_iter()
+        .map(|command| ("Bash", json!({"command": command, "description": "step"})))
+        .collect();
+    let args = ["--permission-mode", "danger-full-access"];
+    for (what, calls) in [("the first request", &steps[..0]), ("a five-step run", &steps[..])] {
+        let server = ChatServer::calling(calls, true);
+        let scene = Scene::new();
+        let before = scene.run(&baseline, &server, CORE_MODEL, &[], &args);
+        scene.reset();
+        let after = scene.run(this_build, &server, CORE_MODEL, &[], &args);
+        let turns = ChatServer::parsed(after.bodies.clone()).iter().filter(|body| body.get("tools").is_some()).count();
+        assert_eq!(turns, calls.len() + 1, "{what}: every step reached the endpoint:\n{}", after.told());
+        assert_eq!(before.bodies.len(), after.bodies.len(), "{what}: as many requests:\n{}\n{}", before.told(), after.told());
+        for (index, (was, is)) in before.bodies.iter().zip(&after.bodies).enumerate() {
+            assert_eq!(was, is, "{what}: request {index} differs from the baseline's");
+        }
+    }
 }

@@ -1,0 +1,136 @@
+[
+ {
+  "type": "function",
+  "function": {
+   "name": "Bash",
+   "description": "Run a bash command in the working directory; returns its output and exit code. For servers and long jobs set run_in_background, then read its output with TaskOutput and stop it with TaskStop.",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "command": {
+      "type": "string"
+     },
+     "run_in_background": {
+      "type": "boolean"
+     },
+     "timeout": {
+      "description": "Milliseconds; default 120000; values below 1000 use it.",
+      "minimum": 1,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "command"
+    ],
+    "type": "object"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "Read",
+   "description": "Read a workspace text file, image or PDF page. For a long file read the needed part with offset (first line, 1-based) and limit (lines). A whole code-file read ends with [neighbours].",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "file_path": {
+      "type": "string"
+     },
+     "limit": {
+      "minimum": 1,
+      "type": "integer"
+     },
+     "offset": {
+      "minimum": 1,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "file_path"
+    ],
+    "type": "object"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "Write",
+   "description": "Create a file or replace a whole file; missing folders are created. Read an existing file before replacing it. Use apply_patch to change part of a file.",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "content": {
+      "type": "string"
+     },
+     "file_path": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "file_path",
+     "content"
+    ],
+    "type": "object"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "apply_patch",
+   "description": "Edit workspace files with one patch: `*** Begin Patch`, then per file `*** Add File: p` (+lines), `*** Delete File: p`, or `*** Update File: p` (optional `*** Move to: q`) with `@@` hunks of ' ' context, '-' old, '+' new lines; end `*** End Patch`. All or nothing.",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "input": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "input"
+    ],
+    "type": "object"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "TaskStop",
+   "description": "Stop a running background task by ID.",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "task_id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object"
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "TaskOutput",
+   "description": "Retrieve the output produced by a background task.",
+   "parameters": {
+    "additionalProperties": false,
+    "properties": {
+     "task_id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "task_id"
+    ],
+    "type": "object"
+   }
+  }
+ }
+]
