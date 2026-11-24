@@ -500,19 +500,51 @@ fn await_pane_channel_addr(
     }
 }
 
-/// The last non-empty line an ended pane left on its terminal, as the clause a
-/// refusal carries (` — resume failed: …`), or nothing when it said nothing.
+/// The last non-empty paragraph an ended pane left on its terminal, as the
+/// clause a refusal carries (` — resume failed: …`), or nothing when it said
+/// nothing. PTY widths (80-100 cols) soft-wrap multi-sentence refusals across
+/// several consecutive lines; reading only the final line truncated errors to
+/// fragments like `, or reopen it on another model (\`--model <name>\`).`.
 /// The output is pumped here because nobody else has read this pty yet.
 fn last_words_of(pty: &mut PtyHandle) -> String {
     pty.pump();
-    pty.terminal()
-        .grid()
-        .visible_text()
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .map(|line| format!(" — {}", line.chars().take(240).collect::<String>()))
-        .unwrap_or_default()
+    extract_last_words(&pty.terminal().grid().visible_text())
+}
+
+fn extract_last_words(visible: &str) -> String {
+    const MAX_LINES: usize = 4;
+    const MAX_CHARS: usize = 320;
+    let lines: Vec<&str> = visible.lines().map(str::trim).collect();
+    let Some(end) = lines.iter().rposition(|line| !line.is_empty()) else {
+        return String::new();
+    };
+    let mut kept = Vec::with_capacity(MAX_LINES);
+    for &line in lines[..=end].iter().rev() {
+        if line.is_empty() {
+            break;
+        }
+        // Stop before earlier diagnostic/status banners once we already hold
+        // the refusal text itself.
+        if !kept.is_empty()
+            && (line.starts_with("[zo]")
+                || line.starts_with("zo: process exit")
+                || line.starts_with("Using Claude Code session credentials"))
+        {
+            break;
+        }
+        kept.push(line);
+        if kept.len() >= MAX_LINES {
+            break;
+        }
+    }
+    kept.reverse();
+    let joined = kept.join(" ");
+    let clipped: String = joined.chars().take(MAX_CHARS).collect();
+    if clipped.is_empty() {
+        String::new()
+    } else {
+        format!(" — {clipped}")
+    }
 }
 
 /// Check that a loopback listener speaks the session protocol and accepts the
@@ -660,3 +692,34 @@ fn detach(command: &mut Command) {
 
 #[cfg(not(any(unix, windows)))]
 fn detach(_command: &mut Command) {}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_last_words;
+
+    #[test]
+    fn wrapped_multiline_refusal_keeps_full_reason_without_diagnostic_banner() {
+        let screen = concat!(
+            "[zo] model discovery: 33 model(s) cached\n",
+            "Using Claude Code session credentials.\n",
+            "This conversation ran on `acme/model-a` at your provider `acme`, which no longer\n",
+            "serves it. zo does not reopen it anywhere else: put the row back,\n",
+            "or reopen it on another model (`--model <name>`).\n",
+        );
+        let said = extract_last_words(screen);
+        assert!(
+            said.contains("This conversation ran on `acme/model-a`")
+                && said.contains("or reopen it on another model (`--model <name>`)."),
+            "wrapped refusal truncated: {said:?}"
+        );
+        assert!(
+            !said.contains("model discovery") && !said.contains("Claude Code session"),
+            "diagnostic banners leaked into refusal: {said:?}"
+        );
+    }
+
+    #[test]
+    fn blank_screen_produces_empty_clause() {
+        assert_eq!(extract_last_words("   \n\n  "), "");
+    }
+}

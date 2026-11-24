@@ -1723,6 +1723,17 @@ static LAST_PUBLISHED_DISCOVERY: std::sync::atomic::AtomicU64 = std::sync::atomi
 /// session start and a picker open during it wait for its answer instead of
 /// asking the providers twice.
 static DISCOVERY_REFRESH_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Epoch seconds of the last discovery refresh launched by this process.
+/// Session startup calls `connect_model_catalog()` twice back-to-back
+/// (`preferences_behind_the_catalog` + `apply_model_wire_env`); when any
+/// provider fails (e.g. an expired xAI login), both calls would otherwise
+/// re-run full provider discovery and keychain lookups milliseconds apart.
+static LAST_DISCOVERY_REFRESH_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const DISCOVERY_PROCESS_COOLDOWN_SECS: u64 = 30;
+
+fn discovery_refresh_in_cooldown(last_at: u64, now: u64) -> bool {
+    last_at > 0 && now.saturating_sub(last_at) < DISCOVERY_PROCESS_COOLDOWN_SECS
+}
 
 /// The `/model` picker is opening: make a refresh that finished since the
 /// last publish live (the picker reads the published catalog), and ask
@@ -1807,19 +1818,25 @@ fn spawn_model_discovery_refresh(policy: runtime::model_discovery::UpdatePolicy)
     }
     let now = runtime::model_discovery::now_secs();
     let ttl = runtime::model_discovery::ttl_secs();
+    if discovery_refresh_in_cooldown(LAST_DISCOVERY_REFRESH_AT.load(Ordering::Acquire), now) {
+        return;
+    }
     if DISCOVERY_REFRESH_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return;
     }
+    LAST_DISCOVERY_REFRESH_AT.store(now, Ordering::Release);
     let spawned = std::thread::Builder::new()
         .name("zo-model-discovery".to_string())
         .spawn(move || {
             refresh_model_discovery_cache(now, ttl);
+            LAST_DISCOVERY_REFRESH_AT.store(runtime::model_discovery::now_secs(), Ordering::Release);
             DISCOVERY_REFRESH_RUNNING.store(false, Ordering::Release);
         });
     if let Err(error) = spawned {
+        LAST_DISCOVERY_REFRESH_AT.store(0, Ordering::Release);
         DISCOVERY_REFRESH_RUNNING.store(false, Ordering::Release);
         eprintln!("[zo] model discovery thread failed to start: {error}");
     }
@@ -1890,6 +1907,38 @@ pub(crate) fn spawn_orphaned_agent_reap(registry: &std::sync::Arc<tools::AgentRe
 /// Boot-time delay for the retention sweep so its store-wide walk never
 /// competes with the interactive warm-up for disk/CPU on low-spec machines.
 const STARTUP_SWEEP_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+/// Minimum interval between store-wide retention sweeps across concurrent `zo`
+/// processes (e.g. 4-5 restored panes starting together on app restart).
+const RETENTION_SWEEP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Claim the cross-process retention sweep stamp if no other `zo` process swept
+/// within `cooldown`. Uses `create_new(true)` after pruning a stale stamp so
+/// only one restarting pane walks every project store on disk.
+fn claim_retention_sweep_slot(
+    stamp_path: &std::path::Path,
+    now: std::time::SystemTime,
+    cooldown: std::time::Duration,
+) -> bool {
+    if let Ok(modified) = std::fs::metadata(stamp_path).and_then(|meta| meta.modified()) {
+        // Treat a stamp newer than `now` (concurrent peer or sub-ms clock skew)
+        // as fresh so simultaneous panes never remove each other's claim.
+        let expired = now
+            .duration_since(modified)
+            .is_ok_and(|age| age >= cooldown);
+        if !expired {
+            return false;
+        }
+    }
+    if let Some(parent) = stamp_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::remove_file(stamp_path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(stamp_path)
+        .is_ok()
+}
 
 fn spawn_session_retention_cleanup(config: &runtime::RuntimeConfig) {
     use std::sync::OnceLock;
@@ -1904,6 +1953,15 @@ fn spawn_session_retention_cleanup(config: &runtime::RuntimeConfig) {
             // warm-up (first paint, first prompt) is past; a session shorter
             // than the delay simply defers the sweep to the next boot.
             std::thread::sleep(STARTUP_SWEEP_DELAY);
+            let stamp = runtime::session_control::managed_projects_root()
+                .join(".retention-last-sweep");
+            if !claim_retention_sweep_slot(
+                &stamp,
+                std::time::SystemTime::now(),
+                RETENTION_SWEEP_COOLDOWN,
+            ) {
+                return;
+            }
             // Age out content-addressed tool-output artifacts on the same
             // retention horizon. Only the workflow retention path retires
             // artifacts by hash, so ordinary tool-output artifacts would
@@ -2057,6 +2115,7 @@ fn claude_login_look_due(
 fn claude_login_found() -> bool {
     let was_missing = claude_login_missing().take().is_some();
     if was_missing {
+        LAST_DISCOVERY_REFRESH_AT.store(0, std::sync::atomic::Ordering::Release);
         spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
     }
     was_missing
@@ -4656,5 +4715,39 @@ mod headless_color_tests {
             }
             assert_eq!(String::from_utf8(buf).unwrap(), "plain, no escapes\n");
         }
+    }
+
+    #[test]
+    fn discovery_cooldown_blocks_immediate_duplicate_and_allows_after_window() {
+        use crate::runtime_support::discovery_refresh_in_cooldown;
+        assert!(!discovery_refresh_in_cooldown(0, 1_000));
+        assert!(discovery_refresh_in_cooldown(1_000, 1_000));
+        assert!(discovery_refresh_in_cooldown(1_000, 1_029));
+        assert!(!discovery_refresh_in_cooldown(1_000, 1_030));
+    }
+
+    #[test]
+    fn retention_sweep_slot_admits_only_one_process_within_cooldown() {
+        use crate::runtime_support::claim_retention_sweep_slot;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = dir.path().join(".retention-last-sweep");
+        let now = std::time::SystemTime::now();
+        let cooldown = std::time::Duration::from_secs(3_600);
+        assert!(
+            claim_retention_sweep_slot(&stamp, now, cooldown),
+            "first process claims the sweep slot"
+        );
+        assert!(
+            !claim_retention_sweep_slot(&stamp, now, cooldown),
+            "second concurrent process skips the sweep within cooldown"
+        );
+        assert!(
+            claim_retention_sweep_slot(
+                &stamp,
+                now + cooldown + std::time::Duration::from_secs(1),
+                cooldown,
+            ),
+            "sweep runs again once cooldown expires"
+        );
     }
 }
