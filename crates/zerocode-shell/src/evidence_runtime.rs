@@ -1655,6 +1655,124 @@ mod tests {
         );
     }
 
+    /// A Windows act's answer names its window only when the provider saw
+    /// that window take the act's input (review t-129021 §3), so its look of
+    /// that window frames its step only then. An element of the window's own
+    /// tree worked, a press the click fence let through only over it, keys
+    /// sent with the window itself in front: the look, drawn by the window,
+    /// is the step's frame. A wheel or a drag sent at a point of the screen,
+    /// which whatever window stands there takes; keys sent while another
+    /// window of the app stood in front over it, which the focus check lets
+    /// pass; text written into the focused element that only its process
+    /// ties to the window: the look shows the window the act was aimed at,
+    /// not one its input is known to have reached, so no picture is kept and
+    /// the line says why. Every case is framed before the one assertion reads
+    /// them all.
+    #[test]
+    fn a_windows_act_frames_its_window_only_when_the_window_was_seen_to_take_its_input() {
+        use zerocode_core::computer_use_protocol::{
+            ActionMetadata, ActionPath, ScreenshotMetadata, ScreenshotStatus,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("look.png");
+        std::fs::write(&file, PNG).unwrap();
+        // The provider's answer to `method`, aimed at window 19 of process
+        // 501 (`current_snapshot`), whose road (`path`) saw window `took`
+        // take its input — and whose look after it is of window 19, drawn
+        // by it.
+        let answered_on_windows = |method: &str, path: ActionPath, took: Option<u64>| {
+            let mut action = ActionMetadata::new(path);
+            action.target_window_id = 19;
+            action.acted_window = ActedWindow { id: 19, pid: 501 }.if_it_took(took);
+            let result = serde_json::json!({
+                "snapshot": {
+                    "app": { "name": "Notepad", "pid": 501 },
+                    "window": { "id": 19, "x": 10, "y": 20, "width": 800, "height": 600 },
+                },
+                "screenshot": { "path": file, "scale": 1.0 },
+                "screenshotStatus": ScreenshotStatus::Captured(ScreenshotMetadata {
+                    engine: "printWindow".to_string(),
+                    window_id: 19,
+                }),
+                "action": action,
+            });
+            let act =
+                zerocode_core::computer_use_protocol::execution::acted(method, false, &result);
+            let mut answer = answered(true);
+            answer.stdout = format!("{}\n", serde_json::json!({ "ok": true, "result": result }));
+            (answer, act)
+        };
+        // `step` is the words that ran; the frame goes by the act its answer
+        // names.
+        let framed = |step: &[&str], method: &str, path: ActionPath, took: Option<u64>| {
+            let (answer, acted) = answered_on_windows(method, path, took);
+            match computer_frame(dir.path(), true, false, &words(step), &answer, acted) {
+                Frame::Own(_) => Ok(serde_json::json!("the picture its answer carries")),
+                frame => asked(frame),
+            }
+        };
+        let press_return = ["press-key", "--app", "Notepad", "--key", "Return"];
+        let seen = [
+            // The click fence let the press through over window 19.
+            framed(
+                &["click", "--app", "Notepad", "--x", "400", "--y", "300"],
+                "click",
+                ActionPath::Synthetic,
+                Some(19),
+            ),
+            // Window 19 itself was in front when the keys went.
+            framed(&press_return, "pressKey", ActionPath::Synthetic, Some(19)),
+            // The wheel at a point of the screen: nobody looked who took it.
+            framed(
+                &[
+                    "scroll",
+                    "--app",
+                    "Notepad",
+                    "--x",
+                    "400",
+                    "--y",
+                    "300",
+                    "--direction",
+                    "down",
+                ],
+                "scroll",
+                ActionPath::Synthetic,
+                None,
+            ),
+            // A drag between points of the screen: the same.
+            framed(
+                &[
+                    "drag", "--app", "Notepad", "--from-x", "100", "--from-y", "100", "--to-x",
+                    "400", "--to-y", "300",
+                ],
+                "drag",
+                ActionPath::Synthetic,
+                None,
+            ),
+            // Window 23 of the same app stood in front over window 19.
+            framed(&press_return, "pressKey", ActionPath::Synthetic, Some(23)),
+            // The focused element took the text through its Value pattern,
+            // and named no window of its own: only its process, 501.
+            framed(
+                &["type-text", "--app", "Notepad", "--text", "a"],
+                "typeText",
+                ActionPath::Accessibility,
+                None,
+            ),
+        ];
+        let own = || -> Result<serde_json::Value, Option<FrameSkipped>> {
+            Ok(serde_json::json!("the picture its answer carries"))
+        };
+        let unseen = || -> Result<serde_json::Value, Option<FrameSkipped>> {
+            Err(Some(FrameSkipped::WindowUnavailable))
+        };
+        assert_eq!(
+            seen,
+            [own(), own(), unseen(), unseen(), unseen(), unseen()],
+            "a Windows act's look frames its step only when its window was seen to take the input"
+        );
+    }
+
     /// A surface framed the way a desktop step's capture is keyed, whose
     /// frame is always the same picture.
     struct Pictured(Capture);

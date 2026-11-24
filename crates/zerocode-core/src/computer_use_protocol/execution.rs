@@ -267,6 +267,18 @@ pub struct ActedWindow {
     pub pid: u64,
 }
 
+impl ActedWindow {
+    /// This window, for the answer of an act aimed at it to name
+    /// (`actedWindow`), given the window its provider saw take the act's
+    /// input (`took_input`, by its number). As the Windows provider answers
+    /// today: every act names the window it checked itself against
+    /// (`current_snapshot`), whatever took its input.
+    #[must_use]
+    pub fn if_it_took(self, _took_input: Option<u64>) -> Option<Self> {
+        Some(self)
+    }
+}
+
 /// The word an app act's answer names the window it acted in by, in its
 /// `action` (`id`, `pid`): the window the helper checked the act against
 /// when it acted, whatever window the look after the act lands on.
