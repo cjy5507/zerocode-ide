@@ -75,6 +75,24 @@ pub enum ReplaceOutcome {
     Applied(Verification),
 }
 
+impl ReplaceOutcome {
+    /// Whether the field answered a write: `false` for a write that never
+    /// came back (`write_unconfirmed`), which may have changed the value
+    /// though nothing saw the field take it, and for a road not taken, which
+    /// wrote nothing. A provider names the window a write went to only when
+    /// the field answered it (review t-129057 §1).
+    #[must_use]
+    pub fn write_answered(&self) -> bool {
+        match self {
+            Self::NotApplicable(_) => false,
+            Self::Applied(Verification::Unverified { reason, .. }) => {
+                reason != unverified_reason::WRITE_UNCONFIRMED
+            }
+            Self::Applied(Verification::Verified { .. }) => true,
+        }
+    }
+}
+
 /// Replace the selection of `field` with `text` and read the result back.
 pub fn replace_selection(field: &impl TextField, text: &str) -> ReplaceOutcome {
     let current = match field.read() {
@@ -414,5 +432,28 @@ mod tests {
             ))
         );
         assert_eq!(unconfirmed.writes.borrow().len(), 1);
+    }
+
+    /// A provider names the window a write went to only when the field
+    /// answered it (review t-129057 §1): a write that came back is answered
+    /// whatever its readback says; one that never came back may have changed
+    /// the value but is not; a road not taken wrote nothing.
+    #[test]
+    fn only_a_write_the_field_came_back_from_is_answered() {
+        let read_back = FakeField::new("v").reads_back("vx");
+        let unread = FakeField::new("v").readback_fails();
+        let unconfirmed = FakeField {
+            write_answer: Err(WriteFailure::Unconfirmed("UIA_E_TIMEOUT".into())),
+            ..FakeField::new("v")
+        };
+        let refused = FakeField {
+            write_answer: Err(WriteFailure::Refused("E_NOTIMPL".into())),
+            ..FakeField::new("v")
+        };
+        assert_eq!(
+            [&read_back, &unread, &unconfirmed, &refused]
+                .map(|field| replace_selection(field, "x").write_answered()),
+            [true, true, false, false]
+        );
     }
 }

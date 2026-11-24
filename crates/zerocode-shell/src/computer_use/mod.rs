@@ -29,9 +29,10 @@ pub mod repeat;
 mod screenshot_export;
 mod session;
 // The Windows session's platform-neutral halves: pointer arithmetic, a
-// provider on a thread and a PNG within budget. Compiled into every test
-// build so their tests run on the developer's machine, and into the Windows
-// binary that uses them.
+// provider on a thread, a PNG within budget and the window an act's input
+// was seen to reach (`took_input`). Compiled into every test build so their
+// tests run on the developer's machine, and into the Windows binary that
+// uses them.
 #[cfg(any(target_os = "windows", test))]
 mod clipboard_formats;
 pub mod compare;
@@ -65,6 +66,8 @@ pub mod state;
 pub(crate) mod surface_execution;
 #[cfg(any(target_os = "windows", test))]
 mod thread;
+#[cfg(any(target_os = "windows", test))]
+mod took_input;
 #[cfg(any(target_os = "windows", test))]
 mod typed_text;
 
