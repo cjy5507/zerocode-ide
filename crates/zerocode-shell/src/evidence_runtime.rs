@@ -42,6 +42,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use zerocode_core::computer_use::ComputerMethod;
+use zerocode_core::computer_use_protocol::execution::Acted;
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
 
 use run_evidence::{FrameSkipped, Framing};
@@ -454,7 +455,12 @@ fn desktop_capture(result: Option<&serde_json::Value>) -> Capture {
 /// no picture, and the line says why. A step that took the desk is framed
 /// as before (`desktop_capture`). `argv` is the words that ran — a walk's
 /// step as it was sent, which may name the app its recipe's words do not.
-fn desktop_frame(argv: &[String], result: Option<&serde_json::Value>) -> Frame<Capture> {
+/// `_acted` is what the step's act did, as the helper answered it.
+fn desktop_frame(
+    argv: &[String],
+    result: Option<&serde_json::Value>,
+    _acted: Option<Acted>,
+) -> Frame<Capture> {
     let Some(ran) = zerocode_core::computer_use::parse_command(argv)
         .ok()
         .filter(zerocode_core::computer_use_protocol::execution::went_in_the_background)
@@ -610,7 +616,7 @@ pub(super) fn leave_computer_evidence(
         return;
     };
     let frame = frame_of(dir, frames, capped, answer, |result| {
-        desktop_frame(argv, result)
+        desktop_frame(argv, result, None)
     });
     send(Message::Step(Job::new(
         dir,
@@ -675,6 +681,7 @@ pub(super) fn leave_arena_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zerocode_core::computer_use_protocol::execution::ActedWindow;
 
     const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0];
 
@@ -711,7 +718,7 @@ mod tests {
         }
     }
 
-    fn step(dir: &Path, verb: &str, frame: Frame<Fixed>) -> Message<Fixed> {
+    fn step<S: Surface>(dir: &Path, verb: &str, frame: Frame<S>) -> Message<S> {
         Message::Step(Job::new(
             dir,
             "computer",
@@ -1085,13 +1092,14 @@ mod tests {
         let mut foreground = click.clone();
         foreground.push("--foreground".into());
         assert_eq!(
-            asked(desktop_frame(&foreground, looked.as_ref())),
+            asked(desktop_frame(&foreground, looked.as_ref(), None)),
             Ok(region.clone()),
             "a step that took the desk: its window's region of the screen, as before"
         );
         assert_eq!(
             asked(desktop_frame(
                 &words(&["mouse-click", "--x", "1", "--y", "1", "--foreground"]),
+                None,
                 None
             )),
             Ok(serde_json::json!({})),
@@ -1099,23 +1107,27 @@ mod tests {
         );
         if !cfg!(target_os = "macos") {
             // No background road here: no step went down one.
-            assert_eq!(asked(desktop_frame(&click, looked.as_ref())), Ok(region));
+            assert_eq!(
+                asked(desktop_frame(&click, looked.as_ref(), None)),
+                Ok(region)
+            );
             return;
         }
         assert_eq!(
-            asked(desktop_frame(&click, looked.as_ref())),
+            asked(desktop_frame(&click, looked.as_ref(), None)),
             Ok(serde_json::json!({ "windowOnly": 7 })),
             "a background step asks for its window alone, never a region of the screen"
         );
         assert_eq!(
-            asked(desktop_frame(&click, deferred.as_ref())),
+            asked(desktop_frame(&click, deferred.as_ref(), None)),
             Ok(serde_json::json!({ "windowOnly": 9 })),
             "an act answered without a look names the window it went to"
         );
         assert_eq!(
             asked(desktop_frame(
                 &words(&["press-key", "--app", "TextEdit", "--key", "cmd+n", "--json"]),
-                deferred.as_ref()
+                deferred.as_ref(),
+                None
             )),
             Ok(serde_json::json!({ "windowOnly": 9 })),
             "a walk's step as it ran: the recipe's desktop `key` went to the app"
@@ -1131,6 +1143,7 @@ mod tests {
                     "--element-index",
                     "3",
                 ]),
+                None,
                 None
             )),
             Ok(serde_json::json!({ "windowOnly": 5 })),
@@ -1142,11 +1155,228 @@ mod tests {
             (&launch, result(serde_json::json!({ "windows": 1 }))),
         ] {
             assert_eq!(
-                asked(desktop_frame(step, answer.as_ref())),
+                asked(desktop_frame(step, answer.as_ref(), None)),
                 Err(Some(FrameSkipped::WindowUnavailable)),
                 "{step:?}: no window to name, so no picture — never the whole display"
             );
         }
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    /// A step's result, as its envelope carries it to the writer.
+    fn answered_with(result: serde_json::Value) -> Option<serde_json::Value> {
+        let mut answer = answered(true);
+        answer.stdout = format!("{}\n", serde_json::json!({ "ok": true, "result": result }));
+        result_of(&answer)
+    }
+
+    /// What a step's act did, as the helper answered it: whether it went no
+    /// further than its window, and that window (number, owner) if named.
+    fn heard(in_its_window: bool, window: Option<(u64, u64)>) -> Option<Acted> {
+        Some(Acted {
+            in_its_window,
+            window: window.map(|(id, pid)| ActedWindow { id, pid }),
+        })
+    }
+
+    /// A step is framed by the road its act ran, as the helper answered it —
+    /// not by its words read again (I-t123731-rc1, review t-128744 §1). The
+    /// shared desktop sends a mark click asked `--foreground` to the
+    /// background (the mark's press carries no `--foreground`), and a click
+    /// asked `--background --foreground` goes there too: each is framed as
+    /// the window it went to, alone — never the screen around it. An act the
+    /// helper ran on the desk instead, by borrowing the desktop, is framed by
+    /// its window's region of the screen, as before.
+    #[test]
+    fn a_step_is_framed_by_the_road_its_act_ran_not_by_its_words() {
+        let looked = answered_with(serde_json::json!({
+            "action": { "targetWindowId": 7, "background": { "requested": true } },
+            "snapshot": { "window": { "id": 7, "x": 10, "y": 20, "width": 800, "height": 600 } },
+        }));
+        for asked_for in [
+            words(&[
+                "click",
+                "--mark",
+                "3",
+                "--look",
+                "L1",
+                "--foreground",
+                "--json",
+            ]),
+            words(&[
+                "click",
+                "--app",
+                "Notes",
+                "--element-index",
+                "3",
+                "--background",
+                "--foreground",
+                "--json",
+            ]),
+        ] {
+            assert_eq!(
+                asked(desktop_frame(
+                    &asked_for,
+                    looked.as_ref(),
+                    heard(true, Some((7, 501)))
+                )),
+                Ok(serde_json::json!({ "windowOnly": 7, "windowOwner": 501 })),
+                "{asked_for:?} went in the background: its window alone, never the screen"
+            );
+        }
+        let borrowed = answered_with(serde_json::json!({
+            "action": { "targetWindowId": 7, "borrowedDesktop": true },
+            "snapshot": { "window": { "id": 7, "x": 10, "y": 20, "width": 800, "height": 600 } },
+        }));
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&["click", "--app", "Notes", "--element-index", "3", "--json"]),
+                borrowed.as_ref(),
+                heard(false, Some((7, 501)))
+            )),
+            Ok(serde_json::json!({
+                "region": { "x": 10.0, "y": 20.0, "width": 800.0, "height": 600.0 }
+            })),
+            "the helper borrowed the desktop: the window's region of the screen, as before"
+        );
+    }
+
+    /// A window moved, sized, minimized, zoomed or closed by its number is
+    /// framed as that window alone — the act touched nothing else, with or
+    /// without `--foreground` — never as the whole display, whose other
+    /// windows may be a person's (I-t123731-rc1, review t-128744 §1). Its
+    /// answer has no look to give a region by. Focusing a window brings its
+    /// app in front of the person: the screen, as before.
+    #[test]
+    fn a_window_moved_by_its_number_is_framed_as_that_window_alone() {
+        let window = |action: &str| {
+            answered_with(serde_json::json!({
+                "windowId": 17,
+                "pid": 501,
+                "action": action,
+                "frame": { "x": 10, "y": 20, "width": 320, "height": 200 },
+            }))
+        };
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&[
+                    "window-move",
+                    "--id",
+                    "17",
+                    "--x",
+                    "10",
+                    "--y",
+                    "20",
+                    "--json"
+                ]),
+                window("move").as_ref(),
+                heard(true, Some((17, 501)))
+            )),
+            Ok(serde_json::json!({ "windowOnly": 17, "windowOwner": 501 })),
+            "the moved window alone, by its number and its owner"
+        );
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&["window-focus", "--id", "17", "--json"]),
+                window("focus").as_ref(),
+                heard(false, Some((17, 501)))
+            )),
+            Ok(serde_json::json!({})),
+            "a window brought in front: the screen, as before"
+        );
+    }
+
+    /// A step is framed by the window its act went to, as the helper found
+    /// it then — its number and its owner — not by the window a look after
+    /// the act lands on, which may be another window of the same app once
+    /// the focus moved (I-t123731-rc1, review t-128744 §1). An act that went
+    /// in the background and named no window leaves no picture.
+    #[test]
+    fn a_step_is_framed_by_the_window_its_act_went_to_not_the_one_a_later_look_shows() {
+        let later = answered_with(serde_json::json!({
+            "action": {
+                "targetWindowId": 19,
+                "actedWindow": { "id": 7, "pid": 501 },
+                "background": { "requested": true },
+            },
+            "snapshot": { "window": { "id": 19, "x": 10, "y": 20, "width": 800, "height": 600 } },
+        }));
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&["click", "--app", "Notes", "--element-index", "3", "--json"]),
+                later.as_ref(),
+                heard(true, Some((7, 501)))
+            )),
+            Ok(serde_json::json!({ "windowOnly": 7, "windowOwner": 501 })),
+            "the window the act went to, never the one the look after it shows"
+        );
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&["launch", "--app", "Notes"]),
+                answered_with(serde_json::json!({ "windows": 1 })).as_ref(),
+                heard(true, None)
+            )),
+            Err(Some(FrameSkipped::WindowUnavailable)),
+            "an app opened behind names no window: no picture, never the whole display"
+        );
+    }
+
+    /// A surface framed the way a desktop step's capture is keyed, whose
+    /// frame is always the same picture.
+    struct Pictured(Capture);
+
+    impl Surface for Pictured {
+        fn key(&self) -> String {
+            self.0.key()
+        }
+
+        async fn take(self) -> Result<Picture, FrameSkipped> {
+            Ok(Picture::unplaced(PNG.to_vec()))
+        }
+    }
+
+    /// A frame of one window alone is its own surface (I-t123731-rc1, review
+    /// t-128744 §6): an action in another window, or on the screen around
+    /// it, is in no picture of that window, and a picture of either shows
+    /// nothing of its step — so neither takes its frame away. A burst in one
+    /// window is framed once, by its last step, as a burst on the screen is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_of_one_window_is_kept_past_acts_in_other_windows_or_on_the_screen() {
+        let alone = |id: u64| {
+            Frame::After(Pictured(Capture::Desktop {
+                params: serde_json::json!({ "windowOnly": id, "windowOwner": 501 }),
+            }))
+        };
+        let screen = || {
+            Frame::After(Pictured(Capture::Desktop {
+                params: serde_json::json!({}),
+            }))
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (writer, messages) = unbounded_channel();
+        for (verb, frame) in [
+            ("click", alone(7)),
+            ("type-text", alone(19)),
+            ("press-key", alone(7)),
+            ("mouse-click", screen()),
+            ("click", alone(7)),
+        ] {
+            writer.send(step(dir.path(), verb, frame)).unwrap();
+        }
+        drop(writer);
+        write_in_order(messages, Duration::from_millis(50)).await;
+        let shot: Vec<bool> = run_evidence::steps_in(dir.path())
+            .iter()
+            .map(|step| step.shot.is_some())
+            .collect();
+        assert_eq!(
+            shot,
+            [false, true, false, true, true],
+            "window 7's burst is framed by its last step; window 19 and the screen keep their own"
+        );
     }
 
     /// A window asked for alone is kept only when the helper's answer says

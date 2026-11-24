@@ -238,6 +238,32 @@ pub fn went_in_the_background(command: &ComputerCommand) -> bool {
         && prepared.params.as_object().is_some_and(requested)
 }
 
+/// What an act did, as the helper answered it (I-t123731-rc1): whether it
+/// went no further than one window, and that window as the helper found it
+/// when it acted. A step's evidence is framed by this — not by its words read
+/// again, which may say `--foreground` of a mark click the shared desktop
+/// sent to the background, nor by the look after the act, which may land on
+/// another window of the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Acted {
+    /// The act touched its window alone: an app's act the helper ran in the
+    /// background without borrowing the desktop, a window moved, sized,
+    /// minimized, zoomed or closed by its number, or an app or a page
+    /// opened behind.
+    pub in_its_window: bool,
+    /// The window it acted in, when the helper named one.
+    pub window: Option<ActedWindow>,
+}
+
+/// A window as an act found it: its number, and the process that owned it
+/// then — so a number the window server gave out again names no other
+/// window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActedWindow {
+    pub id: u64,
+    pub pid: u64,
+}
+
 #[must_use]
 pub fn unavailable() -> ProviderError {
     ProviderError::new(
