@@ -115,6 +115,12 @@ pub enum FrameSkipped {
     /// The tab's control moved after the step: no picture of another
     /// control interval is taken or kept as this step's frame.
     ControlChanged,
+    /// A step sent in the background is framed as its window alone, and that
+    /// window could not be pictured by itself — its answer named none, it is
+    /// gone, or the picture was refused. Nothing of the screen around it is
+    /// taken in its place: a person's own window may stand there
+    /// (I-t123731-rc1).
+    WindowUnavailable,
 }
 
 /// A frame's place on the screen (`ShotFrame`: picture pixels per point and

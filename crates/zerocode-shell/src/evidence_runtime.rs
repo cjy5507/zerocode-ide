@@ -411,6 +411,11 @@ fn desktop_capture(result: Option<&serde_json::Value>) -> Capture {
     }
 }
 
+/// Where a desktop step is framed, by the road it went down.
+fn desktop_frame(_argv: &[String], result: Option<&serde_json::Value>) -> Frame<Capture> {
+    Frame::After(desktop_capture(result))
+}
+
 fn emulator_capture(argv: &[String]) -> Option<Capture> {
     let command = zerocode_core::computer_use::parse_emulator_command(argv).ok()?;
     Some(Capture::Emulator {
@@ -965,6 +970,116 @@ mod tests {
                 && reads_the_log(ComputerMethod::RecipeRun)
         );
         assert!(!reads_the_log(ComputerMethod::Screenshot));
+    }
+
+    /// What a desktop step's frame asks the helper's `screenshotDesktop` for,
+    /// or why it asks nothing.
+    fn asked(frame: Frame<Capture>) -> Result<serde_json::Value, Option<FrameSkipped>> {
+        match frame {
+            Frame::After(Capture::Desktop { params }) => Ok(params),
+            Frame::Skipped(why) => Err(Some(why)),
+            Frame::After(_) | Frame::Own(_) | Frame::None => Err(None),
+        }
+    }
+
+    /// A step sent in the background is framed as the window it acted in,
+    /// alone — asked of the helper by that window's number, so what a
+    /// person's window over it covers is the window's own drawing — never a
+    /// region of the screen, where that person's window stands
+    /// (I-t123731-rc1). The window is the one the answer names (its look
+    /// after the act, or the window the act went to), else the one the step
+    /// named; with none there is no picture, and the line says why, rather
+    /// than the whole display. A step that took the desk (`--foreground`) is
+    /// framed by its window's region as before, and a desktop action by the
+    /// whole display. The words are the ones that ran: a walk sends its
+    /// recipe's desktop `key` as the app's `press-key`.
+    #[test]
+    fn a_background_step_is_framed_as_its_window_alone_never_the_screen_around_it() {
+        let words = |list: &[&str]| -> Vec<String> {
+            list.iter().map(|word| (*word).to_string()).collect()
+        };
+        let result = |result: serde_json::Value| {
+            let mut answer = answered(true);
+            answer.stdout = format!("{}\n", serde_json::json!({ "ok": true, "result": result }));
+            result_of(&answer)
+        };
+        let looked = result(serde_json::json!({
+            "action": { "targetWindowId": 7, "background": { "requested": true } },
+            "snapshot": { "window": { "id": 7, "x": 10, "y": 20, "width": 800, "height": 600 } },
+        }));
+        let deferred = result(serde_json::json!({
+            "action": { "targetWindowId": 9, "background": { "requested": true } },
+            "observationDeferred": true,
+        }));
+        let region = serde_json::json!({
+            "region": { "x": 10.0, "y": 20.0, "width": 800.0, "height": 600.0 }
+        });
+        let click = words(&["click", "--app", "Notes", "--element-index", "3", "--json"]);
+        let mut foreground = click.clone();
+        foreground.push("--foreground".into());
+        assert_eq!(
+            asked(desktop_frame(&foreground, looked.as_ref())),
+            Ok(region.clone()),
+            "a step that took the desk: its window's region of the screen, as before"
+        );
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&["mouse-click", "--x", "1", "--y", "1", "--foreground"]),
+                None
+            )),
+            Ok(serde_json::json!({})),
+            "a desktop action: the whole display, as before"
+        );
+        if !cfg!(target_os = "macos") {
+            // No background road here: no step went down one.
+            assert_eq!(asked(desktop_frame(&click, looked.as_ref())), Ok(region));
+            return;
+        }
+        assert_eq!(
+            asked(desktop_frame(&click, looked.as_ref())),
+            Ok(serde_json::json!({ "windowOnly": 7 })),
+            "a background step asks for its window alone, never a region of the screen"
+        );
+        assert_eq!(
+            asked(desktop_frame(&click, deferred.as_ref())),
+            Ok(serde_json::json!({ "windowOnly": 9 })),
+            "an act answered without a look names the window it went to"
+        );
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&["press-key", "--app", "TextEdit", "--key", "cmd+n", "--json"]),
+                deferred.as_ref()
+            )),
+            Ok(serde_json::json!({ "windowOnly": 9 })),
+            "a walk's step as it ran: the recipe's desktop `key` went to the app"
+        );
+        assert_eq!(
+            asked(desktop_frame(
+                &words(&[
+                    "click",
+                    "--app",
+                    "Notes",
+                    "--window-id",
+                    "5",
+                    "--element-index",
+                    "3",
+                ]),
+                None
+            )),
+            Ok(serde_json::json!({ "windowOnly": 5 })),
+            "a plain answer names no window: the one the step named"
+        );
+        let launch = words(&["launch", "--app", "Notes"]);
+        for (step, answer) in [
+            (&click, None),
+            (&launch, result(serde_json::json!({ "windows": 1 }))),
+        ] {
+            assert_eq!(
+                asked(desktop_frame(step, answer.as_ref())),
+                Err(Some(FrameSkipped::WindowUnavailable)),
+                "{step:?}: no window to name, so no picture — never the whole display"
+            );
+        }
     }
 
     /// The walk's own record is the writer's to place: it lands after the
