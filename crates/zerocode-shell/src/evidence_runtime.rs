@@ -630,9 +630,7 @@ pub(super) fn leave_computer_evidence(
     let Some(frames) = run_evidence::captures("computer", verb) else {
         return;
     };
-    let frame = frame_of(dir, frames, capped, answer, |result| {
-        desktop_frame(argv, result, acted)
-    });
+    let frame = computer_frame(dir, frames, capped, argv, answer, acted);
     send(Message::Step(Job::new(
         dir,
         "computer",
@@ -641,6 +639,23 @@ pub(super) fn leave_computer_evidence(
         frame,
         observation,
     )));
+}
+
+/// The frame a step on the desktop road leaves (`frame_of`): a picture its
+/// answer exported, kept at once; else the surface its act's road frames
+/// (`desktop_frame`). `argv` is the words that ran; `acted` what its act
+/// did, as the helper answered it.
+fn computer_frame(
+    dir: &Path,
+    frames: bool,
+    capped: bool,
+    argv: &[String],
+    answer: &zerocode_hookd::TeamAnswer,
+    acted: Option<Acted>,
+) -> Frame<Capture> {
+    frame_of(dir, frames, capped, answer, |result| {
+        desktop_frame(argv, result, acted)
+    })
 }
 
 /// A walk begins in `dir` (plan D10): whether the steps that follow are
@@ -1303,6 +1318,104 @@ mod tests {
             )),
             Err(Some(FrameSkipped::WindowUnavailable)),
             "an app opened behind names no window: no picture, never the whole display"
+        );
+    }
+
+    /// The picture an act's answer carries frames its step only when it is
+    /// of the window the act went to — the same number, the same owner
+    /// (I-t123731-rc1, review t-128939 §1). A walk asks each app act for the
+    /// look after it (`--full-state`), and with no window held to, that look
+    /// lands where the app's focus and window order lead: another of the
+    /// app's windows once the focus moved, where a person's other document
+    /// may stand. A picture that is not of the acted window, or that no act
+    /// names a window to match, frames nothing: the step is framed as one
+    /// whose answer carried no picture is, by what its act did — the window
+    /// it went to alone; no picture, its line saying why; or the screen,
+    /// after an act that took the desk. A look, of which no act was heard,
+    /// keeps its own picture, as before. Every case is framed before the one
+    /// assertion reads them all.
+    #[test]
+    fn an_acts_own_picture_frames_its_step_only_when_it_is_of_the_window_the_act_went_to() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("look.png");
+        std::fs::write(&file, PNG).unwrap();
+        // An answer whose look, and the picture it carries, is of window
+        // `id` of process `pid`; an act's names the window it acted in.
+        let looked_at = |id: u64, pid: u64, act: bool| {
+            let mut result = serde_json::json!({
+                "snapshot": {
+                    "app": { "name": "Notes", "pid": pid },
+                    "window": { "id": id, "x": 10, "y": 20, "width": 800, "height": 600 },
+                },
+                "screenshot": { "path": file, "scale": 2.0 },
+            });
+            if act {
+                result["action"] = serde_json::json!({
+                    "targetWindowId": id,
+                    "actedWindow": { "id": 7, "pid": 501 },
+                    "background": { "requested": true },
+                });
+            }
+            let mut answer = answered(true);
+            answer.stdout = format!("{}\n", serde_json::json!({ "ok": true, "result": result }));
+            answer
+        };
+        let click = words(&[
+            "click",
+            "--app",
+            "Notes",
+            "--element-index",
+            "3",
+            "--full-state",
+            "--json",
+        ]);
+        let own = || -> Result<serde_json::Value, Option<FrameSkipped>> {
+            Ok(serde_json::json!("the picture its answer carries"))
+        };
+        let framed = |answer: &zerocode_hookd::TeamAnswer, acted: Option<Acted>| {
+            let frame = computer_frame(dir.path(), true, false, &click, answer, acted);
+            if matches!(frame, Frame::Own(_)) {
+                own()
+            } else {
+                asked(frame)
+            }
+        };
+        // The act went to window 7 of process 501.
+        let in_seven = heard(true, Some((7, 501)));
+        let took_the_desk = heard(false, Some((7, 501)));
+        let elsewhere = looked_at(19, 501, true);
+        let seen = [
+            framed(&looked_at(7, 501, true), in_seven),
+            framed(&elsewhere, in_seven),
+            framed(&looked_at(7, 777, true), in_seven),
+            framed(&elsewhere, heard(true, None)),
+            framed(&elsewhere, took_the_desk),
+            framed(&looked_at(19, 501, false), None),
+        ];
+        let alone = Ok(serde_json::json!({ "windowOnly": 7, "windowOwner": 501 }));
+        assert_eq!(
+            seen,
+            [
+                // Of the window the act went to: its frame, at once, as before.
+                own(),
+                // Of another window the focus moved to: the acted window alone.
+                alone.clone(),
+                // Of its number, now another process's: the acted window alone.
+                alone,
+                // An act that named no window (an older helper): nothing to
+                // match the picture with — none, and the line says why.
+                Err(Some(FrameSkipped::WindowUnavailable)),
+                // Of another window, after an act that took the desk: the
+                // screen, as a step whose answer carried no picture.
+                asked(desktop_frame(
+                    &click,
+                    result_of(&elsewhere).as_ref(),
+                    took_the_desk
+                )),
+                // A look, of which no act was heard: its own picture, as before.
+                own(),
+            ],
+            "an act's own picture frames its step only when it is of the window the act went to"
         );
     }
 
