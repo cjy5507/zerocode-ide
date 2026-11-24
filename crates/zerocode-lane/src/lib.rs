@@ -529,9 +529,9 @@ fn last_logical_line_of(grid: &zerocode_pty::TerminalGrid) -> String {
         for row_idx in start..=end {
             let row = &rows[row_idx];
             let take = if row_idx < end {
-                rows[row_idx + 1]
-                    .wrap
-                    .map_or(row.cells.len(), |carried| (carried as usize).min(row.cells.len()))
+                rows[row_idx + 1].wrap.map_or(row.cells.len(), |carried| {
+                    (carried as usize).min(row.cells.len())
+                })
             } else {
                 row.cells.len()
             };
