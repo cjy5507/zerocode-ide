@@ -1162,15 +1162,6 @@ impl Tip {
 /// 힌트 사이의 구분자 — codex `request_user_input::TIP_SEPARATOR`.
 pub const TIP_SEPARATOR: &str = " | ";
 
-/// 힌트들을 폭에 맞춰 접은 푸터 줄들. 접는 규칙은 codex
-/// `request_user_input::wrap_footer_tips` 그대로다 — 힌트 하나는 쪼개지 않고,
-/// 넘치면 통째로 다음 줄로 내린다(실측: 스냅샷
-/// `request_user_input_footer_wrap` 이 `enter to submit answer` 뒤에서 끊는다).
-#[must_use]
-pub fn tip_lines(tips: &[Tip], width: usize) -> Vec<Line> {
-    tip_lines_with_focus(tips, width, palette::COMMAND_TOKEN)
-}
-
 fn tip_lines_with_focus(tips: &[Tip], width: usize, focus: Color) -> Vec<Line> {
     let max = width.saturating_sub(2).max(1);
     let separator = TIP_SEPARATOR.chars().count();

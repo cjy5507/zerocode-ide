@@ -233,11 +233,6 @@ impl HunkAttributionLedger {
         Ok(Self { hunks })
     }
 
-    #[must_use]
-    pub fn from_hunks(hunks: Vec<AttributedHunk>) -> Self {
-        Self { hunks }
-    }
-
     pub fn reconcile(&mut self, previous: &Self) {
         self.hunks.retain(|fresh| {
             !(fresh.origin == AttributionOrigin::Human

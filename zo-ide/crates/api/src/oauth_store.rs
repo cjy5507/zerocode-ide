@@ -2132,12 +2132,6 @@ pub mod codex_auth {
         path.is_file().then_some((path, home.source))
     }
 
-    /// [`auth_json_path_with_source`] for a caller that only needs the file.
-    #[must_use]
-    pub fn auth_json_path() -> Option<PathBuf> {
-        auth_json_path_with_source().map(|(path, _)| path)
-    }
-
     /// Read the tokens out of one `auth.json`. `Ok(None)` when the file holds
     /// no OAuth tokens (API-key mode, or logged out).
     pub fn load_at(path: &Path) -> io::Result<Option<OpenAiOAuthTokens>> {

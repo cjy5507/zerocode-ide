@@ -166,15 +166,6 @@ impl Effort {
         }
     }
 
-    /// Aliases worth advertising in user-facing level tables.
-    #[must_use]
-    pub const fn display_aliases(self) -> &'static [&'static str] {
-        match self {
-            Effort::Max => &[],
-            other => other.aliases(),
-        }
-    }
-
     /// One-line hint for the levels table and the slider.
     #[must_use]
     pub const fn description(self) -> &'static str {
@@ -235,46 +226,6 @@ impl Effort {
                 .copied()
                 .find(|level| level.budget() == value),
         }
-    }
-
-    /// For [`Effort::Smart`] only: the dynamic band's floor/ceiling display
-    /// labels as actually projected onto `model` via
-    /// `api::effective_effort_for_model` — e.g. `("xhigh", "max")` on sol and
-    /// fable, or a degenerate `("xhigh", "xhigh")` / `("high", "high")` where
-    /// the model's ceiling collapses the whole band onto one rung. `None` for
-    /// every other level (no band to show).
-    ///
-    /// Truth surfaces (`hud::effort_badge_label`, `/effort show`) use this
-    /// instead of the single-tier clamp check every other preset gets, since
-    /// Smart's `level()` is only the band FLOOR — showing just that would
-    /// silently hide the escalation headroom the preset actually has.
-    #[must_use]
-    pub fn band_labels_for_model(self, model: &str) -> Option<(&'static str, &'static str)> {
-        if self != Effort::Smart {
-            return None;
-        }
-        let floor = self.level()?;
-        let ceiling = self.band_ceiling()?;
-        // Mirror the model-capability selection path in two steps: (1) resolve
-        // the band the same way the backends do (`api::resolve_effort_band`,
-        // which already caps against the model's internal ceiling — e.g. Max
-        // for Luna); (2) run the result through the same model-specific
-        // capability projection every other level's display uses
-        // (`api::effective_effort_for_model`) — this is what applies e.g.
-        // Anthropic's sonnet/haiku "no xhigh" clamp on top of the band pick,
-        // so a floor of Xhigh on Sonnet correctly displays as "high".
-        let no_signals = api::BandDifficulty::default();
-        let max_signals = api::BandDifficulty {
-            heavy_intent: true,
-            large_context: true,
-            long_ask: true,
-        };
-        let floor_resolved = api::resolve_effort_band(floor, ceiling, model, no_signals);
-        let ceiling_resolved = api::resolve_effort_band(floor, ceiling, model, max_signals);
-        let floor_label = effort_level_label(api::effective_effort_for_model(floor_resolved, model));
-        let ceiling_label =
-            effort_level_label(api::effective_effort_for_model(ceiling_resolved, model));
-        Some((floor_label, ceiling_label))
     }
 }
 

@@ -243,11 +243,6 @@ impl ProviderRegistry {
         self.providers.get(&id).cloned()
     }
 
-    /// Iterate over all registered provider ids.
-    pub fn list_providers(&self) -> impl Iterator<Item = ProviderId> + '_ {
-        self.providers.keys().copied()
-    }
-
     /// Number of registered providers.
     #[must_use]
     pub fn len(&self) -> usize {

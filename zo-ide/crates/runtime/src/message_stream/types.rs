@@ -790,13 +790,6 @@ impl QuestionOption {
             preview: None,
         }
     }
-
-    /// Attach a monospace preview block to this option.
-    #[must_use]
-    pub fn with_preview(mut self, preview: impl Into<String>) -> Self {
-        self.preview = Some(preview.into());
-        self
-    }
 }
 
 impl<'de> Deserialize<'de> for QuestionOption {

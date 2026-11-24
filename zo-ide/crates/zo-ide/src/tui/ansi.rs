@@ -870,23 +870,6 @@ impl StyleWriter {
         out.push('m');
     }
 
-    /// 주입한 팔레트에 맞게 색을 낮춘 뒤 한 `SetColors` SGR로 쓴다.
-    ///
-    /// `palette == None`이고 테마가 `terminal`이면 기존 [`Self::set_colors`]와
-    /// 완전히 같은 바이트를 낸다. 이름 있는 테마를 고른 marks 룩에서는 역할과
-    /// 색 칸이 그 테마의 RGB로 나간다 — 이때 `None`의 색 깊이는 트루컬러로
-    /// 본다. 실제 터미널을 만지지 않는 골든이 이 이음매로 실패·적응 갈래를
-    /// 각각 고정한다.
-    pub fn set_colors_for_palette(
-        palette: Option<TerminalPalette>,
-        fg: Option<Color>,
-        bg: Option<Color>,
-        out: &mut String,
-    ) {
-        let color_level = palette.map_or(ColorLevel::TrueColor, TerminalPalette::color_level);
-        Self::set_colors_for_ground_and_level(Ground::from(palette), color_level, fg, bg, out);
-    }
-
     fn set_colors_for_ground_and_level(
         ground: Ground,
         color_level: ColorLevel,

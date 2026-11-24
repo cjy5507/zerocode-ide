@@ -154,15 +154,6 @@ fn wrap_spans(line: &Line, width: usize, indent: &Span) -> Vec<Line> {
     out
 }
 
-/// 여러 줄을 한 번에 접는다.
-#[must_use]
-pub fn wrap_lines(lines: &[Line], width: usize, indent: &Span) -> Vec<Line> {
-    lines
-        .iter()
-        .flat_map(|line| wrap_line(line, width, indent))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::wrap_line;

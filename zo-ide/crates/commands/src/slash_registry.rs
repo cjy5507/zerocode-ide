@@ -25,7 +25,7 @@ use plugins::PluginCommandManifest;
 
 use crate::prompt_commands::PromptCommandDef;
 use crate::slash_help::{
-    public_slash_command_specs_iter, slash_command_names, slash_command_specs,
+    slash_command_names, slash_command_specs,
     suggest_slash_commands, SlashCommandSpec,
 };
 
@@ -164,11 +164,6 @@ impl SlashCommandRegistry {
             }
         }
         registry
-    }
-
-    /// Iterator over only the specs surfaced in public help.
-    pub fn public_builtin_specs() -> impl Iterator<Item = &'static SlashCommandSpec> {
-        public_slash_command_specs_iter()
     }
 
     /// Register a plugin-contributed command. Returns an error if the name

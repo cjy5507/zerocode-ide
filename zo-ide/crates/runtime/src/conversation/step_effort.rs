@@ -779,12 +779,6 @@ where
         self.step_effort = config.map(StepEffortState::new);
     }
 
-    /// Whether a governor is installed at all.
-    #[must_use]
-    pub fn step_effort_installed(&self) -> bool {
-        self.step_effort.is_some()
-    }
-
     /// Whether the governor is standing aside: a deep-gate PLAN/VERIFY/EXEC
     /// leg or a quota-fallback turn runs on a client of its own, with an
     /// effort of its own, and the governor's reading of the main loop's

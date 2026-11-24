@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use core_types::{
-    OAuthConfig, OAuthRefreshRequest, OAuthTokenExchangeRequest, RateLimitSnapshot,
+    OAuthConfig, OAuthRefreshRequest, RateLimitSnapshot,
     RateLimitWindow, RateLimitWindowKind, format_usd,
 };
 
@@ -1267,12 +1267,6 @@ impl AnthropicClient {
         &self.auth
     }
 
-    /// Returns a reference to the underlying HTTP client.
-    #[must_use]
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.http
-    }
-
     /// Returns the configured base URL.
     #[must_use]
     pub fn base_url(&self) -> &str {
@@ -1545,27 +1539,6 @@ impl AnthropicClient {
             prompt_cache.record_refresh(refresh, &response.usage);
         }
         Ok(())
-    }
-
-    pub async fn exchange_oauth_code(
-        &self,
-        config: &OAuthConfig,
-        request: &OAuthTokenExchangeRequest,
-    ) -> Result<OAuthTokenSet, ApiError> {
-        let response = self
-            .http
-            .post(&config.token_url)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .form(&request.form_params())
-            .send()
-            .await
-            .map_err(ApiError::from)?;
-        let response = expect_success(response).await?;
-        let raw = response
-            .json::<OAuthTokenResponse>()
-            .await
-            .map_err(ApiError::from)?;
-        Ok(raw.into_token_set(now_unix_timestamp()))
     }
 
     pub async fn refresh_oauth_token(

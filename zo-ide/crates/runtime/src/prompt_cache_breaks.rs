@@ -124,11 +124,6 @@ pub fn record_prompt_cache_breaks_at_path(
     Ok(())
 }
 
-/// Read a project's ledger, dropping any line that does not parse.
-pub fn read_prompt_cache_breaks(cwd: &Path) -> io::Result<Vec<PromptCacheBreakRecord>> {
-    read_prompt_cache_breaks_at_path(&prompt_cache_breaks_path(cwd))
-}
-
 /// Read a ledger at an explicit path; a missing file is an empty ledger.
 pub fn read_prompt_cache_breaks_at_path(path: &Path) -> io::Result<Vec<PromptCacheBreakRecord>> {
     let text = match fs::read_to_string(path) {

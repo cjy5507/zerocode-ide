@@ -78,25 +78,6 @@ impl DoctorReport {
             .collect::<Vec<_>>()
             .join("\n")
     }
-
-    /// Plain rendering is useful for logs and tests that do not want terminal
-    /// control sequences; the CLI uses [`Self::render`] for the requested
-    /// pipe-style output.
-    #[must_use]
-    pub fn render_plain(&self) -> String {
-        self.findings
-            .iter()
-            .map(|finding| {
-                format!(
-                    "{:<12} {:<4} {}",
-                    finding.label,
-                    finding.status.label(),
-                    finding.value
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 }
 
 /// Run all doctor checks for `cwd`.

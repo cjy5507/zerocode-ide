@@ -1506,12 +1506,6 @@ pub fn antigravity_reach_in(catalog: &DiscoveredCatalog, id: &str) -> Antigravit
     }
 }
 
-/// [`antigravity_reach_in`] over the process snapshot.
-#[must_use]
-pub fn antigravity_reach(id: &str) -> AntigravityReach {
-    current().map_or(AntigravityReach::Unjudged, |catalog| antigravity_reach_in(&catalog, id))
-}
-
 /// What the Google (Antigravity) login's list is in `catalog`. `login` is
 /// asked only when the catalog holds no answer of the registry's own — none
 /// yet, or a skip another process may have written without the login this

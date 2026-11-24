@@ -1166,26 +1166,6 @@ pub(crate) fn run_spawn_multi_agent(
     )
 }
 
-#[allow(dead_code, clippy::too_many_lines)]
-pub(crate) fn run_spawn_multi_agent_with_timeout(
-    input: &SpawnMultiAgentInput,
-    parent_model: Option<&str>,
-    parent_lsp: Option<&LspRegistry>,
-    wait_timeout: Duration,
-    agent_time_budget: Option<Duration>,
-    workflow_member: bool,
-) -> Result<String, ToolError> {
-    run_spawn_multi_agent_with_timeout_and_hooks(
-        input,
-        parent_model,
-        parent_lsp,
-        wait_timeout,
-        agent_time_budget,
-        workflow_member,
-        None,
-    )
-}
-
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_spawn_multi_agent_with_timeout_and_hooks(
     input: &SpawnMultiAgentInput,

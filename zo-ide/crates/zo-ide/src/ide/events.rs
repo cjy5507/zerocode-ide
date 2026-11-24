@@ -352,12 +352,6 @@ impl EventsChannel {
         Some(prompt_id)
     }
 
-    /// 직렬화할 수 있는 것 하나를 프레임으로 내보낸다(상태·턴처럼 렌더
-    /// 블록이 아닌 것).
-    pub fn publish_frame<T: Serialize>(&self, frame: &T) {
-        self.state.publish(frame);
-    }
-
     /// 상태 카드를 갈아 끼우고 `session_status` 프레임을 낸다.
     pub fn publish_status(&self, status: &StatusSnapshot, cwd: &Path) {
         self.state.update_capabilities(|snapshot| {
