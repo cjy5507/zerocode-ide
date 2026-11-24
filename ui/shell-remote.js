@@ -2044,7 +2044,7 @@ listen("phone-link:paired", (event) => {
       },
     },
   });
-  if (settingsPane === "remote-link" && !settingsView.hidden) void refreshRemoteLink();
+  if (settingsPane === "ssh" && !settingsView.hidden) void refreshRemoteLink();
 });
 el("remote-link-toggle").addEventListener("click", () => void remoteLinkPress(
   remoteLinkStatus?.enabled ? "phone_link_disable" : "phone_link_enable",

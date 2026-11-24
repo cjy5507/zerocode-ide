@@ -23005,6 +23005,8 @@ button.helper-sib:hover {
 .settings-frame > .settings-health,
 .settings-frame > .settings-nothing,
 .settings-frame > .settings-pane {
+  width: 100%;
+  max-width: 76rem;
   margin-inline: auto;
   padding-inline: 32px;
 }
@@ -25851,8 +25853,7 @@ button.integration-context-action:hover {
 
 .settings-pane[data-pane="judgment-models"] > .settings-card,
 .model-catalog > .settings-card {
-  max-width: 72rem;
-  margin-inline: auto;
+  width: 100%;
 }
 
 .judgment-connection-settings {
@@ -34627,6 +34628,16 @@ input[type="search"]::-webkit-search-cancel-button {
 .computer-use-routing {
   display: grid;
   gap: var(--space-3);
+}
+
+@container settings (min-width: 720px) {
+  .computer-use-routing {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .computer-use-routing > .orch-title,
+  .computer-use-routing > .orch-note {
+    grid-column: 1 / -1;
+  }
 }
 
 .computer-use-route-row {
@@ -64061,7 +64072,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .model-state, .model-use { white-space: normal; }
 .model-setup .model-steps { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0; padding: 0; list-style: none; color: var(--ink-mist); font: var(--type-label-12); }
 .model-steps .is-now { color: var(--ink-chalk); font-weight: 600; }
-.model-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--field-md)), 1fr)); gap: var(--space-3); }
+.model-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: var(--space-3); }
 .model-choice { display: grid; gap: var(--space-1); align-content: start; min-width: 0; padding: var(--space-3) var(--space-4); border: 0; border-radius: var(--radius-md); background: var(--surface-well); box-shadow: var(--shadow-border); color: var(--ink-mist); font: var(--type-copy-13); text-align: start; cursor: pointer; transition: box-shadow var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
 .model-choice:hover { background: var(--row-hover); }
 .model-choice[aria-pressed="true"] { box-shadow: 0 0 0 var(--rule-width) var(--ink-chalk); background: var(--row-active); }
@@ -64128,6 +64139,12 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .connection-heading { display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: var(--space-4); }
 .connection-heading > div { flex: 1 1 var(--field-md); min-width: 0; }
 .connection-editor > .settings-subhead { padding: 0; margin-block-end: var(--space-5); }
+@container settings-view (max-width: 960px) and (min-width: 641px) {
+  .settings-rail { width: 224px; }
+  .settings-frame > .settings-health,
+  .settings-frame > .settings-nothing,
+  .settings-frame > .settings-pane { padding-inline: var(--space-5); }
+}
 @container settings-view (max-width: 640px) {
   .settings-rail { width: 100%; max-height: calc(var(--space-6) * 5); flex-basis: 100%; border-right: 0; border-bottom: var(--rule-width) solid var(--edge-rule); }
   .settings-rail-top { padding-block: var(--space-2); }

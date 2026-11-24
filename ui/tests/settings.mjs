@@ -7009,27 +7009,27 @@ await test("Shortcuts in Terminal owns Orca's two policies and survives a canoni
 
 await test("the first Orca parity panes are real destinations with one active owner", async () => {
   await openSettings(pageA, "general");
-  for (const pane of [
-    "provider-accounts",
-    "judgment-models",
-    "onboarding",
-    "automations",
-    "git",
-    "quick-commands",
+  for (const [asked, owner] of [
+    ["provider-accounts", "provider-accounts"],
+    ["judgment-models", "judgment-models"],
+    ["onboarding", "general"],
+    ["automations", "automations"],
+    ["git", "git"],
+    ["quick-commands", "quick-commands"],
   ]) {
-    await pageA.evaluate((wanted) => showSettingsPane(wanted), pane);
+    await pageA.evaluate((wanted) => showSettingsPane(wanted), asked);
     await renderSettled(pageA);
     assert(
-      await pageA.locator(`.settings-pane[data-pane="${pane}"]`).isVisible(),
-      `${pane} did not become the visible pane`,
+      await pageA.locator(`.settings-pane[data-pane="${owner}"]`).isVisible(),
+      `${asked} did not become the visible pane (${owner})`,
     );
     assertEqual(
-      await pageA.locator(`.settings-rail-item[data-pane="${pane}"]`).getAttribute("aria-current"),
+      await pageA.locator(`.settings-rail-item[data-pane="${owner}"]`).getAttribute("aria-current"),
       "page",
-      `${pane} did not own rail selection`,
+      `${asked} did not own rail selection (${owner})`,
     );
   }
-  return "provider accounts, models, onboarding, automations, git, quick commands";
+  return "provider accounts, models, onboarding (→ general), automations, git, quick commands";
 });
 
 await test("provider marks share requests, keep offline initials, and leave unchanged account rows in place", async () => {
@@ -11663,7 +11663,7 @@ await test("Remote link turns the phone link on, shows a one-time QR, and revoke
   await notice.waitFor({ state: "visible" });
   await backend.waitForCall("A", "phone_link_status", pairedAt);
   await notice.locator(".toast-action").click();
-  await pageA.waitForFunction(() => settingsPane === "remote-link" && !settingsView.hidden);
+  await pageA.waitForFunction(() => settingsPane === "ssh" && !settingsView.hidden);
   await notice.waitFor({ state: "detached" });
 
   const offAt = backend.calls.length;

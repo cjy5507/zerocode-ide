@@ -157,7 +157,7 @@
     { "group": "AI Capabilities", "orca": "Voice", "zerocode": null, "state": "blocked" },
 
     { "group": "Set Up", "orca": "Orca Account", "zerocode": null, "state": "blocked" },
-    { "group": "Set Up", "orca": "Onboarding", "zerocode": "onboarding", "state": "live" },
+    { "group": "Set Up", "orca": "Onboarding", "zerocode": "general", "state": "live" },
     { "group": "Set Up", "orca": "General", "zerocode": "general", "state": "partial" },
     { "group": "Set Up", "orca": "Integrations", "zerocode": "integrations", "state": "partial" },
     { "group": "Set Up", "orca": "Mobile", "zerocode": null, "state": "blocked" },
@@ -178,8 +178,8 @@
     { "group": "Interface", "orca": "Shortcuts", "zerocode": "shortcuts", "state": "partial" },
     { "group": "Interface", "orca": "Stats & Usage", "zerocode": "stats", "state": "partial" },
 
-    { "group": "Remote Hosts", "orca": "SSH Hosts", "zerocode": "ssh-hosts", "state": "partial" },
-    { "group": "Remote Hosts", "orca": "Remote Orca Servers", "zerocode": "remote-servers", "state": "partial" },
+    { "group": "Remote Hosts", "orca": "SSH Hosts", "zerocode": "ssh", "state": "partial" },
+    { "group": "Remote Hosts", "orca": "Remote Orca Servers", "zerocode": "ssh", "state": "partial" },
     { "group": "Privacy & Security", "orca": "Privacy & Telemetry", "zerocode": null, "state": "blocked" },
     { "group": "Privacy & Security", "orca": "macOS Permissions", "zerocode": "macos-permissions", "state": "partial" },
     { "group": "Advanced", "orca": "Advanced", "zerocode": null, "state": "blocked" },

@@ -23,7 +23,9 @@ const settingsView = el("settings-view");
  * frame keeps Chromium (the Windows webview) from correcting twice. */
 const settingsFrame = settingsView.querySelector(".settings-frame");
 const settingsBlockHeights = new WeakMap();
+let observedSettingsBlocks = [];
 const settingsKeepsPlace = new ResizeObserver((entries) => {
+  if (settingsView.hidden) return;
   const visibleTop = settingsFrame.getBoundingClientRect().top;
   const moved = entries
     .map((entry) => {
@@ -47,8 +49,17 @@ const settingsKeepsPlace = new ResizeObserver((entries) => {
   }
   if (shift !== 0) settingsFrame.scrollTop += shift;
 });
-for (const block of settingsFrame.querySelectorAll(":scope > .settings-pane > *")) {
-  settingsKeepsPlace.observe(block);
+function syncSettingsKeepsPlace() {
+  for (const block of observedSettingsBlocks) settingsBlockHeights.delete(block);
+  observedSettingsBlocks = [];
+  settingsKeepsPlace.disconnect();
+  if (settingsView.hidden) return;
+  const active = settingsFrame.querySelector(":scope > .settings-pane:not([hidden])");
+  if (!active) return;
+  for (const block of active.children) {
+    observedSettingsBlocks.push(block);
+    settingsKeepsPlace.observe(block);
+  }
 }
 
 /* ---- the section rail ----
@@ -806,6 +817,7 @@ function applySettingsSnapshot(snapshot) {
 
   if (revision !== null) settingsRevision = Math.max(settingsRevision, revision);
   settingsHydrated = true;
+  invalidateSettingsSearchIndex();
   return true;
 }
 
@@ -1001,15 +1013,15 @@ listen("settings:changed", (event) => {
   const revision = event.payload?.revision;
   if (Number.isInteger(revision) && revision <= settingsRevision) return;
   if (event.payload?.keys?.includes("sshHosts")
-      && settingsPane === "ssh-hosts" && !settingsView.hidden) {
+      && settingsPane === "ssh" && !settingsView.hidden) {
     void refreshSshHosts();
   }
   if (event.payload?.keys?.includes("remoteWorkspaces")
-      && settingsPane === "ssh-hosts" && !settingsView.hidden) {
+      && settingsPane === "ssh" && !settingsView.hidden) {
     void refreshRemoteWorkspaces();
   }
   if (event.payload?.keys?.includes("remoteServers")
-      && settingsPane === "remote-servers" && !settingsView.hidden) {
+      && settingsPane === "ssh" && !settingsView.hidden) {
     void refreshRemoteServers();
   }
   if (event.payload?.keys?.includes("sshTargets")) {
@@ -1027,16 +1039,27 @@ listen("settings:open", () => {
  * they READ, so a section's own name and the labels of the controls on it are
  * what the query is matched against — Orca's `searchEntries` per section, with
  * the same effect and none of its per-control registry. */
+const settingsPaneById = new Map(
+  [...settingsView.querySelectorAll(".settings-pane[data-pane]")].map((node) => [node.dataset.pane, node]),
+);
+const settingsRailItemById = new Map(
+  settingsRailItems.map((node) => [node.dataset.pane, node]),
+);
+const settingsPaneWordsCache = new Map();
+
+function invalidateSettingsSearchIndex() {
+  settingsPaneWordsCache.clear();
+}
+
 function paneWords(pane) {
-  const item = settingsRailItems.find((held) => held.dataset.pane === pane);
-  const section = settingsView.querySelector(`.settings-pane[data-pane="${pane}"]`);
-  // The page's own text, plus the words it is looked up by that it does not
-  // say. A control that became a menu took its rows off the page with it, and
-  // a pane nobody can find by the name of the thing it reports is a pane that
-  // is not there. Orca keeps a hand-written keyword catalogue per pane for the
-  // same reason; ours is only what the rendered text cannot supply.
+  const cached = settingsPaneWordsCache.get(pane);
+  if (cached !== undefined) return cached;
+  const item = settingsRailItemById.get(pane);
+  const section = settingsPaneById.get(pane);
   const keywords = section?.dataset.keywords ?? "";
-  return `${item?.textContent ?? ""} ${section?.textContent ?? ""} ${keywords}`.toLowerCase();
+  const words = `${item?.textContent ?? ""} ${section?.textContent ?? ""} ${keywords}`.toLowerCase();
+  settingsPaneWordsCache.set(pane, words);
+  return words;
 }
 
 function paneMatches(pane, query) {
@@ -1050,8 +1073,17 @@ function settingsPaneAvailable(pane) {
 }
 
 function showSettingsPane(pane) {
-  // 「모델 연결」 joined 「모델」 (2026-11-10): its old name opens the one page.
+  // Consolidated panes: old names open their unified owner.
+  const requested = pane;
+  if (pane === "skills") {
+    setSettingsOpen(false);
+    openSkillsView();
+    return;
+  }
   if (pane === "api-routers") pane = "judgment-models";
+  if (pane === "onboarding") pane = "general";
+  if (pane === "hooks") pane = "agents";
+  if (pane === "ssh-hosts" || pane === "remote-servers" || pane === "remote-link") pane = "ssh";
   const arriving = settingsView.hidden || pane !== settingsPane;
   settingsPane = pane;
   // 디자인 페이지는 테마 스위치로 창의 테마 속성을 잠시 바꾼다: 떠나면 사람이 고른 테마로 돌아간다.
@@ -1060,9 +1092,22 @@ function showSettingsPane(pane) {
   } else {
     leaveDesignPage();
   }
-  // Twelve directory walks; asked for when the page is opened rather than at
-  // boot, and only the first time — the row carries a 다시 읽기 for the rest.
-  if (pane === "skills" || pane === "onboarding") void refreshSkills();
+  if (pane === "agents" && arriving) {
+    refreshAgents();
+    refreshHooks();
+  }
+  if (pane === "general" && arriving) {
+    void refreshSkills();
+    paintSettingsOnboarding();
+    void refreshSetupGuide().then(paintSettingsOnboarding);
+  }
+  if (pane === "project" && arriving) {
+    refreshProjectScripts();
+    void refreshIntegrationQueue();
+  }
+  if (pane === "git" && arriving) {
+    void refreshWorktreePrefs();
+  }
   // The same on-arrival rule: eleven directory walks and a PATH read, spent
   // when somebody looks, once — 다시 확인 carries the rest.
   if (pane === "orchestration" && orchReport === null && !orchLoading) {
@@ -1109,10 +1154,6 @@ function showSettingsPane(pane) {
       void prepareRouterEditor();
     }
   }
-  if (pane === "onboarding" && arriving) {
-    paintSettingsOnboarding();
-    void refreshSetupGuide().then(paintSettingsOnboarding);
-  }
   if (pane === "quick-commands" && arriving) void refreshSettingsQuickCommands();
   // The feed is asked on arrival (the backend judges the policy) and the
   // history read, once per arrival — 「지금 확인」 and 「다시 읽기」 carry the rest.
@@ -1131,13 +1172,15 @@ function showSettingsPane(pane) {
     void refreshGitlabIntegration();
     void refreshSecondBrain();
   }
-  if (pane === "ssh-hosts" && arriving) {
-    void refreshSshHosts();
-    void refreshRemoteWorkspaces();
+  if (pane === "ssh" && (arriving || requested !== pane)) {
+    if (arriving || requested === "ssh") void enterSshTargetsPane();
+    if (arriving || requested === "ssh-hosts") {
+      void refreshSshHosts();
+      void refreshRemoteWorkspaces();
+    }
+    if (arriving || requested === "remote-servers") void refreshRemoteServers();
+    if (arriving || requested === "remote-link") void refreshRemoteLink();
   }
-  if (pane === "ssh" && arriving) void enterSshTargetsPane();
-  if (pane === "remote-servers" && arriving) void refreshRemoteServers();
-  if (pane === "remote-link" && arriving) void refreshRemoteLink();
   if (pane === "macos-permissions" && arriving) void refreshDeveloperPermissions();
   const query = el("settings-search").value.trim().toLowerCase();
   // A section that is on screen but does not answer the query would be the
@@ -1158,7 +1201,11 @@ function showSettingsPane(pane) {
     if (item.dataset.pane === pane) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   }
-  if (pane === "judgment-models" && arriving && showing) void refreshTypeSafe();
+  syncSettingsKeepsPlace();
+  if (pane === "judgment-models" && showing) {
+    if (typeof modelConnectionsController !== "undefined") modelConnectionsController.flushIfDirty();
+    if (arriving) void refreshTypeSafe();
+  }
 }
 
 settingsRailItems.forEach((item) => {
@@ -1576,7 +1623,8 @@ function buildKeyRow(action) {
   return row;
 }
 
-function paintSettingsKeys() {
+function paintSettingsKeys({ force = false } = {}) {
+  if (!force && settingsView.hidden) return;
   const list = el("settings-keys");
   list.replaceChildren();
   paintKeyFilters();
@@ -5015,7 +5063,7 @@ el("flow-open-doc").addEventListener("click", () => {
 });
 
 /* Skills is a document view; Settings keeps a summary and its entry point. */
-el("skills-open").addEventListener("click", openSkillsView);
+el("skills-open")?.addEventListener("click", openSkillsView);
 
 function paintHooks() {
   el("hooks-enabled").checked = hooksReport.enabled !== false;
@@ -8746,6 +8794,7 @@ function paintRouterModels(models) {
   const tbody = el("router-models-tbody");
   const modelsSection = el("router-models-section");
   if (tbody) tbody.replaceChildren();
+  const frag = document.createDocumentFragment();
     for (let i = 0; i < models.length; i++) {
       const m = models[i];
       const tr = document.createElement("tr");
@@ -8769,8 +8818,9 @@ function paintRouterModels(models) {
       tdCtx.textContent = m.context_length ? m.context_length.toLocaleString() : "-";
       tr.appendChild(tdCtx);
 
-      if (tbody) tbody.appendChild(tr);
+      frag.appendChild(tr);
     }
+    if (tbody) tbody.appendChild(frag);
     syncRouterModelsAll();
 
     if (modelsSection) modelsSection.hidden = false;
@@ -9225,6 +9275,7 @@ function setLocale(code) {
   paintThemePicker();
   paintSettingsKeys();
   paintSettingsHealth();
+  invalidateSettingsSearchIndex();
   paintUpdateNotice();
   paintUpdatePane();
   paintEditingPrefs();
@@ -11165,40 +11216,36 @@ function setSettingsOpen(on, focus = null) {
     // webview last remembers. One full snapshot refreshes every preference,
     // including values committed by another window while this page was shut.
     void refreshSettingsSnapshot({ reportError: true });
-    paintSettingsKeys();
+    paintSettingsKeys({ force: true });
     paintLocalePicker();
     paintThemePicker();
     // Before `paintSettingsSearch`, which reads the rendered text to decide
     // what a query matches — an unpainted picker is a row nobody can find.
     paintTermPrefs();
+    invalidateSettingsSearchIndex();
     // The query does NOT survive the close, unlike the pane. A screen that
     // reopens already narrowed by something typed an hour ago is a screen
     // missing most of itself for a reason nobody can see.
     el("settings-search").value = "";
     // Search selects a pane itself. Choose the destination once so opening
-    // here doesn't run all the provider probes again while still hidden.
+    // here runs only the active pane's on-arrival probes.
     paintSettingsSearch(PANE_OF[focus] ?? settingsPane);
-    // Re-read on open rather than once at boot: an agent installed while this
-    // window was up is the ordinary case, and the scan is a PATH walk.
-    refreshAgents();
-    // Same reason, and one more: the file lives in the repository, so pulling
-    // a branch changes what this section says without the window doing
-    // anything.
-    refreshProjectScripts();
-    // The integration queue's switch is the same project's (t-45315): one
-    // more read on the same open.
-    void refreshIntegrationQueue();
-    // The branch prefix rides along with it: one section, one open, one pair
-    // of reads.
-    void refreshWorktreePrefs();
-    // Same for the hooks: the agents' own config files are edited by their own
-    // tools too, and this screen is where a person comes to check.
-    refreshHooks();
   }
   settingsSection = on ? focus : null;
   settingsView.hidden = !on;
-  if (!on) leaveDesignPage();
-  if (on && !wasOpen && settingsPane === "judgment-models") void refreshTypeSafe();
+  syncSettingsKeepsPlace();
+  if (!on) {
+    leaveDesignPage();
+    // Release dynamic shortcut & router-model table DOM while Settings is closed.
+    el("settings-keys")?.replaceChildren();
+    el("router-models-tbody")?.replaceChildren();
+    if (el("router-models-section")) el("router-models-section").hidden = true;
+    invalidateSettingsSearchIndex();
+  }
+  if (on && settingsPane === "judgment-models") {
+    if (typeof modelConnectionsController !== "undefined") modelConnectionsController.flushIfDirty();
+    if (!wasOpen) void refreshTypeSafe();
+  }
   if (on && focus) {
     const at = el(focus);
     for (let details = at?.closest("details:not([open])"); details; details = details.parentElement?.closest("details:not([open])")) {

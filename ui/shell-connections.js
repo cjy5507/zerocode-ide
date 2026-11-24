@@ -260,7 +260,28 @@ const modelConnectionsController = {
   receiving: false, runtimeNews: new Map(), runtimeNewsAt: null, runtimeAsked: null,
   /* The rows whose 「자세히」 the person opened. */
   rowsOpen: new Set(),
+  dirty: false,
+  dailyDirty: false,
 
+  isPaneVisible() {
+    return typeof settingsView !== "undefined"
+      && !settingsView.hidden
+      && typeof settingsPane !== "undefined"
+      && settingsPane === "judgment-models";
+  },
+  flushIfDirty() {
+    if (!this.dirty && !this.dailyDirty) return;
+    if (!this.isPaneVisible()) return;
+    const needAll = this.dirty;
+    this.dirty = false;
+    if (needAll) {
+      this.dailyDirty = false;
+      this.render();
+    } else if (this.dailyDirty && !this.setup) {
+      this.dailyDirty = false;
+      keepingSettingsScroll(() => this.renderDaily());
+    }
+  },
   show(view) {
     showSettingsPane("judgment-models");
     this.paintView(view);
@@ -269,6 +290,12 @@ const modelConnectionsController = {
     this.view = view;
     el("connection-catalog-heading").hidden = view === "add";
     for (const node of document.querySelectorAll("[data-connection-view]")) node.hidden = node.dataset.connectionView !== view;
+    if (view === "catalog") {
+      // Release potentially hundreds of router model table rows when leaving the editor.
+      el("router-models-tbody")?.replaceChildren();
+      if (el("router-models-section")) el("router-models-section").hidden = true;
+      this.flushIfDirty();
+    }
   },
   /* 「연결 추가」 asks the first question again (decision 7). */
   add() {
@@ -1230,9 +1257,19 @@ const modelConnectionsController = {
   /* ---- drawing ------------------------------------------------------------ */
 
   render() {
+    if (!this.isPaneVisible()) {
+      this.dirty = true;
+      return;
+    }
+    this.dirty = false;
     keepingSettingsScroll(() => {
       this.renderSetup();
-      this.renderDaily();
+      if (this.setup) {
+        this.dailyDirty = true;
+      } else {
+        this.dailyDirty = false;
+        this.renderDaily();
+      }
       this.renderConnections();
     });
   },
@@ -1658,6 +1695,7 @@ const modelConnectionsController = {
     if (!holder) return;
     holder.hidden = !this.setup;
     if (el("typesafe-card")) el("typesafe-card").hidden = Boolean(this.setup);
+    if (el("connections-add")) el("connections-add").hidden = Boolean(this.setup);
     if (!this.setup) {
       holder.replaceChildren();
       return;
@@ -1955,7 +1993,7 @@ const modelConnectionsController = {
     setup.draft.judgment ??= reco.judgment?.key ?? null;
     const block = modelNode("section", "model-step model-reco");
     const head = modelNode("div", "model-role-head");
-    head.append(modelNode("h4", "", t("settings.models.step3", "추천대로 쓰기")), modelBadge("ok"));
+    head.append(modelNode("h4", "", t("settings.models.step3", "추천대로 쓰기")));
     block.append(head);
     for (const role of ["coding", "judgment"]) {
       const key = setup.draft[role];
@@ -1992,7 +2030,6 @@ const modelConnectionsController = {
         if (role === "judgment" && key && key !== reco.judgment?.key) block.append(this.judgmentVerdict(key));
       }
     }
-    block.append(modelNode("p", "settings-row-desc", t("settings.models.judgmentAbout", "판단 모델이란? ZeroCode가 작은 결정을 빠르게 내릴 때 쓰는 모델입니다. 예를 들어 「이 명령이 위험한가」, 「어느 파일부터 볼까」 같은 것입니다. 코딩 모델과 따로 고르며, 작고 빠른 모델이면 충분합니다.")));
     const judgmentOk = !setup.draft.judgment || setup.draft.judgment === reco.judgment?.key || this.judgmentReady(setup.draft.judgment);
     const apply = this.button(t("settings.models.step3", "추천대로 쓰기"), () => void this.applySetup(), true);
     apply.dataset.modelApplySetup = "";
@@ -2381,7 +2418,6 @@ requestAnimationFrame(() => window.setTimeout(() => {
   else wake();
 }, QUIET_CHECK_AFTER_PAINT_MS));
 el("connections-decisions")?.addEventListener("click", () => openJevView());
-el("model-open-orchestration")?.addEventListener("click", () => showSettingsPane("orchestration"));
 for (const button of document.querySelectorAll("[data-connection-nav]")) button.addEventListener("click", () => modelConnectionsController.show(button.dataset.connectionNav));
 el("connections-add")?.addEventListener("click", () => modelConnectionsController.add());
 el("model-key-add")?.addEventListener("click", () => modelConnectionsController.addKey());

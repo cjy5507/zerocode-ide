@@ -4162,10 +4162,6 @@
             </div>
             <div class="settings-rail-group-box" data-group="setup">
               <p class="settings-rail-group" data-i18n="settings.rail.setup">시작 설정</p>
-              <button class="settings-rail-item" type="button" data-pane="onboarding">
-                <svg class="icon" aria-hidden="true"><use href="#i-circle-check"></use></svg>
-                <span data-i18n="settings.onboarding.title">온보딩</span>
-              </button>
               <button class="settings-rail-item" type="button" data-pane="general" aria-current="page">
                 <svg class="icon" aria-hidden="true"><use href="#i-sliders"></use></svg>
                 <span data-i18n="settings.general.title">일반</span>
@@ -4178,24 +4174,12 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>
                 <span data-i18n="settings.integrations.title">연동</span>
               </button>
-              <button class="settings-rail-item" type="button" data-pane="ssh">
-                <svg class="icon" aria-hidden="true"><use href="#i-server"></use></svg>
-                <span data-i18n="settings.ssh.title">SSH 호스트</span>
-              </button>
             </div>
             <div class="settings-rail-group-box" data-group="remote">
               <p class="settings-rail-group" data-i18n="settings.rail.remote">원격</p>
-              <button class="settings-rail-item" type="button" data-pane="ssh-hosts">
-                <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
-                <span data-i18n="settings.sshHosts.title">SSH 터미널</span>
-              </button>
-              <button class="settings-rail-item" type="button" data-pane="remote-servers">
-                <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
-                <span data-i18n="settings.remoteServers.title">원격 서버</span>
-              </button>
-              <button class="settings-rail-item" type="button" data-pane="remote-link">
-                <svg class="icon" aria-hidden="true"><use href="#i-phone"></use></svg>
-                <span data-i18n="settings.remoteLink.title">원격 연결</span>
+              <button class="settings-rail-item" type="button" data-pane="ssh">
+                <svg class="icon" aria-hidden="true"><use href="#i-server"></use></svg>
+                <span data-i18n="settings.ssh.title">SSH 호스트</span>
               </button>
             </div>
             <div class="settings-rail-group-box" data-group="workflows">
@@ -4230,14 +4214,6 @@
               <button class="settings-rail-item" type="button" data-pane="floating-workspace">
                 <svg class="icon" aria-hidden="true"><use href="#i-panels-top"></use></svg>
                 <span data-i18n="settings.floating.title">플로팅 워크스페이스</span>
-              </button>
-              <button class="settings-rail-item" type="button" data-pane="hooks">
-                <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>
-                <span data-i18n="hooks.title">에이전트 훅</span>
-              </button>
-              <button class="settings-rail-item" type="button" data-pane="skills">
-                <svg class="icon" aria-hidden="true"><use href="#i-book"></use></svg>
-                <span data-i18n="skills.title">스킬·MCP</span>
               </button>
             </div>
             <div class="settings-rail-group-box" data-group="project">
@@ -4334,7 +4310,7 @@
              pane is FOR is the two halves being crossed: the registry says how
              to drive an agent, `PATH` says whether it is here, and a picker
              needs both to be honest. -->
-        <section class="settings-pane" data-pane="agents" hidden>
+        <section class="settings-pane" data-pane="agents" hidden data-keywords="에이전트 훅 hooks 상태 훅 agent">
         <header class="settings-section-head">
           <h2 class="settings-section-title" data-i18n="settings.agents.title">에이전트</h2>
           <p class="settings-section-desc" data-i18n="settings.agents.about">
@@ -4422,6 +4398,37 @@
           </p>
         </div>
         <div class="agent-list" id="agent-available"></div>
+        </div>
+        <div class="settings-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="hooks.title">에이전트 훅</h3>
+            <p class="settings-subhead-desc" data-i18n="hooks.about">
+              에이전트가 일하는 중인지 물어보는 중인지 창이 알 수 있게 하는 다리.
+            </p>
+          </div>
+          <label class="settings-check">
+            <input type="checkbox" id="hooks-enabled" />
+            <span class="settings-label" data-i18n="hooks.enable">에이전트 상태 훅 사용</span>
+          </label>
+          <p class="settings-hint" data-i18n="hooks.enableHint">
+            각 에이전트의 설정 파일에 이 창의 훅을 심습니다. 끄면 다시 빼냅니다.
+          </p>
+          <p class="settings-hint hooks-warn" id="hooks-quiet" hidden data-i18n="hooks.quiet">
+            이 기계에서는 다리를 열지 못했습니다 — 훅이 심겨 있어도 아무것도 도착하지 않습니다.
+          </p>
+          <div class="settings-subhead settings-subhead--acts settings-subhead--divided">
+            <div>
+              <h4 class="settings-subhead-title">
+                <span data-i18n="hooks.agents">에이전트별 상태</span>
+                <span class="settings-badge" id="hooks-count"></span>
+              </h4>
+              <p class="settings-subhead-desc" data-i18n="hooks.agentsHint">
+                훅이 어느 파일에 들어가 있는지. 창을 켠 뒤에 에이전트를 설치했다면 다시 심으세요.
+              </p>
+            </div>
+            <button class="btn" id="hooks-install" type="button" data-i18n="hooks.install">다시 심기</button>
+          </div>
+          <div class="agent-list" id="hooks-list"></div>
         </div>
         </section>
 
@@ -4827,13 +4834,6 @@
                 <button class="settings-jev-link" type="button" id="jev-open-dashboard" data-i18n="settings.typesafe.openDashboard">대시보드 열기</button>
               </p>
               </details>
-            </section>
-            <section class="model-advanced-item" aria-labelledby="model-advanced-moved-title">
-              <h4 id="model-advanced-moved-title" data-i18n="settings.models.movedTitle">워커 모델 · 난이도 판정 방식</h4>
-              <p class="settings-row-desc" data-i18n="settings.models.movedAbout">판단 모델 고르기와 관계가 없어 「오케스트레이션」 설정으로 옮겼습니다.</p>
-              <div class="settings-action-row">
-                <button type="button" class="btn" id="model-open-orchestration" data-i18n="orch.title">오케스트레이션</button>
-              </div>
             </section>
           </details>
         </div>
@@ -5373,42 +5373,8 @@
         </template>
         </section>
 
-        <section class="settings-pane" data-pane="onboarding" hidden>
+        <section class="settings-pane" data-pane="general" data-keywords="일반 온보딩 onboarding 체크리스트 checklist 첫 실행 general">
           <button class="btn skills-required-badge" type="button" data-required-skills hidden></button>
-        <header class="settings-section-head">
-          <h2 class="settings-section-title" data-i18n="settings.onboarding.title">온보딩</h2>
-          <p class="settings-section-desc" data-i18n="settings.onboarding.about">
-            첫 실행 안내를 다시 보고, 시작 체크리스트의 현재 상태를 확인합니다.
-          </p>
-        </header>
-        <div class="settings-card">
-          <div class="settings-subhead settings-subhead--acts">
-            <div>
-              <h3 class="settings-subhead-title" data-i18n="settings.onboarding.wizard">첫 실행 안내</h3>
-              <p class="settings-subhead-desc" id="settings-onboarding-detail"></p>
-            </div>
-            <span class="settings-state" id="settings-onboarding-status" data-state="unchecked"
-                  role="status" aria-live="polite"></span>
-          </div>
-          <div class="settings-action-row">
-            <button class="btn" id="settings-onboarding-open" type="button"
-                    data-i18n="onboard.reopen">온보딩 다시 보기</button>
-          </div>
-          <div class="settings-subhead settings-subhead--acts settings-subhead--divided">
-            <div>
-              <h3 class="settings-subhead-title" data-i18n="guide.title">시작하기</h3>
-              <p class="settings-subhead-desc" id="settings-guide-detail"></p>
-            </div>
-            <span class="settings-badge" id="settings-guide-count"></span>
-          </div>
-          <div class="settings-action-row">
-            <button class="btn" id="settings-guide-open" type="button"
-                    data-i18n="settings.onboarding.openChecklist">체크리스트 열기</button>
-          </div>
-        </div>
-        </section>
-
-        <section class="settings-pane" data-pane="general">
         <header class="settings-section-head">
           <h2 class="settings-section-title" data-i18n="settings.general.title">일반</h2>
           <p class="settings-section-desc" data-i18n="settings.general.about">
@@ -5547,6 +5513,31 @@
                aria-label="추천 앱 추가"></div>
           <div class="settings-open-in-list" id="open-in-applications-list"
                aria-live="polite"></div>
+        </div>
+        <div class="settings-card">
+          <div class="settings-subhead settings-subhead--acts">
+            <div>
+              <h3 class="settings-subhead-title" data-i18n="settings.onboarding.wizard">첫 실행 안내</h3>
+              <p class="settings-subhead-desc" id="settings-onboarding-detail"></p>
+            </div>
+            <span class="settings-state" id="settings-onboarding-status" data-state="unchecked"
+                  role="status" aria-live="polite"></span>
+          </div>
+          <div class="settings-action-row">
+            <button class="btn" id="settings-onboarding-open" type="button"
+                    data-i18n="onboard.reopen">온보딩 다시 보기</button>
+          </div>
+          <div class="settings-subhead settings-subhead--acts settings-subhead--divided">
+            <div>
+              <h3 class="settings-subhead-title" data-i18n="guide.title">시작하기</h3>
+              <p class="settings-subhead-desc" id="settings-guide-detail"></p>
+            </div>
+            <span class="settings-badge" id="settings-guide-count"></span>
+          </div>
+          <div class="settings-action-row">
+            <button class="btn" id="settings-guide-open" type="button"
+                    data-i18n="settings.onboarding.openChecklist">체크리스트 열기</button>
+          </div>
         </div>
         <!-- 버전 줄. 5번 누르면 설정 목록에 「디자인 시스템」이 나타난다(shell-design.js);
              글은 「업데이트」 페이지의 첫 줄과 같은 낱말이다(`paintUpdatePane`). -->
@@ -5964,7 +5955,8 @@
 
         <!-- SSH 대상 목록 — Orca `SshPane`. 목록·폼과 ~/.ssh/config 동기화까지:
              연결과 상태는 뒤 조각이 가져온다. -->
-        <section class="settings-pane" data-pane="ssh" hidden>
+        <section class="settings-pane" data-pane="ssh" hidden
+                 data-keywords="ssh 호스트 터미널 원격 서버 연결 폰 휴대폰 아이폰 안드로이드 알림 푸시 페어링 QR 코드 Tailscale Serve phone mobile iPhone Android remote link server host push notification pairing">
         <header class="settings-section-head">
           <h2 class="settings-section-title" data-i18n="settings.ssh.title">SSH 호스트</h2>
           <p class="settings-section-desc" data-i18n="settings.ssh.about">
@@ -5998,15 +5990,7 @@
             구성된 SSH 대상이 없습니다.
           </p>
         </div>
-        </section>
 
-        <section class="settings-pane" data-pane="ssh-hosts" hidden>
-        <header class="settings-section-head">
-          <h2 class="settings-section-title" data-i18n="settings.sshHosts.title">SSH 터미널</h2>
-          <p class="settings-section-desc" data-i18n="settings.sshHosts.about">
-            확인한 호스트 키와 OS 자격증명 저장소를 사용해 원격 셸에 연결합니다.
-          </p>
-        </header>
         <div class="settings-card settings-card--providers">
           <section class="integration-provider" aria-labelledby="ssh-hosts-card-title">
             <header class="integration-provider-head">
@@ -6077,17 +6061,6 @@
               </button>
             </div>
           </section>
-        </div>
-        </section>
-
-        <section class="settings-pane" data-pane="remote-servers" hidden>
-        <header class="settings-section-head">
-          <h2 class="settings-section-title" data-i18n="settings.remoteServers.title">원격 서버</h2>
-          <p class="settings-section-desc" data-i18n="settings.remoteServers.about">
-            암호화된 외부 터널의 loopback 끝점에서 실행 중인 ZeroCode 세션 서버에 연결합니다.
-          </p>
-        </header>
-        <div class="settings-card settings-card--providers">
           <section class="integration-provider" aria-labelledby="remote-servers-card-title">
             <header class="integration-provider-head">
               <div class="integration-provider-identity">
@@ -6125,18 +6098,6 @@
               </button>
             </div>
           </section>
-        </div>
-        </section>
-
-        <section class="settings-pane" data-pane="remote-link" hidden
-                 data-keywords="원격 연결 폰 휴대폰 아이폰 안드로이드 알림 푸시 페어링 QR 코드 Tailscale Serve phone mobile iPhone Android remote link push notification pairing">
-        <header class="settings-section-head">
-          <h2 class="settings-section-title" data-i18n="settings.remoteLink.title">원격 연결</h2>
-          <p class="settings-section-desc" data-i18n="settings.remoteLink.about">
-            이 컴퓨터의 에이전트 목록을 폰에서 보고, 답이 필요할 때 폰으로 알림을 받습니다. 창은 127.0.0.1에만 열고, 폰이 들어오는 길은 Tailscale Serve가 tailnet 안에서만 맡습니다.
-          </p>
-        </header>
-        <div class="settings-card settings-card--providers">
           <section class="integration-provider" aria-labelledby="remote-link-road-title">
             <header class="integration-provider-head">
               <div class="integration-provider-identity">
@@ -7051,40 +7012,6 @@
              (~/.claude/settings.json and nine more), so the row says which file
              and what state it is in — a product that edits somebody's settings
              silently has no business doing it. -->
-        <section class="settings-pane" data-pane="hooks" hidden>
-        <header class="settings-section-head">
-          <h2 class="settings-section-title" data-i18n="hooks.title">에이전트 훅</h2>
-          <p class="settings-section-desc" data-i18n="hooks.about">
-            에이전트가 일하는 중인지 물어보는 중인지 창이 알 수 있게 하는 다리.
-          </p>
-        </header>
-        <div class="settings-card">
-          <label class="settings-check">
-            <input type="checkbox" id="hooks-enabled" />
-            <span class="settings-label" data-i18n="hooks.enable">에이전트 상태 훅 사용</span>
-          </label>
-          <p class="settings-hint" data-i18n="hooks.enableHint">
-            각 에이전트의 설정 파일에 이 창의 훅을 심습니다. 끄면 다시 빼냅니다.
-          </p>
-          <p class="settings-hint hooks-warn" id="hooks-quiet" hidden data-i18n="hooks.quiet">
-            이 기계에서는 다리를 열지 못했습니다 — 훅이 심겨 있어도 아무것도 도착하지 않습니다.
-          </p>
-          <div class="settings-subhead settings-subhead--acts">
-            <div>
-              <h3 class="settings-subhead-title">
-                <span data-i18n="hooks.agents">에이전트별 상태</span>
-                <span class="settings-badge" id="hooks-count"></span>
-              </h3>
-              <p class="settings-subhead-desc" data-i18n="hooks.agentsHint">
-                훅이 어느 파일에 들어가 있는지. 창을 켠 뒤에 에이전트를 설치했다면 다시 심으세요.
-              </p>
-            </div>
-            <button class="btn" id="hooks-install" type="button" data-i18n="hooks.install">다시 심기</button>
-          </div>
-          <div class="agent-list" id="hooks-list"></div>
-        </div>
-        </section>
-
         <!-- What the agents on this machine already know how to do. Orca's
              `SkillsPage`: a list with filters, and one action per row — reveal
              the file. Read-only: these are files the user and their agents own,
@@ -7591,11 +7518,6 @@
           </div>
           <button class="btn" type="button" id="flow-open-page" data-i18n="flow.openPage">자동화에서 열기</button>
         </div>
-        </section>
-
-        <section class="settings-pane" data-pane="skills" hidden>
-          <header class="settings-section-head"><h2 class="settings-section-title" data-i18n="skills.title">스킬·MCP</h2></header>
-          <div class="settings-card"><p id="skills-summary" data-i18n="skills.loading">스킬을 읽는 중…</p><button id="skills-open" class="btn" type="button" data-i18n="skills.open">스킬·MCP 열기</button></div>
         </section>
 
         <section class="settings-pane" data-pane="project" hidden>
