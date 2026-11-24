@@ -28,13 +28,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SPACE, VK_TAB, VK_UP, VkKeyScanW,
 };
 use zerocode_core::computer_use_protocol::click_plan::{
-    self, DeliveryFailure, Recipient, RecipientObservation, Step, partial_delivery_recovery,
+    self, DeliveryFailure, Look, Recipient, RecipientObservation, Step, partial_delivery_recovery,
 };
 use zerocode_core::computer_use_protocol::keys::{KeyChord, Modifier};
 use zerocode_core::computer_use_protocol::validate::{MouseButton, ScrollDirection};
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
 use super::super::geometry::{virtual_desk_coordinate, wheel_delta};
+use super::super::took_input::PressSeen;
 use super::super::typed_text::{characters_within, keystroke_units};
 use super::desktop_windows;
 
@@ -380,18 +381,36 @@ pub(super) fn drag(from: (f64, f64), to: (f64, f64)) -> Result<(), ProviderError
     moved.and(released)
 }
 
+/// One look of the click fence: who it takes the recipient to be
+/// (`fence`), and the windows it read for that (`seen`) — which say where a
+/// press sent now goes, apart from what the fence allows.
+pub(super) struct Observed {
+    pub fence: RecipientObservation,
+    pub seen: PressSeen,
+}
+
 /// `currentSyntheticClickRecipient`: who owns the foreground, and — when
 /// that is the target — who is under the point about to be clicked. A
 /// window the target owns (its own context menu, dropdown or tooltip) IS the
-/// target: a right-click that opened a menu under the pointer has not been
-/// stolen. Any other window, in this process or another, is a change.
-pub(super) fn observe_recipient(target: Recipient, x: f64, y: f64) -> RecipientObservation {
+/// target to the fence: a right-click that opened a menu under the pointer
+/// has not been stolen. Any other window, in this process or another, is a
+/// change. The windows read are kept as they are (`seen`): a press the fence
+/// lets through over a window the target owns went to that window, and the
+/// act's answer does not name the target for it (`took_input`).
+pub(super) fn observe_recipient(target: Recipient, x: f64, y: f64) -> Observed {
     let Some((pid, root)) = desktop_windows::foreground() else {
-        return RecipientObservation::Dismissed;
+        return Observed {
+            fence: RecipientObservation::Dismissed,
+            seen: PressSeen::default(),
+        };
     };
     let focused = Recipient {
         owner_pid: pid,
         window_id: root as u64,
+    };
+    let mut seen = PressSeen {
+        front: Some(focused.window_id),
+        under: None,
     };
     if focused != target
         && !desktop_windows::is_owned_by_target(
@@ -399,14 +418,18 @@ pub(super) fn observe_recipient(target: Recipient, x: f64, y: f64) -> RecipientO
             target,
         )
     {
-        return RecipientObservation::Focused(focused);
+        return Observed {
+            fence: RecipientObservation::Focused(focused),
+            seen,
+        };
     }
-    match desktop_windows::root_at(x, y) {
+    let fence = match desktop_windows::root_at(x, y) {
         Some((pid, root)) => {
             let under = Recipient {
                 owner_pid: pid,
                 window_id: root as u64,
             };
+            seen.under = Some(under.window_id);
             if under == target
                 || desktop_windows::is_owned_by_target(
                     desktop_windows::hwnd_from_id(under.window_id),
@@ -419,13 +442,15 @@ pub(super) fn observe_recipient(target: Recipient, x: f64, y: f64) -> RecipientO
             }
         }
         None => RecipientObservation::Unavailable,
-    }
+    };
+    Observed { fence, seen }
 }
 
 /// A fenced click at a screen point, with modifiers held around it. Every
 /// refusal — a modifier the platform would not press, a button event it
 /// dropped, a window that took the pointer — ends with nothing held and the
-/// truth of what was delivered.
+/// truth of what was delivered. A click delivered answers what the fence
+/// saw just before each press (`Look::BeforePress`): where the press went.
 pub(super) fn deliver_click(
     x: f64,
     y: f64,
@@ -433,7 +458,7 @@ pub(super) fn deliver_click(
     count: usize,
     modifiers: &[Modifier],
     target: Recipient,
-) -> Result<(), ProviderError> {
+) -> Result<Vec<PressSeen>, ProviderError> {
     let held = click_modifier_keys(modifiers)?;
     let held_pairs: Vec<(VIRTUAL_KEY, bool)> = held.iter().map(|vk| (*vk, false)).collect();
     if !held.is_empty() {
@@ -443,10 +468,17 @@ pub(super) fn deliver_click(
             return Err(refusal.into_error());
         }
     }
+    let mut presses = Vec::with_capacity(count);
     let outcome = click_plan::deliver(
         count,
         target,
-        || observe_recipient(target, x, y),
+        |look| {
+            let observed = observe_recipient(target, x, y);
+            if look == Look::BeforePress {
+                presses.push(observed.seen);
+            }
+            observed.fence
+        },
         |step| -> Result<INPUT, ProviderError> {
             Ok(match step {
                 Step::Move => absolute_move(x, y),
@@ -465,7 +497,7 @@ pub(super) fn deliver_click(
     }
     release_keys(&held_pairs);
     match outcome {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(presses),
         Err(DeliveryFailure::Fence(failure)) => Err(ProviderError::new(
             error_code::WINDOW_NOT_FOCUSED,
             failure.message(),

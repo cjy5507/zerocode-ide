@@ -21,6 +21,16 @@ pub(super) struct PressSeen {
     pub(super) under: Option<u64>,
 }
 
+impl PressSeen {
+    /// The press went to `window` itself: it stood in front and under the
+    /// point. A window it owns in either place — a popup under the point, a
+    /// dialog in front that keeps it from input — took the press instead,
+    /// or may have.
+    fn went_to(&self, window: u64) -> bool {
+        self.front == Some(window) && self.under == Some(window)
+    }
+}
+
 /// What a road of the Windows provider saw of where its input went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Delivered {
@@ -40,19 +50,35 @@ pub(super) enum Delivered {
 
 impl Delivered {
     /// The window this road saw take its input, by its number, for an act
-    /// aimed at `window` — what `Provider::input_taken_by` keeps, and the act's
-    /// answer names its window only when it is that one
-    /// (`ActedWindow::if_it_took`). As the roads answer today: each names
-    /// the window it was aimed at once its call returned — whatever window a
-    /// click's presses went to, whether or not a page of a scroll or a toggle
-    /// was answered, whichever window stood in front of keys (here the act's
-    /// own) — and a write into the focused element names that element's
-    /// window whether or not the write answered.
+    /// aimed at `window` — what `Provider::input_taken_by` keeps, and the
+    /// act's answer names its window only when it is that one
+    /// (`ActedWindow::if_it_took`):
+    /// - calls on its tree: `window`, once one of them answered;
+    /// - a click: `window`, when every press found `window` itself in front
+    ///   and under the point — not a window it owns, which took the press
+    ///   though the fence let it through as `window`'s own;
+    /// - keys: none, ever;
+    /// - a write into the focused element: the element's own window, once
+    ///   the write answered.
     #[must_use]
     pub(super) fn took(&self, window: u64) -> Option<u64> {
         match self {
-            Self::TreeCalls { .. } | Self::Presses(_) | Self::Keys => Some(window),
-            Self::FocusedWrite { window: own, .. } => *own,
+            Self::TreeCalls { answered } => (*answered > 0).then_some(window),
+            Self::Presses(presses) => {
+                let every = presses.iter().all(|seen| seen.went_to(window));
+                (every && !presses.is_empty()).then_some(window)
+            }
+            Self::Keys => None,
+            Self::FocusedWrite {
+                window: own,
+                answered,
+            } => {
+                if *answered {
+                    *own
+                } else {
+                    None
+                }
+            }
         }
     }
 }

@@ -10,11 +10,14 @@
 //! `NotApplicable` lets the synthetic road run.
 //!
 //! An act's answer names its window only where its road saw that window
-//! take the input (`Provider::input_taken_by`): an element of the window's
-//! own tree worked, a press the click fence let through only over it, keys
-//! sent with it in front, a focused element whose own window it is. The
-//! wheel and a drag go to a point of the screen, which whatever window
-//! stands there takes, and name none.
+//! take the input (`Provider::input_taken_by`, the one rule in
+//! `took_input`): an element of the window's own tree answered a call,
+//! every press found the window itself in front and under the point, a
+//! focused element whose own window it is answered a write. Allowing an
+//! act is a judgement of its own: the click fence lets a press through
+//! over a window the target owns, and the focus check lets keys go with
+//! the target in front, but neither says the target took them. Keys, the
+//! wheel and a drag name no window.
 
 use serde_json::{Map, Value};
 use windows::Win32::UI::Accessibility::IUIAutomationElement;
@@ -37,6 +40,7 @@ use zerocode_core::computer_use_protocol::{
     ActionMetadata, ActionPath, ProviderError, Verification, error_code, unverified_reason,
 };
 
+use super::super::took_input::Delivered;
 use super::clipboard::{RestoreOutcome, Snapshot as ClipboardSnapshot};
 use super::desktop_windows;
 use super::input;
@@ -112,23 +116,25 @@ impl Provider {
     }
 
     /// `requireTargetWindowFocused`: keys go only while the target window,
-    /// or a window of its process mostly covering it, is in front — and
-    /// they go to the window in front, which this act saw take them.
+    /// or a window of its process mostly covering it, is in front. That
+    /// allows them; it does not see where they go — the input stream takes
+    /// them for whatever holds the focus when it hands them on — so the
+    /// answer names no window (`Delivered::Keys`).
     fn require_focused(
         &mut self,
         snapshot: &Snapshot,
         params: &Map<String, Value>,
     ) -> Result<(), ProviderError> {
-        let front = desktop_windows::focused_front(&snapshot.window);
-        if let Some(failure) =
-            synthetic_input_focus_failure(front.is_some(), params::flag(params, "restoreWindow"))
-        {
+        if let Some(failure) = synthetic_input_focus_failure(
+            desktop_windows::is_focused(&snapshot.window),
+            params::flag(params, "restoreWindow"),
+        ) {
             return Err(ProviderError::new(
                 error_code::WINDOW_NOT_FOCUSED,
                 failure.message(&snapshot.app.name),
             ));
         }
-        self.input_taken_by(front);
+        self.input_taken_by(Delivered::Keys.took(snapshot.window.id()));
         Ok(())
     }
 
@@ -194,15 +200,16 @@ impl Provider {
                     format!("element {index} has no clickable frame"),
                 ));
             };
-            input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
-            self.input_taken_by(Some(snapshot.window.id()));
+            let presses =
+                input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
+            self.input_taken_by(Delivered::Presses(presses).took(snapshot.window.id()));
             return Ok(ActionMetadata::new(ActionPath::Synthetic)
                 .fallback("actionUnsupported")
                 .verified_as(Verification::synthetic_input()));
         }
         let (x, y) = coordinate(params, "x", "y", &snapshot)?;
-        input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
-        self.input_taken_by(Some(snapshot.window.id()));
+        let presses = input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
+        self.input_taken_by(Delivered::Presses(presses).took(snapshot.window.id()));
         Ok(ActionMetadata::new(ActionPath::Synthetic).verified_as(Verification::synthetic_input()))
     }
 
@@ -274,12 +281,17 @@ impl Provider {
             Err(_) => None,
         };
         let coercion = ValueCoercion::new(existing.as_ref(), &expected);
-        match (probe.kind, &coercion.write_value) {
+        // The calls the element answered: one SetValue, or the Toggles a
+        // check box took to reach the state — none when it already stood
+        // there or its state could not be read.
+        let answered = match (probe.kind, &coercion.write_value) {
             (ValueKind::Text, AttributeValue::String(value)) => {
-                uia::set_text_value(element, value)?
+                uia::set_text_value(element, value)?;
+                1
             }
             (ValueKind::Range, AttributeValue::Double(value)) => {
-                uia::set_range_value(element, *value)?
+                uia::set_range_value(element, *value)?;
+                1
             }
             (ValueKind::Toggle, AttributeValue::Boolean(value)) => uia::toggle_to(element, *value)?,
             (ValueKind::Range, _) => {
@@ -293,8 +305,8 @@ impl Provider {
                 )));
             }
             (ValueKind::Text, _) => return Err(not_settable()),
-        }
-        self.input_taken_by(Some(snapshot.window.id()));
+        };
+        self.input_taken_by(Delivered::TreeCalls { answered }.took(snapshot.window.id()));
         // A password field is never read back, and what was written is not
         // repeated in the answer.
         if secret {
@@ -342,9 +354,17 @@ impl Provider {
         Self::gate_secret_entry(&snapshot, target.as_ref(), ChordWrites::Character)?;
         let mut fallback = None;
         if let Some(element) = target {
-            match replace_selection(&UiaTextField(&element), &text) {
+            let outcome = replace_selection(&UiaTextField(&element), &text);
+            let answered = outcome.write_answered();
+            match outcome {
                 ReplaceOutcome::Applied(verification) => {
-                    self.input_taken_by(window_of(&element));
+                    self.input_taken_by(
+                        Delivered::FocusedWrite {
+                            window: window_of(&element),
+                            answered,
+                        }
+                        .took(snapshot.window.id()),
+                    );
                     return Ok(replaced(verification));
                 }
                 ReplaceOutcome::NotApplicable(reason) => fallback = Some(reason),
@@ -428,12 +448,19 @@ impl Provider {
         let text = params::required_string(params, "text")?;
         let target = self.live_focused(&snapshot);
         Self::gate_secret_entry(&snapshot, target.as_ref(), ChordWrites::Clipboard)?;
-        if let Some(element) = target
-            && let ReplaceOutcome::Applied(verification) =
-                replace_selection(&UiaTextField(&element), &text)
-        {
-            self.input_taken_by(window_of(&element));
-            return Ok(replaced(verification));
+        if let Some(element) = target {
+            let outcome = replace_selection(&UiaTextField(&element), &text);
+            let answered = outcome.write_answered();
+            if let ReplaceOutcome::Applied(verification) = outcome {
+                self.input_taken_by(
+                    Delivered::FocusedWrite {
+                        window: window_of(&element),
+                        answered,
+                    }
+                    .took(snapshot.window.id()),
+                );
+                return Ok(replaced(verification));
+            }
         }
         self.require_focused(&snapshot, params)?;
         Self::gate_secret_entry(
@@ -494,10 +521,13 @@ impl Provider {
                 && let Some(action) = direction.page_action(&record.actions)
             {
                 let action = action.to_string();
+                let mut answered = 0;
                 for _ in 0..(pages as usize).max(1) {
-                    let _ = uia::scroll_page(element, direction);
+                    if uia::scroll_page(element, direction).is_ok() {
+                        answered += 1;
+                    }
                 }
-                self.input_taken_by(Some(snapshot.window.id()));
+                self.input_taken_by(Delivered::TreeCalls { answered }.took(snapshot.window.id()));
                 return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
             }
             let Some((x, y)) = snapshot.center_of(record) else {

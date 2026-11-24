@@ -219,15 +219,18 @@ impl Provider {
         current
     }
 
-    /// The window an act's road saw take its input, by its number: the
-    /// act's own window when an element of its tree was worked or the click
-    /// fence let a press through only over it, the window in front when
-    /// keys went (`require_focused`), the window a focused element says it
-    /// lives in. `None` where the road saw nothing take it: the wheel or a
-    /// drag sent at a point of the screen, which whatever window stands
-    /// there takes, or text written into a focused element only its process
-    /// ties to the window. The act's answer names its window only when that
-    /// window took the input (`run_action`, review t-129021 §3).
+    /// The window an act's road saw take its input, by its number, as the
+    /// one rule tells it from what the road saw (`took_input::Delivered`):
+    /// the act's own window when an element of its tree answered a call or
+    /// every press found the window itself in front and under the point,
+    /// the window a focused element says it lives in when it answered a
+    /// write. `None` where the road saw nothing take it: keys, which the
+    /// input stream takes without saying where; the wheel or a drag sent at
+    /// a point of the screen, which whatever window stands there takes; a
+    /// press that went to a window the target owns; calls or a write nobody
+    /// answered; text written into a focused element only its process ties
+    /// to the window. The act's answer names its window only when that
+    /// window took the input (`run_action`, reviews t-129021 §3, t-129057).
     pub(super) fn input_taken_by(&mut self, window: Option<u64>) {
         self.took_input = window;
     }

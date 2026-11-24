@@ -275,8 +275,9 @@ impl ActedWindow {
     /// t-129021 §3). A step's evidence keeps a look of the window its answer
     /// names, so a window the input was only aimed at — a wheel or a drag
     /// sent at a point of the screen, which whatever window stands there
-    /// takes; keys sent while another window of the app stood in front over
-    /// it — is named by no answer, and its step keeps no picture.
+    /// takes; keys, which the input stream takes without saying where; a
+    /// press that went to a popup the window owns — is named by no answer,
+    /// and its step keeps no picture (review t-129057).
     #[must_use]
     pub fn if_it_took(self, took_input: Option<u64>) -> Option<Self> {
         (took_input == Some(self.id)).then_some(self)

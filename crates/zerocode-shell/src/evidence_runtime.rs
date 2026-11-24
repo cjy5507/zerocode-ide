@@ -1656,17 +1656,17 @@ mod tests {
     }
 
     /// A Windows act's answer names its window only when the provider saw
-    /// that window take the act's input (review t-129021 §3), so its look of
-    /// that window frames its step only then. An element of the window's own
-    /// tree worked, a press the click fence let through only over it, keys
-    /// sent with the window itself in front: the look, drawn by the window,
-    /// is the step's frame. A wheel or a drag sent at a point of the screen,
-    /// which whatever window stands there takes; keys sent while another
-    /// window of the app stood in front over it, which the focus check lets
-    /// pass; text written into the focused element that only its process
-    /// ties to the window: the look shows the window the act was aimed at,
-    /// not one its input is known to have reached, so no picture is kept and
-    /// the line says why. Every case is framed before the one assertion reads
+    /// that window take the act's input (reviews t-129021 §3, t-129057), so
+    /// its look of that window frames its step only then. Every press found
+    /// the window itself in front and under the point, its focused element
+    /// answered the text written into it: the look, drawn by the window, is
+    /// the step's frame. A wheel or a drag sent at a point of the screen,
+    /// which whatever window stands there takes; keys, which the input
+    /// stream takes without saying where, whichever window stood in front;
+    /// text written into the focused element that only its process ties to
+    /// the window: the look shows the window the act was aimed at, not one
+    /// its input is known to have reached, so no picture is kept and the
+    /// line says why. Every case is framed before the one assertion reads
     /// them all.
     #[test]
     fn a_windows_act_frames_its_window_only_when_the_window_was_seen_to_take_its_input() {
@@ -1713,15 +1713,21 @@ mod tests {
         };
         let press_return = ["press-key", "--app", "Notepad", "--key", "Return"];
         let seen = [
-            // The click fence let the press through over window 19.
+            // The press found window 19 itself in front and under the point.
             framed(
                 &["click", "--app", "Notepad", "--x", "400", "--y", "300"],
                 "click",
                 ActionPath::Synthetic,
                 Some(19),
             ),
-            // Window 19 itself was in front when the keys went.
-            framed(&press_return, "pressKey", ActionPath::Synthetic, Some(19)),
+            // The focused element of window 19, by its own handle, answered
+            // the text written through its Value pattern.
+            framed(
+                &["type-text", "--app", "Notepad", "--text", "a"],
+                "typeText",
+                ActionPath::Accessibility,
+                Some(19),
+            ),
             // The wheel at a point of the screen: nobody looked who took it.
             framed(
                 &[
@@ -1749,8 +1755,9 @@ mod tests {
                 ActionPath::Synthetic,
                 None,
             ),
-            // Window 23 of the same app stood in front over window 19.
-            framed(&press_return, "pressKey", ActionPath::Synthetic, Some(23)),
+            // Keys, here with window 23 of the app in front over window 19:
+            // the input stream takes them without saying where.
+            framed(&press_return, "pressKey", ActionPath::Synthetic, None),
             // The focused element took the text through its Value pattern,
             // and named no window of its own: only its process, 501.
             framed(

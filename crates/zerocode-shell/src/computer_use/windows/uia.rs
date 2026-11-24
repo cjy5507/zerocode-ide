@@ -807,11 +807,18 @@ pub(super) fn set_range_value(
     )
 }
 
-/// Bring a toggle to `wanted`, toggling at most twice (indeterminate first).
-pub(super) fn toggle_to(element: &IUIAutomationElement, wanted: bool) -> Result<(), ProviderError> {
+/// Bring a toggle to `wanted`, toggling at most twice (indeterminate
+/// first), and say how many Toggle calls it answered: none when it already
+/// stood at `wanted`, or its state could not be read — which is still no
+/// refusal, as before; the readback after says what it holds.
+pub(super) fn toggle_to(
+    element: &IUIAutomationElement,
+    wanted: bool,
+) -> Result<usize, ProviderError> {
+    let mut answered = 0;
     for _ in 0..2 {
         match live_value(element) {
-            Some(LiveValue::Toggle(current)) if current == wanted => return Ok(()),
+            Some(LiveValue::Toggle(current)) if current == wanted => break,
             Some(LiveValue::Toggle(_)) => {
                 perform::<IUIAutomationTogglePattern>(
                     element,
@@ -819,11 +826,12 @@ pub(super) fn toggle_to(element: &IUIAutomationElement, wanted: bool) -> Result<
                     "Toggle",
                     |pattern| unsafe { pattern.Toggle() },
                 )?;
+                answered += 1;
             }
             _ => break,
         }
     }
-    Ok(())
+    Ok(answered)
 }
 
 /// The text before, inside and after the current selection, through the

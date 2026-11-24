@@ -95,9 +95,7 @@ fn foreground_or_skip(fixture: &Fixture, test: &str) -> bool {
         .into_iter()
         .find(|candidate| candidate.hwnd == fixture.hwnd)
         .expect("fixture candidate");
-    if desktop_windows::bring_to_front(&candidate)
-        && desktop_windows::focused_front(&candidate).is_some()
-    {
+    if desktop_windows::bring_to_front(&candidate) && desktop_windows::is_focused(&candidate) {
         return true;
     }
     eprintln!("skipping {test}: this desktop would not bring the fixture to the foreground");
@@ -366,8 +364,9 @@ fn type_text_replaces_the_focused_edits_selection_through_the_value_pattern() {
             "start 한글 end",
             "the edit holds the seed and the text once ({answer})"
         );
-        // The edit is a window of its own inside the fixture's, so the text
-        // was seen to go into the fixture's window: the answer names it.
+        // The edit is a window of its own inside the fixture's and answered
+        // the write, so the text was seen to go into the fixture's window:
+        // the answer names it.
         assert_eq!(
             answer["action"]["actedWindow"]["id"], answer["snapshot"]["window"]["id"],
             "{answer}"

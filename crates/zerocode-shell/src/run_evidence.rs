@@ -119,11 +119,11 @@ pub enum FrameSkipped {
     /// the background, or one whose answer pictured another window or named
     /// none — and that window could not be pictured by itself: its answer
     /// named none (on Windows, also when no window was seen to take the
-    /// act's input: a wheel or a drag at a point of the screen, keys sent
-    /// with another window in front), it is gone, or the picture was
-    /// refused. Nothing of the screen around it is taken in its place: a
-    /// person's own window may stand there (I-t123731-rc1, reviews t-128987,
-    /// t-129021).
+    /// act's input: keys, a wheel or a drag at a point of the screen, a press
+    /// that went to a popup the window owns, calls or a write nobody
+    /// answered), it is gone, or the picture was refused. Nothing of the
+    /// screen around it is taken in its place: a person's own window may
+    /// stand there (I-t123731-rc1, reviews t-128987, t-129021, t-129057).
     WindowUnavailable,
 }
 

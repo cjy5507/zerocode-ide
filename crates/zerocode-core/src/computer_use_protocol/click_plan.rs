@@ -44,6 +44,16 @@ impl RecipientObservation {
     }
 }
 
+/// Which of the fence's two looks [`deliver`] asks for. The look before a
+/// press sees where that press goes; the look after a release may already
+/// see what the press opened there — a menu at the pointer — so a platform
+/// that keeps where its presses went reads the first alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    BeforePress,
+    AfterRelease,
+}
+
 /// Why a click was stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FenceFailure {
@@ -97,15 +107,15 @@ pub fn unique_window_candidate<C>(candidates: &[C], predicate: impl Fn(&C) -> bo
 }
 
 /// Deliver the plan. `observe` is asked before each press and after each
-/// release; `make_event` builds the platform event for a step (it may fail,
-/// in which case nothing of that pair is posted); `post` posts it and says
-/// whether the platform accepted it — a refused event ends the plan with the
-/// truth of what went before it, never with a success; `pause` sleeps the
-/// given microseconds.
+/// release, and told which ([`Look`]); `make_event` builds the platform
+/// event for a step (it may fail, in which case nothing of that pair is
+/// posted); `post` posts it and says whether the platform accepted it — a
+/// refused event ends the plan with the truth of what went before it, never
+/// with a success; `pause` sleeps the given microseconds.
 pub fn deliver<Event, E>(
     click_count: usize,
     target: Recipient,
-    mut observe: impl FnMut() -> RecipientObservation,
+    mut observe: impl FnMut(Look) -> RecipientObservation,
     mut make_event: impl FnMut(Step) -> Result<Event, E>,
     mut post: impl FnMut(Event) -> Result<(), E>,
     mut pause: impl FnMut(u32),
@@ -119,7 +129,7 @@ pub fn deliver<Event, E>(
     pause(INTER_EVENT_PAUSE_MICROS);
     let press_count = click_count.clamp(1, MAX_CLICK_COUNT);
     for press_index in 1..=press_count {
-        let before_down = observe();
+        let before_down = observe(Look::BeforePress);
         if before_down != RecipientObservation::Focused(target) {
             return Err(DeliveryFailure::Fence(FenceFailure::RecipientChanged {
                 expected: target,
@@ -143,7 +153,7 @@ pub fn deliver<Event, E>(
             delivered_presses: press_index - 1,
             button_held: true,
         })?;
-        let after_up = observe();
+        let after_up = observe(Look::AfterRelease);
         // A final release may dismiss the target; an unavailable probe is unsafe.
         let final_dismissal =
             press_index == press_count && after_up == RecipientObservation::Dismissed;
@@ -233,7 +243,7 @@ mod tests {
         let result = deliver(
             click_count,
             TARGET,
-            || observations.remove(0),
+            |_| observations.remove(0),
             Ok::<Step, ()>,
             |event| {
                 posted.push(event);
@@ -351,14 +361,20 @@ mod tests {
         assert_eq!(posted, steps(1));
     }
 
+    /// The looks come in the order of the events, each told which it is: the
+    /// look before a press sees where it goes, the one after a release what
+    /// it left there (`Look`).
     #[test]
     fn mouse_up_posts_before_the_recipient_check_for_the_next_press() {
         let trace = std::cell::RefCell::new(Vec::new());
         let result = deliver(
             2,
             TARGET,
-            || {
-                trace.borrow_mut().push("recipient");
+            |look| {
+                trace.borrow_mut().push(match look {
+                    Look::BeforePress => "look before press",
+                    Look::AfterRelease => "look after release",
+                });
                 RecipientObservation::Focused(TARGET)
             },
             Ok::<Step, ()>,
@@ -377,14 +393,14 @@ mod tests {
             trace.into_inner(),
             vec![
                 "move",
-                "recipient",
+                "look before press",
                 "down",
                 "up",
-                "recipient",
-                "recipient",
+                "look after release",
+                "look before press",
                 "down",
                 "up",
-                "recipient"
+                "look after release"
             ]
         );
     }
@@ -450,7 +466,7 @@ mod tests {
         let result = deliver(
             2,
             TARGET,
-            || {
+            |_| {
                 validations += 1;
                 RecipientObservation::Focused(TARGET)
             },
@@ -472,7 +488,7 @@ mod tests {
         let result = deliver(
             1,
             TARGET,
-            || RecipientObservation::Focused(TARGET),
+            |_| RecipientObservation::Focused(TARGET),
             |step| match step {
                 Step::ButtonUp { .. } => Err("mouse up"),
                 other => Ok(other),
@@ -509,7 +525,7 @@ mod tests {
                 }
             }
         };
-        let observe = || RecipientObservation::Focused(TARGET);
+        let observe = |_: Look| RecipientObservation::Focused(TARGET);
         assert_eq!(
             deliver(
                 1,
