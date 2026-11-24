@@ -497,6 +497,13 @@ pub struct ScreenshotMetadata {
     pub window_id: u64,
 }
 
+/// The `engine` a look names when its window would not paint itself and the
+/// window's region of the screen was copied instead, overlaps and all
+/// (Windows' `BitBlt` road, `computer_use/windows/capture.rs`): a picture of
+/// the screen there, where another window may stand — not of the window
+/// alone.
+pub const SCREEN_COPY_ENGINE: &str = "screenBlt";
+
 /// `screenshotStatus`, serialized exactly as `renderScreenshotStatus` does:
 /// `{state:"captured", metadata}`, `{state:"skipped", reason:"no_screenshot_flag"}`
 /// or `{state:"failed", code:"screenshot_failed", message, metadata}`.
@@ -622,6 +629,13 @@ pub struct ActionMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<Verification>,
     pub target_window_id: u64,
+    /// The window the act checked itself against when it ran, by its number
+    /// and its process (`actedWindow`, what `execution::acted` reads): the
+    /// look after the act, whose window `targetWindowId` names, may land on
+    /// another window of the app (I-t123731-rc1, review t-128987 §2).
+    // Kept off the wire until the fix that follows (t-128643 fix 3, red).
+    #[serde(skip)]
+    pub acted_window: Option<execution::ActedWindow>,
 }
 
 impl ActionMetadata {
@@ -635,6 +649,7 @@ impl ActionMetadata {
             fallback_reason: None,
             verification: None,
             target_window_id: 0,
+            acted_window: None,
         }
     }
 
