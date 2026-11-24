@@ -633,8 +633,7 @@ pub struct ActionMetadata {
     /// and its process (`actedWindow`, what `execution::acted` reads): the
     /// look after the act, whose window `targetWindowId` names, may land on
     /// another window of the app (I-t123731-rc1, review t-128987 §2).
-    // Kept off the wire until the fix that follows (t-128643 fix 3, red).
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_window: Option<execution::ActedWindow>,
 }
 

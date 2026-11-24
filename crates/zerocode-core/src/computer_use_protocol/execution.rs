@@ -259,8 +259,9 @@ pub struct Acted {
 
 /// A window as an act found it: its number, and the process that owned it
 /// then — so a number the window server gave out again names no other
-/// window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// window. On the wire, as an act's answer names it: `{ "id", "pid" }`
+/// ([`ACTED_WINDOW`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActedWindow {
     pub id: u64,
     pub pid: u64,

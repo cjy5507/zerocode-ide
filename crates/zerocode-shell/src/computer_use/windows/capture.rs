@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::UI::WindowsAndMessaging::PW_RENDERFULLCONTENT;
+use zerocode_core::computer_use_protocol::SCREEN_COPY_ENGINE;
 use zerocode_core::computer_use_protocol::render::Rect;
 
 use super::super::screenshot_png::RgbaImage;
@@ -143,6 +144,6 @@ pub(super) fn capture(hwnd: HWND, bounds: &Rect) -> Option<Captured> {
         .flatten()
         .map(|image| Captured {
             image,
-            engine: "screenBlt",
+            engine: SCREEN_COPY_ENGINE,
         })
 }

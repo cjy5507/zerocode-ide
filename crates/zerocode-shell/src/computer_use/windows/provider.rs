@@ -11,6 +11,7 @@ use zerocode_core::computer_use::COMPUTER_USE_PROTOCOL_VERSION;
 use zerocode_core::computer_use_protocol::cache::{
     AppKeys, Namespace, SnapshotCache, validate_pinned_element, validate_requested_elements,
 };
+use zerocode_core::computer_use_protocol::execution::ActedWindow;
 use zerocode_core::computer_use_protocol::marks::{ELEMENT_FRAMES_KEY, Pin};
 use zerocode_core::computer_use_protocol::params;
 use zerocode_core::computer_use_protocol::{
@@ -30,6 +31,9 @@ pub(super) struct Provider {
     cache: SnapshotCache<SharedSnapshot>,
     /// Process descriptions, kept across calls (`apps::Catalog`).
     pub(super) apps: Catalog,
+    /// The window the act being run checked itself against
+    /// (`current_snapshot`), for its answer to name (`run_action`).
+    acted: Option<ActedWindow>,
 }
 
 impl Provider {
@@ -38,6 +42,7 @@ impl Provider {
             client: UiaClient::new()?,
             cache: SnapshotCache::new(),
             apps: Catalog::default(),
+            acted: None,
         })
     }
 
@@ -166,6 +171,7 @@ impl Provider {
     /// `currentSnapshot`: a fresh, screenshot-less observation whose
     /// requested indexes still name what the cached one indexed — or, for a
     /// click by a mark's number, whose element is still the one its pin names.
+    /// Its window is the one the act checks itself against (`acts_in`).
     pub(super) fn current_snapshot(
         &mut self,
         params: &Map<String, Value>,
@@ -176,7 +182,7 @@ impl Provider {
                 ProviderError::invalid_argument("a mark's pin needs its elementIndex")
             })?;
             validate_pinned_element(&SharedSnapshot::from_observed(&current), index, &pin)?;
-            return Ok(current);
+            return Ok(self.acts_in(current));
         }
         self.cache.prune(Instant::now());
         let cached = self
@@ -195,17 +201,33 @@ impl Provider {
             &SharedSnapshot::from_observed(&current),
             &requested,
         )?;
-        Ok(current)
+        Ok(self.acts_in(current))
+    }
+
+    /// The window an act checks itself against, as it finds it — its number
+    /// and its app's process — kept for the act's answer to name.
+    fn acts_in(&mut self, current: Snapshot) -> Snapshot {
+        self.acted = Some(ActedWindow {
+            id: current.window.id(),
+            pid: u64::from(current.window.pid),
+        });
+        current
     }
 
     /// `actionResult`: run the action, observe after it, and when the
-    /// requested window is gone report its unavailable observation.
+    /// requested window is gone report its unavailable observation. The
+    /// answer names the window the act went to (`actedWindow`), as the macOS
+    /// helper's does: the look after the act may land on another window of
+    /// the app, and a step's evidence is held to the acted one
+    /// (I-t123731-rc1, review t-128987 §2).
     fn run_action(
         &mut self,
         params: &Map<String, Value>,
         action: fn(&mut Self, &Map<String, Value>) -> Result<ActionMetadata, ProviderError>,
     ) -> Result<Value, ProviderError> {
-        let metadata = action(self, params)?;
+        self.acted = None;
+        let mut metadata = action(self, params)?;
+        metadata.acted_window = self.acted.take();
         let include_screenshot = !params::flag(params, "noScreenshot");
         Self::action_result(params, metadata, self.observe(params, include_screenshot))
     }

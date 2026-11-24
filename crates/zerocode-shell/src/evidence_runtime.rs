@@ -16,8 +16,10 @@
 //! later frame instead. A step that answered a picture — a look, or an app
 //! act in a walk that frames its steps, whose answer carries the helper's
 //! look after the act — is its own frame, kept at once (t-4229); an act's
-//! only while that look is of the window the act went to, since the look
-//! lands where the app's focus leads (review t-128939 §1).
+//! only while that look is of the window the act went to, drawn by that
+//! window alone, since the look lands where the app's focus leads (review
+//! t-128939 §1) — else that window is taken again alone, wherever the act
+//! went (review t-128987).
 //!
 //! Three rules keep the writer honest. A verb that reads or writes the step
 //! log (`verdict`, `evidence`, `recipe-save`) waits for it to be written
@@ -25,12 +27,12 @@
 //! window an act went to, alone, after an act that went no further than it,
 //! so a person's own window over it never lands in the folder
 //! (I-t123731-rc1); the window's region of the screen, or the whole display,
-//! after one that took the desk — never a `getAppState`, which would replace
-//! the element indices the agent was just given. What the act did is heard
-//! as the helper answers it (`computer_use::acted`), not read again from the
-//! step's words. And a writer that falls behind drops frames before
-//! lines, bounds every capture by a timeout, and is started again if it ever
-//! dies.
+//! after one that took the desk and answered no picture — never a
+//! `getAppState`, which would replace the element indices the agent was
+//! just given. What the act did is heard as the helper answers it
+//! (`computer_use::acted`), not read again from the step's words. And a
+//! writer that falls behind drops frames before lines, bounds every capture
+//! by a timeout, and is started again if it ever dies.
 //!
 //! A walk (a batch, a recipe) speaks to the same writer (plan D4·D10): it
 //! says when it begins in a folder and whether its steps are framed — its
@@ -431,29 +433,41 @@ pub(super) fn envelope(answer: &zerocode_hookd::TeamAnswer) -> Option<serde_json
 /// caller answers — the agent may take the file away after.
 fn own_frame(result: Option<&serde_json::Value>) -> Option<Picture> {
     let result = result?;
-    let png = std::fs::read(result.pointer("/screenshot/path")?.as_str()?).ok()?;
+    let png = std::fs::read(picture_path(result)?).ok()?;
     Some(Picture {
         png,
         placed: ShotFrame::from_answer(result).unwrap_or(ShotFrame::UNIT),
     })
 }
 
+/// The file an answer's picture was exported to, when it carried one.
+fn picture_path(result: &serde_json::Value) -> Option<&str> {
+    result.pointer("/screenshot/path")?.as_str()
+}
+
 /// Whether the picture an answer carries is of what its step did (review
-/// t-128939 §1): a look's, of which no act was heard, is; an act's only when
-/// its look is of the window the act went to — the same number, the same
-/// owner (`acted`). The look after an act is of the window the app's focus
-/// and window order lead to, which may be another of its windows, where a
-/// person's other document stands; an act that named no window has none to
-/// match it with.
+/// t-128939 §1, t-128987 §2): a look's, of which no act was heard, is; an
+/// act's only when its look is of the window the act went to — the same
+/// number, the same owner (`acted`) — drawn by that window alone. The look
+/// after an act is of the window the app's focus and window order lead to,
+/// which may be another of its windows, where a person's other document
+/// stands; an act that named no window has none to match it with; and a
+/// window that would not paint itself is copied off the screen instead
+/// (`SCREEN_COPY_ENGINE`, Windows' road), with whatever stands over it.
 fn pictures_its_act(result: &serde_json::Value, acted: Option<Acted>) -> bool {
     let Some(acted) = acted else {
         return true;
     };
     let shows = |pointer: &str| result.pointer(pointer).and_then(serde_json::Value::as_u64);
-    acted.window.is_some_and(|window| {
-        shows("/snapshot/window/id") == Some(window.id)
-            && shows("/snapshot/app/pid") == Some(window.pid)
-    })
+    let copied_off_the_screen = result
+        .pointer("/screenshotStatus/metadata/engine")
+        .and_then(serde_json::Value::as_str)
+        == Some(zerocode_core::computer_use_protocol::SCREEN_COPY_ENGINE);
+    !copied_off_the_screen
+        && acted.window.is_some_and(|window| {
+            shows("/snapshot/window/id") == Some(window.id)
+                && shows("/snapshot/app/pid") == Some(window.pid)
+        })
 }
 
 /// Where a desktop step that took the desk is framed: the region of the
@@ -509,6 +523,15 @@ fn desktop_frame(
     if !in_its_window {
         return Frame::After(desktop_capture(result));
     }
+    acted_window_alone(acted)
+}
+
+/// The window an act went to, framed alone — by its number and the process
+/// the act found owning it, what another window covers drawn as the window
+/// itself draws it — or, when the act named no window, no picture and the
+/// line says why: never the screen around it, where a person's own window
+/// may stand.
+fn acted_window_alone(acted: Option<Acted>) -> Frame<Capture> {
     match acted.and_then(|acted| acted.window) {
         Some(window) => Frame::After(Capture::Desktop {
             params: serde_json::json!({ WINDOW_ONLY: window.id, WINDOW_OWNER: window.pid }),
@@ -572,9 +595,8 @@ pub(super) fn leave_browser_evidence(
 /// exported is the step's own — kept at once, whatever follows it — when it
 /// is of what the step did (`pictures_its_act`, by `acted`: what its act did,
 /// as the helper answered it); else the frame `after` names from the
-/// answer's result, as for an answer that carried no picture: a surface
-/// framed once it has settled, or why there is none. The envelope is read
-/// once, for both.
+/// answer's result: a surface framed once it has settled, or why there is
+/// none. The envelope is read once, for both.
 fn frame_of<S>(
     dir: &Path,
     frames: bool,
@@ -634,7 +656,8 @@ pub(super) fn leave_emulator_evidence(
 
 /// A run's step on the desktop road: the line, and the frame of the surface
 /// it acted on (`computer_frame`) — a picture the answer exported of the
-/// window its act went to is the step's own frame; else, by what its act did
+/// window its act went to is the step's own frame, and a picture of any
+/// other is taken again as that window alone; else, by what its act did
 /// (`desktop_frame`), the window it went to alone after an act that went no
 /// further, or the acted window's region or the whole screen after one that
 /// took the desk. `argv` is the words that ran; `logged` the words its line
@@ -669,10 +692,15 @@ pub(super) fn leave_computer_evidence(
 }
 
 /// The frame a step on the desktop road leaves (`frame_of`): a picture its
-/// answer exported, kept at once, when it is of the window its act went to
-/// (review t-128939 §1); else the surface its act's road frames
-/// (`desktop_frame`), as for an answer that carried no picture. `argv` is
-/// the words that ran; `acted` what its act did, as the helper answered it.
+/// answer exported, kept at once, when it is of the window its act went to,
+/// drawn by it (review t-128939 §1, t-128987 §2). A picture of anything
+/// else is taken again as that window alone, wherever the act went — after
+/// one that took the desk too, where by the time of the frame a person's
+/// own window or document may stand over the region the picture's window
+/// held (review t-128987 §3) — or, when the act named no window, not at
+/// all. A step whose answer carried no picture is framed by the surface its
+/// act's road frames (`desktop_frame`). `argv` is the words that ran;
+/// `acted` what its act did, as the helper answered it.
 fn computer_frame(
     dir: &Path,
     frames: bool,
@@ -682,7 +710,14 @@ fn computer_frame(
     acted: Option<Acted>,
 ) -> Frame<Capture> {
     frame_of(dir, frames, capped, answer, acted, |result| {
-        desktop_frame(argv, result, acted)
+        let pictured_elsewhere = result.is_some_and(|result| {
+            picture_path(result).is_some() && !pictures_its_act(result, acted)
+        });
+        if pictured_elsewhere {
+            acted_window_alone(acted)
+        } else {
+            desktop_frame(argv, result, acted)
+        }
     })
 }
 

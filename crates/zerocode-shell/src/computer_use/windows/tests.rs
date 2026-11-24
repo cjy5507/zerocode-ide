@@ -237,6 +237,16 @@ fn clicking_by_index_invokes_the_button_and_toggles_the_checkbox() {
             .expect("click");
         assert_eq!(answer["action"]["path"], "accessibility", "{answer}");
         assert_eq!(answer["action"]["actionName"], "Invoke");
+        // The act names the window it went to, as the macOS helper's does —
+        // here the fixture's one window, the look after it shows too.
+        assert_eq!(
+            answer["action"]["actedWindow"],
+            json!({
+                "id": answer["snapshot"]["window"]["id"],
+                "pid": answer["snapshot"]["app"]["pid"],
+            }),
+            "{answer}"
+        );
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(Fixture::clicks(), before + 1);
         assert_eq!(fixture.status_text(), "clicked");
