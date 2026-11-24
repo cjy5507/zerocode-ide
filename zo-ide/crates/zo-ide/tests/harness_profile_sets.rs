@@ -230,15 +230,15 @@ impl ChatServer {
                 let response = if request.starts_with("POST ") {
                     let raw = request.split_once("\r\n\r\n").map(|(_, body)| body.to_string());
                     let body: Option<Value> = raw.as_deref().and_then(|body| serde_json::from_str(body).ok());
-                    let step = body.as_ref().filter(|body| body.get("tools").is_some()).map(tool_results);
-                    let call = step.and_then(|step| calls.get(step).map(|call| (step, call)));
-                    let reasoning = reasoned.then(|| format!("Step {} reasoning.", step.unwrap_or_default()));
+                    let done = body.as_ref().filter(|body| body.get("tools").is_some()).map(tool_results);
+                    let call = done.and_then(|done| calls.get(done).map(|call| (done, call)));
+                    let reasoning = reasoned.then(|| format!("Step {} reasoning.", done.unwrap_or_default()));
                     if let (Some(raw), Some(_)) = (raw, body) {
                         kept.lock().expect("bodies").push(raw);
                     }
                     let events = call.map_or_else(
                         || reply_events(reasoning.as_deref()),
-                        |(step, (name, arguments))| call_events(step, name, arguments, reasoning.as_deref()),
+                        |(index, (name, arguments))| call_events(index, name, arguments, reasoning.as_deref()),
                     );
                     let mut stream_body = String::new();
                     for event in &events {
@@ -256,11 +256,6 @@ impl ChatServer {
             }
         });
         Self { base, bodies, stop, worker: Some(worker) }
-    }
-
-    /// The bodies kept since the last call, and forget them.
-    fn take(&self) -> Vec<Value> {
-        Self::parsed(&self.take_raw())
     }
 
     /// The bodies kept since the last call as they arrived, byte for byte, and
@@ -945,8 +940,7 @@ fn first_tool_result(run: &Run) -> String {
         .filter_map(|body| body["messages"].as_array())
         .flatten()
         .find(|message| message["role"] == "tool")
-        .map(|message| content_text(&message["content"]))
-        .unwrap_or_else(|| panic!("no tool result reached the endpoint:\n{}", run.told()))
+        .map_or_else(|| panic!("no tool result reached the endpoint:\n{}", run.told()), |message| content_text(&message["content"]))
 }
 
 /// E2 of the headless core profile: a run nobody attends and no window holds,
