@@ -1453,10 +1453,6 @@ function jevSayStatus(words) {
   }
 }
 
-/* The stage's door: paint what is in hand, then ask zo once — on the first
- * open, and again when what is in hand is older than the beat or was the
- * card's answer without the recent list. A tab switched back to within the
- * beat costs no process. */
 function releaseJevView(tab) {
   const view = groups.get(tab.pane)?.jevView;
   if (!view) return;
@@ -1473,6 +1469,10 @@ function releaseJevView(tab) {
   jevPoll.sync();
 }
 
+/* The stage's door: paint what is in hand, then ask zo once — on the first
+ * open, and again when what is in hand is older than the beat or was the
+ * card's answer without the recent list. A tab switched back to within the
+ * beat costs no process. */
 function paintJevStage(tab) {
   const view = docHost(tab.pane, "jev");
   paintJevView(view);

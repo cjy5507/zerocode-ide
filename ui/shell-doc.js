@@ -7883,18 +7883,19 @@ function openArtifacts({ origin, select = null, fresh = false } = {}) {
   openTab({ ...ARTIFACTS_TAB });
 }
 
-/* 무대가 이 탭을 드러낼 때 지나는 문. 카탈로그는 처음 열 때와 사이드바가 다시
- * 청할 때, 그리고 `artifacts:changed`가 울릴 때만 다시 묻는다. */
 function releaseArtifactsView(tab) {
   const view = groups.get(tab.pane)?.artifactsView;
   if (!view) return;
-  artifactCardPools.delete(view);
-  for (const card of view.querySelectorAll(".artifacts-cards > .artifacts-card")) card.remove();
-  view.querySelector(".artifacts-tasks-list")?.replaceChildren();
-  view.querySelector(".artifacts-flow-list")?.replaceChildren();
-  view.querySelector(".artifacts-drawer-preview")?.replaceChildren();
+  const pool = artifactCardPools.get(view);
+  if (pool) {
+    for (const node of pool.nodes) node.remove();
+    artifactCardPools.delete(view);
+  }
+  for (const card of view.querySelectorAll(".artifact-card")) card.remove();
 }
 
+/* 무대가 이 탭을 드러낼 때 지나는 문. 카탈로그는 처음 열 때와 사이드바가 다시
+ * 청할 때, 그리고 `artifacts:changed`가 울릴 때만 다시 묻는다. */
 function paintArtifactsStage(tab) {
   if (artifactAskedAt === 0) void refreshArtifacts();
   return paintArtifactsView(tab);

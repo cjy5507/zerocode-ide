@@ -11264,8 +11264,11 @@ function paintNavCurrent() {
     const node = el(id);
     if (!node) continue;
     const active = id === "nav-automations" ? on : (!covered && on);
-    if (active) node.setAttribute("aria-current", "page");
-    else node.removeAttribute("aria-current");
+    if (active) {
+      if (node.getAttribute("aria-current") !== "page") node.setAttribute("aria-current", "page");
+    } else if (node.hasAttribute("aria-current")) {
+      node.removeAttribute("aria-current");
+    }
   }
   // Orca shows the history arrows on the terminal, 작업 and 자동화 and hides
   // them on the settings page (`shouldShowWorktreeHistoryControls`,

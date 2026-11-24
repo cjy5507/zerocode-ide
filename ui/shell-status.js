@@ -6018,7 +6018,7 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   if (lastOfKindInPane) {
     if (removed.kind === "tokens" && typeof releaseTokensView === "function") releaseTokensView(removed);
     if (removed.kind === "inbox" && typeof releaseInboxView === "function") releaseInboxView(removed);
-    if (removed.kind === "vault") el("vault-list")?.replaceChildren();
+    if (removed.kind === "vault" && typeof releaseVaultView === "function") releaseVaultView(removed);
     if (removed.kind === "jev" && typeof releaseJevView === "function") releaseJevView(removed);
     if (removed.kind === "artifacts" && typeof releaseArtifactsView === "function") releaseArtifactsView(removed);
     if (removed.kind === "knowledge" && typeof releaseKnowledgeView === "function") releaseKnowledgeView(removed);

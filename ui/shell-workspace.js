@@ -7056,12 +7056,7 @@ let sidebarTeamAsking = false;
 let sidebarTeamAgain = false;
 let sidebarTeamStood = false;
 let sidebarTeamFrame = 0;
-let sidebarTeamClockActive = false;
-const sidebarTeamPoller = idlePoller({
-  wanted: () => sidebarTeamClockActive,
-  every: TEAM_CLOCK_MS,
-  tick: scheduleSidebarTeamPaint,
-});
+let sidebarTeamClock = 0;
 /* The row nodes by key (`c:<run>`, `w:<run>/<worker>`, and the four lines), the panes' last lines read for
  * tips, and the row the keyboard stands on. */
 const sidebarTeamNodes = new Map();
@@ -7152,13 +7147,12 @@ function standSidebarLayout({ rebuild }) {
 /* The rows' clocks are said again on a slow beat while the team stands — a paint whose words did not move writes
  * nothing. The beat only schedules that paint: it asks the backend nothing. */
 function startSidebarTeamClock() {
-  sidebarTeamClockActive = true;
-  sidebarTeamPoller.sync();
+  if (!sidebarTeamClock) sidebarTeamClock = window.setInterval(scheduleSidebarTeamPaint, TEAM_CLOCK_MS);
 }
 
 function stopSidebarTeamClock() {
-  sidebarTeamClockActive = false;
-  sidebarTeamPoller.sync();
+  if (sidebarTeamClock) clearInterval(sidebarTeamClock);
+  sidebarTeamClock = 0;
 }
 
 /* The words of a time past, as a row's clock says it: 「방금」 under a minute, 「N분 전」 after. */
@@ -9737,15 +9731,11 @@ function paintWorkspaceBoardStage() {
  * neighbours do (`renderTabs`): pressed, and 「여기」 like the 작업 row. */
 function paintWorkspaceBoardDoor() {
   workspaceBoardOpen = activeTabId === WORKSPACE_BOARD_TAB.id;
-  const covered = !autoView.hidden || !settingsView.hidden || !spaceView.hidden;
   // Painted on every pass over the tabs: each attribute is written only when it moved (v1.1.149).
   if (el("nav-board").getAttribute("aria-pressed") !== String(workspaceBoardOpen)) {
     el("nav-board").setAttribute("aria-pressed", String(workspaceBoardOpen));
   }
-  const current = workspaceBoardOpen && !covered;
-  if (current) {
-    if (el("nav-board").getAttribute("aria-current") !== "page") el("nav-board").setAttribute("aria-current", "page");
-  } else if (el("nav-board").hasAttribute("aria-current")) el("nav-board").removeAttribute("aria-current");
+  if (typeof paintNavCurrent === "function") paintNavCurrent();
 }
 
 /* Open the board's tab, or close it. Closing is the tab's — its ×, ⌘W or the
@@ -15350,17 +15340,21 @@ function paintSpaceTable() {
     const picked = space.picked.has(row.id);
     const selected = row.id === space.selected;
     const failed = space.errors[row.id] ?? "";
+    const counts = spaceTabCounts(row.path);
     const sig = JSON.stringify([
-      locale, row.id, row.name, row.path, row.project_name, row.status, row.size_text,
-      row.ready, row.last_activity_ms, picked, selected, space.busy, failed,
+      locale, row.id, row.name, row.path, row.project_name, row.branch ?? "",
+      row.status, row.size_bytes, row.size_text, row.ready, row.git_checked ?? false,
+      row.dirty_files ?? null, row.ahead ?? null, row.lanes ?? null,
+      row.blockers ?? null, row.reasons ?? null, row.last_activity_ms,
+      counts.terms, counts.unsaved, picked, selected, space.busy, failed,
     ]);
     const existing = held.get(row.id);
-    if (existing && existing.dataset.spaceSig === sig) {
+    if (existing && existing._spaceSig === sig) {
       wanted.push(existing);
       continue;
     }
     const built = spaceTableRow(row);
-    built.dataset.spaceSig = sig;
+    built._spaceSig = sig;
     wanted.push(built);
   }
   reconcileElementOrder(host, wanted);
@@ -15478,7 +15472,7 @@ async function scanSpace() {
     // 경로가 다시 생겼을 때 남의 실패를 물려받는다.
     for (const id of Object.keys(space.errors)) if (!live.has(id)) delete space.errors[id];
   }
-  paintSpace();
+  if (!spaceView.hidden) paintSpace();
   spaceClock.sync();
   if (!el("resource-pop").hidden) paintResourceSpace();
   if (report) void prefetchSpaceGit();
@@ -15599,8 +15593,8 @@ function setSpaceOpen(on) {
   if (!on) {
     el("space-rows")?.replaceChildren();
     el("space-map")?.replaceChildren();
-    el("space-breakdown")?.replaceChildren();
-    el("space-errors")?.replaceChildren();
+    el("space-breakdown-rows")?.replaceChildren();
+    el("space-repo-errors")?.replaceChildren();
   }
   if (typeof paintNavCurrent === "function") paintNavCurrent();
   spaceClock.sync();

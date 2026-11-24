@@ -9035,14 +9035,10 @@ function releaseKnowledgeView(tab) {
   const view = groups.get(tab.pane)?.knowledgeView;
   if (!view) return;
   if (typeof leaveKnowledgeUniverse === "function") leaveKnowledgeUniverse(view);
-  const canvas = view.querySelector("canvas.knowledge-canvas");
-  if (canvas) {
-    canvas.width = 0;
-    canvas.height = 0;
-  }
-  view.querySelector(".knowledge-search-suggest")?.replaceChildren();
 }
 
+/* 판이 무대에 설 때마다 지나는 문. 그림은 처음 열 때와 `second-brain:changed`가 올
+ * 때만 다시 읽는다 — 필터 한 글자는 이 문을 지나지 않는다. */
 function paintKnowledgeStage(tab) {
   void refreshKnowledgeGraph();
   /* 공급망 렌즈가 켜져 있으면 그 답도 — 잠금 파일은 판을 보지 않는 동안에도 바뀐다(바닥 시간 안의

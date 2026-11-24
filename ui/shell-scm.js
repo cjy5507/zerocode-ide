@@ -4408,6 +4408,7 @@ let checksHeight = CHECKS_HEIGHT_DEFAULT;
  * stays visible either way — that is why the counts live in it. */
 let checksExpanded = true;
 let checksPassedOpen = false;
+let checksPassedReviewKey = null;
 
 /* ---- the beat that brings checks by itself (t-2733) ----
  *
@@ -4992,6 +4993,11 @@ function paintChecksBody(checks) {
     if (list.childElementCount > 0) list.replaceChildren();
     return;
   }
+  const reviewKey = checksReport?.review ? `${checksReport.review.owner_repo ?? ""}#${checksReport.review.number ?? ""}` : null;
+  if (reviewKey !== checksPassedReviewKey) {
+    checksPassedReviewKey = reviewKey;
+    checksPassedOpen = false;
+  }
   const held = new Map(
     [...list.querySelectorAll(":scope > .check-host")].map((node) => [node.dataset.checkKey, node]),
   );
@@ -5004,20 +5010,22 @@ function paintChecksBody(checks) {
   }));
   const active = indexed.filter((one) => one.rank < 2).sort((a, b) => a.rank - b.rank || a.index - b.index);
   const quiet = indexed.filter((one) => one.rank === 2);
-  const foldQuiet = active.length > 0 && quiet.length > 0;
+  // Only fold passing checks when at least two are quiet — replacing one row
+  // with a one-row fold button saves zero height and adds an extra click.
+  const foldQuiet = active.length > 0 && quiet.length >= 2;
   const toHost = ({ check, index, key }) => {
     const open = checksOpen.has(key);
     const detail = open ? checksDetails.get(key) ?? null : null;
     const sig = JSON.stringify([
-      locale, check.name, check.status, check.conclusion, check.url ?? "",
+      locale, Boolean(activeWorktreePath), check.name, check.status, check.conclusion, check.url ?? "",
       check.check_run_id ?? null, check.workflow_run_id ?? null, open,
       detail ? [Boolean(detail.loading), detail.error ?? null, detail.details ?? null] : null,
     ]);
     const reused = held.get(key);
-    if (reused && reused.dataset.checkSig === sig) return reused;
+    if (reused && reused._checkSig === sig) return reused;
     const built = checkRow(check, index);
     built.dataset.checkKey = key;
-    built.dataset.checkSig = sig;
+    built._checkSig = sig;
     return built;
   };
   const wanted = [];

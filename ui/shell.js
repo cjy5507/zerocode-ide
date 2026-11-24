@@ -8952,8 +8952,15 @@ function vaultTitle(session) {
   return session.title || t("vaultDock.untitled", "이름 없는 세션");
 }
 
+function releaseVaultView(tab) {
+  vaultDrawn = null;
+  const view = groups.get(tab.pane)?.vaultView;
+  view?.querySelector(".vault-list")?.replaceChildren();
+}
+
 function openVault() {
   openTab({ id: "vault", kind: "vault" });
+  if (vaultAnswer && vaultDrawn === null) paintVaultView();
   // The rows stand from the last visit; which panes hold them may have moved.
   paintVaultLiveWhereShown();
 }

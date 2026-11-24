@@ -11876,12 +11876,11 @@ mod tests {
         // Nineteen since T7 (2026-11-09): a phone kept awake counts its
         // minutes down (`phoneAwakeTick`), a repaint with no read, only while
         // a session stands.
-        // Twenty and twenty-one: `sidebarTeamPoller` (sidebar team clock) and
-        // `autoClock` (automations 60s refresh), promoted from raw
-        // `setInterval` so both stop when hidden or away.
+        // Twenty: `autoClock` (automations 60s refresh), promoted from raw
+        // `setInterval` so it stops when hidden or away.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            21,
+            20,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");
