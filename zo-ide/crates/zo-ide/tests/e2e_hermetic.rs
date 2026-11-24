@@ -10335,6 +10335,92 @@ async fn e2e_headless_background_exit_reaches_the_model_at_a_tool_boundary() {
     assert!(requests[2].contains("headless-tail") && requests[2].contains("use TaskOutput"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_background_server_keeps_answering_after_headless_zo_exits() {
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpListener;
+
+    let layout = Layout::new();
+    let ready = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    fs::write(layout.cwd.join("background_server.py"), r#"
+import errno
+import os
+import socket
+import stat
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+class ServerHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        errors = []
+        if self.path == "/write":
+            for fd in (1, 2):
+                try:
+                    os.write(fd, b"served request\n")
+                except OSError as error:
+                    errors.append(f"fd {fd}: {errno.errorcode[error.errno]}")
+        if errors:
+            Path("server-write-errors.txt").write_text(", ".join(errors))
+            self.server.write_failed = True
+        self.send_response(500 if errors else 200)
+        if self.path == "/health":
+            files = [os.fstat(fd) for fd in (1, 2)]
+            self.send_header("X-Anonymous-Output", str(all(
+                stat.S_ISREG(file.st_mode) and file.st_nlink == 0 for file in files
+            )))
+        self.end_headers()
+        self.wfile.write(b"ready")
+
+with HTTPServer(("127.0.0.1", 0), ServerHandler) as server:
+    server.timeout = float(sys.argv[2])
+    server.write_failed = False
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), server.timeout) as ready:
+        ready.sendall(server.server_port.to_bytes(2, "big"))
+    for _ in range(3):
+        server.handle_request()
+        if server.write_failed:
+            break
+"#).unwrap();
+    let command = format!(
+        "exec python3 background_server.py {} {}",
+        ready.local_addr().unwrap().port(),
+        TEST_TIMEOUT.as_secs(),
+    );
+    let service = ScriptedAnthropicService::tool_calls(
+        &[("bash", serde_json::json!({"command": command, "run_in_background": true}))],
+        "background-server-started",
+    ).await.unwrap();
+    let output = run_pipe(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"], b"Start a background server.\n/exit\n").unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("background-server-started"), "{output:?}");
+
+    let port = tokio::time::timeout(TEST_TIMEOUT, async {
+        let (mut socket, _) = ready.accept().await.unwrap();
+        socket.read_u16().await.unwrap()
+    }).await.expect("the server announced its address");
+    let client = reqwest::Client::builder().no_proxy().timeout(TEST_TIMEOUT).build().unwrap();
+    for path in ["health", "write", "write"] {
+        let response = client.get(format!("http://127.0.0.1:{port}/{path}")).send().await.unwrap();
+        let status = response.status();
+        assert_eq!(status, reqwest::StatusCode::OK,
+            "GET /{path} after zo exited, stdio errors: {:?}",
+            fs::read_to_string(layout.cwd.join("server-write-errors.txt")).ok());
+        if path == "health" {
+            assert_eq!(
+                response.headers().get("x-anonymous-output").and_then(|header| header.to_str().ok()),
+                Some("True"),
+                "both output files survive zo with their names removed",
+            );
+        }
+        assert_eq!(response.text().await.unwrap(), "ready");
+    }
+}
+
 /// t-80732: the 10-28 shape — an example `pkill -f` in backticks inside a
 /// double-quoted line — aimed at a process the window started is refused by
 /// zo with its reason, in danger-full-access and with nobody to ask, and the

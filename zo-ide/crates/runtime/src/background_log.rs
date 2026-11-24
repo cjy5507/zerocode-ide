@@ -1,6 +1,5 @@
-//! The output log of a background bash task — its grammar, written once here
-//! for the three writers (the bash tool, the `PowerShell` tool, the task
-//! registry's cap) and read once here for the one reader that draws it.
+//! The output log of a background shell task. Both shell tools capture their
+//! streams here, and the task registry retains the formatted log.
 //!
 //! The log is what the model reads back through `TaskOutput` and what the
 //! task's completion re-injects, so the grammar is a wire contract and stays
@@ -11,7 +10,7 @@
 //! [pid 4242]
 //! <a stdout line, untagged>
 //! [stderr] <a stderr line>
-//! [output truncated: stream still open 2s after exit]   (only when a drain outlived the grace)
+//! [output truncated: stream still open 2s after exit]   (older pipe-backed tasks)
 //! [exit 1]                                              (or `[exit signal]`)
 //! ```
 //!
@@ -25,7 +24,12 @@
 //! whether anything was cut, so the foreground formatter can be handed the
 //! same shape it gets from a foreground `bash` result.
 
-use crate::task_registry::TaskReach;
+use std::fmt::Write as _;
+use std::fs::File;
+use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::process::Command;
+
+use crate::task_registry::{TaskReach, BACKGROUND_TASK_LIMITS};
 
 /// The name a background bash task carries — its registry description and
 /// the `name` of the completion it publishes. The reader that turns that
@@ -45,6 +49,89 @@ const PID_OPEN: &str = "[pid ";
 const EXIT_OPEN: &str = "[exit ";
 const EXIT_SIGNAL: &str = "signal";
 const DRAIN_TRUNCATED_OPEN: &str = "[output truncated: stream still open ";
+
+/// Holds the read handles for a task's two output files. Each writer has
+/// its own cursor and remains usable for as long as the child keeps it open.
+#[derive(Debug)]
+pub(crate) struct Capture {
+    stdout: Stream,
+    stderr: Stream,
+}
+
+impl Capture {
+    pub(crate) fn redirect(command: &mut Command) -> io::Result<Self> {
+        let (stdout, stdout_writer) = Stream::open()?;
+        let (stderr, stderr_writer) = Stream::open()?;
+        command.stdout(stdout_writer).stderr(stderr_writer);
+        Ok(Self { stdout, stderr })
+    }
+
+    pub(crate) fn read(&mut self, finished: bool) -> (String, bool) {
+        let mut text = String::new();
+        let mut truncated = false;
+        for (stream, label) in [
+            (&mut self.stdout, None),
+            (&mut self.stderr, Some(STDERR_TAG)),
+        ] {
+            if let Ok(skipped) = stream.read(&mut text, label, finished) {
+                truncated |= skipped;
+            }
+        }
+        (text, truncated)
+    }
+}
+
+#[derive(Debug)]
+struct Stream {
+    file: File,
+    offset: u64,
+}
+
+impl Stream {
+    fn open() -> io::Result<(Self, File)> {
+        let spool = tempfile::Builder::new()
+            .append(true)
+            .tempfile()?;
+        // Reopen for an independent read position, then remove the name.
+        // Unix unlinks immediately. Windows releases a deleted file on close.
+        let file = spool.reopen()?;
+        let (writer, path) = spool.into_parts();
+        path.close()?;
+        Ok((Self { file, offset: 0 }, writer))
+    }
+
+    fn read(&mut self, text: &mut String, label: Option<&str>, finished: bool) -> io::Result<bool> {
+        let end = self.file.metadata()?.len();
+        let start = self.offset.max(end.saturating_sub(BACKGROUND_TASK_LIMITS.tail_bytes as u64));
+        if start >= end {
+            return Ok(false);
+        }
+
+        // Limit the read to a snapshot of the file. A busy child can keep
+        // appending while TaskOutput or the watcher reads.
+        self.file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        self.file.by_ref().take(end - start).read_to_end(&mut bytes)?;
+        if !finished {
+            let last_line_end = bytes.iter().rposition(|&byte| byte == b'\n');
+            bytes.truncate(last_line_end.map_or(0, |end| end + 1));
+        }
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if let Some(label) = label {
+                text.push_str(&tagged_line(label, line));
+            } else {
+                let _ = writeln!(text, "{line}");
+            }
+        }
+        let skipped = start > self.offset;
+        self.offset = start + bytes.len() as u64;
+        Ok(skipped)
+    }
+}
 
 /// The head of a fresh log: the command, then the child's pid.
 #[must_use]
@@ -147,8 +234,7 @@ pub fn split_completion_notice(body: &str) -> (&str, Option<&str>) {
     (body, None)
 }
 
-/// What the watcher appends when it sealed the log while a pipe was still
-/// open, so a truncated tail is visible instead of silently missing.
+/// The truncation notice used by older pipe-backed logs.
 #[must_use]
 pub fn drain_truncation_notice(grace_secs: u64) -> String {
     format!("{DRAIN_TRUNCATED_OPEN}{grace_secs}s after exit]\n")
@@ -162,9 +248,7 @@ pub struct BackgroundLog {
     /// The `[exit N]` line's code. `None` when the process died to a signal
     /// or the log has no closing line (a watch error, a log cut before it).
     pub exit_code: Option<i32>,
-    /// Every streamed line with its tag taken off, in the order the streams
-    /// arrived — one interleaved stream, as the person's own terminal would
-    /// have shown it.
+    /// Every captured line in log order with its stream tag taken off.
     pub output: String,
     /// Whether any notice in the log says output was cut.
     pub truncated: bool,
@@ -212,6 +296,36 @@ pub fn parse(log: &str) -> Option<BackgroundLog> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_task_output_keeps_each_line_and_finalization_closes_the_log() {
+        use crate::task_registry::{TaskRegistry, TaskStatus};
+        use std::io::Write as _;
+
+        let registry = TaskRegistry::new_in_memory();
+        let task_id = registry.create_background_process("command", None, None).task_id;
+        let (stdout, mut stdout_writer) = Stream::open().unwrap();
+        let (stderr, mut stderr_writer) = Stream::open().unwrap();
+        registry.capture_background_output(&task_id, Capture { stdout, stderr });
+
+        stdout_writer.write_all(b"first\npart").unwrap();
+        stderr_writer.write_all(b"warning\r\n").unwrap();
+        assert_eq!(registry.output(&task_id).unwrap(), "first\n[stderr] warning\n");
+
+        // Reading has its own cursor. The writer can finish its partial line.
+        stdout_writer.write_all(b"ial").unwrap();
+        assert_eq!(registry.output(&task_id).unwrap(), "first\n[stderr] warning\n");
+        registry.refresh_background_output(&task_id, true);
+        registry.append_output(&task_id, &exit_line(Some(0))).unwrap();
+        registry.set_status(&task_id, TaskStatus::Completed).unwrap();
+
+        // A descendant may still have the write handle when its leader exits.
+        stdout_writer.write_all(b"late\n").unwrap();
+        assert_eq!(
+            registry.output(&task_id).unwrap(),
+            "first\n[stderr] warning\npartial\n[exit 0]\n",
+        );
+    }
 
     fn log(command: &str, body: &[String], closer: &str) -> String {
         let mut log = head(command, 4242);

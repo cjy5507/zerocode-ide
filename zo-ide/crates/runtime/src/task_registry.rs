@@ -250,8 +250,10 @@ impl std::fmt::Debug for TaskRegistry {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct RegistryInner {
+    #[serde(skip)]
+    background_output: HashMap<String, crate::background_log::Capture>,
     tasks: HashMap<String, Task>,
     counter: u64,
     /// Monotonic revision advanced on every mutation. Stamped onto each task's
@@ -645,7 +647,32 @@ impl TaskRegistry {
         fold_persistence(result, persisted)
     }
 
+    pub(crate) fn capture_background_output(
+        &self,
+        task_id: &str,
+        capture: crate::background_log::Capture,
+    ) {
+        lock_recovered(&self.inner).background_output.insert(task_id.to_owned(), capture);
+    }
+
+    /// Update the retained task log with the new lines from its output files.
+    /// The final read removes the handles before the watcher records the exit.
+    pub(crate) fn refresh_background_output(&self, task_id: &str, finished: bool) {
+        let mut inner = lock_recovered(&self.inner);
+        let Some(capture) = inner.background_output.get_mut(task_id) else {
+            return;
+        };
+        let (output, truncated) = capture.read(finished);
+        if finished {
+            inner.background_output.remove(task_id);
+        }
+        if !output.is_empty() {
+            let _ = self.append_task_output(&mut inner, task_id, &output, truncated);
+        }
+    }
+
     pub fn output(&self, task_id: &str) -> Result<String, String> {
+        self.refresh_background_output(task_id, false);
         let inner = lock_recovered(&self.inner);
         let task = inner
             .tasks
@@ -656,12 +683,26 @@ impl TaskRegistry {
 
     pub fn append_output(&self, task_id: &str, output: &str) -> Result<(), String> {
         let mut inner = lock_recovered(&self.inner);
-        let (result, persisted) = self.commit_mutation_status(&mut inner, |inner| {
+        self.append_task_output(&mut inner, task_id, output, false)
+    }
+
+    fn append_task_output(
+        &self,
+        inner: &mut RegistryInner,
+        task_id: &str,
+        output: &str,
+        truncated: bool,
+    ) -> Result<(), String> {
+        let (result, persisted) = self.commit_mutation_status(inner, |inner| {
             let rev = inner.bump_revision();
             let task = inner
                 .tasks
                 .get_mut(task_id)
                 .ok_or_else(|| format!("task not found: {task_id}"))?;
+            if truncated {
+                task.output.clear();
+                task.output.push_str(TASK_OUTPUT_TRUNCATED_PREFIX);
+            }
             task.output.push_str(output);
             let limit = if task.kind == TaskKind::BackgroundProcess { BACKGROUND_TASK_LIMITS.tail_bytes } else { MAX_TASK_OUTPUT_BYTES };
             trim_task_output_to(&mut task.output, limit);

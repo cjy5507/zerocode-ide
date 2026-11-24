@@ -698,18 +698,7 @@ fn execute_shell_command(
             .stdin(std::process::Stdio::null());
 
         if let Some(registry) = tasks {
-            let child = process
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?;
-            return Ok(register_background_command(
-                child,
-                registry,
-                command,
-                "background PowerShell",
-                session_id,
-                sandbox_status,
-            ));
+            return register_background_command(process, registry, command, session_id, sandbox_status);
         }
 
         let child = process
@@ -752,26 +741,20 @@ fn execute_shell_command(
 }
 
 fn register_background_command(
-    child: Child,
+    process: Command,
     registry: &runtime::task_registry::TaskRegistry,
     command: &str,
-    description: &str,
     session_id: Option<&str>,
     sandbox_status: SandboxStatus,
-) -> BashCommandOutput {
-    let pid = child.id();
-    let task = registry.create_background_process(command, Some(description), session_id);
-    let _ = registry.set_status(
-        &task.task_id,
-        runtime::task_registry::TaskStatus::Running,
-    );
-    let _ = registry.append_output(
-        &task.task_id,
-        &runtime::background_log::head(command, pid),
-    );
-    registry.attach_background_process(&task.task_id, child);
-    let started = runtime::background_log::started_line(&task.task_id, pid, registry.reach());
-    backgrounded_command_output(task.task_id, Some(started), sandbox_status)
+) -> std::io::Result<BashCommandOutput> {
+    let (task_id, pid) = registry.spawn_background_process(
+        process,
+        command,
+        "background PowerShell",
+        session_id,
+    )?;
+    let started = runtime::background_log::started_line(&task_id, pid, registry.reach());
+    Ok(backgrounded_command_output(task_id, Some(started), sandbox_status))
 }
 
 /// Refuse a `PowerShell` command by the tool's own rule
@@ -1074,11 +1057,15 @@ mod tests {
         }
     }
 
-    /// Spawn `sh -c <script>` with both pipes captured, as the timeout callers do.
+    fn shell_command(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    /// Spawn with both pipes captured, as the timeout callers do.
     fn spawn(script: &str) -> Child {
-        Command::new("sh")
-            .arg("-c")
-            .arg(script)
+        shell_command(script)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1208,15 +1195,13 @@ mod tests {
     #[test]
     fn powershell_background_task_captures_output_in_registry() {
         let registry = runtime::task_registry::TaskRegistry::default();
-        let child = spawn("printf 'from-stdout\\n'; printf 'from-stderr\\n' >&2");
         let output = register_background_command(
-            child,
+            shell_command("printf 'from-stdout\\n'; printf 'from-stderr\\n' >&2"),
             &registry,
             "test PowerShell output",
-            "background PowerShell",
             Some("test-session"),
             resolve_sandbox_status(&SandboxConfig::default(), Path::new(".")),
-        );
+        ).expect("start the shell");
         let task_id = output
             .background_task_id
             .as_deref()
@@ -1231,24 +1216,31 @@ mod tests {
             {
                 break;
             }
-            assert!(Instant::now() < deadline, "background output was not drained");
+            assert!(Instant::now() < deadline, "background output was not recorded");
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(output.no_output_expected, Some(false));
+
+        let context = crate::ToolContext::new().with_tasks(registry);
+        context.set_session_id("test-session");
+        let result = crate::execute_tool(&context, "TaskOutput", &serde_json::json!({"task_id":task_id}))
+            .expect("read task output");
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(result["output"].as_str().unwrap().ends_with(
+            "from-stdout\n[stderr] from-stderr\n[exit 0]\n"
+        ));
     }
 
     #[test]
     fn powershell_background_task_stop_terminates_registered_child() {
         let registry = runtime::task_registry::TaskRegistry::default();
-        let child = spawn("printf 'started\\n'; sleep 60");
         let output = register_background_command(
-            child,
+            shell_command("printf 'started\\n'; exec sleep 60"),
             &registry,
             "test PowerShell stop",
-            "background PowerShell",
             Some("test-session"),
             resolve_sandbox_status(&SandboxConfig::default(), Path::new(".")),
-        );
+        ).expect("start the shell");
         let task_id = output
             .background_task_id
             .as_deref()

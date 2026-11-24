@@ -492,12 +492,13 @@ pub(crate) fn run_task_output(
 ) -> Result<String, ToolError> {
     let task = registry.get(&input.task_id).ok_or_else(|| ToolError::Execution(format!("task not found: {}", input.task_id)))?;
     require_task_session(&task, session_id)?;
+    let output = registry.output(&task.task_id).map_err(ToolError::Execution)?;
     to_pretty_json(json!({
         "task_id": task.task_id,
         "status": task.status,
         "exit_code": task.exit_code,
-        "output": task.output,
-        "has_output": !task.output.is_empty()
+        "output": output,
+        "has_output": !output.is_empty()
     }))
 }
 
