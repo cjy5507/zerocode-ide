@@ -262,6 +262,7 @@ const modelConnectionsController = {
   rowsOpen: new Set(),
   dirty: false,
   dailyDirty: false,
+  openingView: null,
 
   isPaneVisible() {
     return typeof settingsView !== "undefined"
@@ -280,11 +281,26 @@ const modelConnectionsController = {
     } else if (this.dailyDirty && !this.setup) {
       this.dailyDirty = false;
       keepingSettingsScroll(() => this.renderDaily());
+      if (typeof invalidateSettingsSearchIndex === "function") invalidateSettingsSearchIndex("judgment-models");
     }
   },
+  flushForSearch() {
+    if (!this.dirty) return;
+    this.dirty = false;
+    this.dailyDirty = false;
+    this.renderSetup();
+    if (!this.setup) this.renderDaily();
+    this.renderConnections();
+    if (typeof invalidateSettingsSearchIndex === "function") invalidateSettingsSearchIndex("judgment-models");
+  },
   show(view) {
-    showSettingsPane("judgment-models");
-    this.paintView(view);
+    this.openingView = view;
+    try {
+      showSettingsPane("judgment-models");
+      this.paintView(view);
+    } finally {
+      this.openingView = null;
+    }
   },
   paintView(view) {
     this.view = view;
@@ -1257,6 +1273,7 @@ const modelConnectionsController = {
   /* ---- drawing ------------------------------------------------------------ */
 
   render() {
+    if (typeof invalidateSettingsSearchIndex === "function") invalidateSettingsSearchIndex("judgment-models");
     if (!this.isPaneVisible()) {
       this.dirty = true;
       return;
@@ -1272,6 +1289,7 @@ const modelConnectionsController = {
       }
       this.renderConnections();
     });
+    if (typeof invalidateSettingsSearchIndex === "function") invalidateSettingsSearchIndex("judgment-models");
   },
 
   /* One model, on one line: its name, how it is reached, a reason when it
@@ -1395,6 +1413,7 @@ const modelConnectionsController = {
   },
 
   renderDaily() {
+    if (typeof invalidateSettingsSearchIndex === "function") invalidateSettingsSearchIndex("judgment-models");
     const coding = document.querySelector('[data-model-role="coding"]');
     const judgment = document.querySelector('[data-model-role="judgment"]');
     if (!coding || !judgment) return;
@@ -2070,6 +2089,7 @@ const modelConnectionsController = {
   },
 
   renderConnections() {
+    if (typeof invalidateSettingsSearchIndex === "function") invalidateSettingsSearchIndex("judgment-models");
     const holder = el("model-connection-groups");
     if (!holder) return;
     const lines = (id) => holder.querySelector(`[data-group-lines="${id}"]`);

@@ -1047,11 +1047,15 @@ const settingsRailItemById = new Map(
 );
 const settingsPaneWordsCache = new Map();
 
-function invalidateSettingsSearchIndex() {
-  settingsPaneWordsCache.clear();
+function invalidateSettingsSearchIndex(pane = null) {
+  if (pane) settingsPaneWordsCache.delete(pane);
+  else settingsPaneWordsCache.clear();
 }
 
 function paneWords(pane) {
+  if (pane === "judgment-models" && typeof modelConnectionsController !== "undefined" && modelConnectionsController.dirty) {
+    modelConnectionsController.flushForSearch();
+  }
   const cached = settingsPaneWordsCache.get(pane);
   if (cached !== undefined) return cached;
   const item = settingsRailItemById.get(pane);
@@ -1148,7 +1152,7 @@ function showSettingsPane(pane) {
   }
   // The page opens on its lists; the connection editor is asked for by name.
   if (pane === "judgment-models") {
-    modelConnectionsController.paintView("catalog");
+    modelConnectionsController.paintView(modelConnectionsController.openingView ?? "catalog");
     if (arriving) {
       void modelConnectionsController.refresh();
       void prepareRouterEditor();
@@ -1173,7 +1177,7 @@ function showSettingsPane(pane) {
     void refreshSecondBrain();
   }
   if (pane === "ssh" && (arriving || requested !== pane)) {
-    if (arriving || requested === "ssh") void enterSshTargetsPane();
+    if (requested === "ssh") void enterSshTargetsPane();
     if (arriving || requested === "ssh-hosts") {
       void refreshSshHosts();
       void refreshRemoteWorkspaces();

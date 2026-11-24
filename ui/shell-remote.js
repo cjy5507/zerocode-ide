@@ -2039,8 +2039,11 @@ listen("phone-link:paired", (event) => {
       label: t("settings.remoteLink.pairedOpen", "기기 보기"),
       run: () => {
         closing(note, () => note.remove());
+        if (settingsView.hidden) settingsPane = "remote-link";
         setSettingsOpen(true);
         showSettingsPane("remote-link");
+        el("remote-link-phones-title")?.closest(".integration-provider")?.scrollIntoView({ block: "center" });
+        el("remote-link-new-code")?.focus({ preventScroll: true });
       },
     },
   });

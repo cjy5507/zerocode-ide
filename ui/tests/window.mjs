@@ -18445,14 +18445,17 @@ const skillTyped = await page.evaluate(async () => {
   const tab = tabs.find((tab) => tab.kind === 'skills'); const view = docHost(tab.pane, 'skills');
   await prepareSkillInstall(view, ['release-review'], [], 'update');
   openSkillsView(); await refreshSkills(true);
+  const awayId = window.__SKILL_BEFORE__.activeTabId;
+  if (awayId && awayId !== 'skills' && tabs.some((one) => one.id === awayId)) setActiveTab(awayId);
+  const leftSkillsTab = activeTabId !== 'skills';
   setSettingsOpen(true); showSettingsPane('skills');
   const noRowsInSettings = !document.querySelector('.settings-pane[data-pane="skills"]');
-  const reopenedSkillsTab = document.getElementById('settings-view').hidden;
+  const reopenedSkillsTab = document.getElementById('settings-view').hidden && activeTabId === 'skills';
   setSettingsOpen(false);
-  return { calls: window.__SKILL_CALLS__, noRowsInSettings, reopenedSkillsTab };
+  return { calls: window.__SKILL_CALLS__, noRowsInSettings, leftSkillsTab, reopenedSkillsTab };
 });
 const skillTerm = skillTyped.calls.find((c) => c.command === 'term_text');
-ok('skill update stages a plain terminal command without Enter and rescans on return', skillTyped.calls.some((c) => c.command === 'open_term_tab' && c.args.plain === true) && skillTerm?.args.text === 'npx skills update release-review --global' && !/[\r\n]/.test(skillTerm.args.text) && !skillTyped.calls.some((c) => c.command === 'term_key') && skillTyped.calls.some((c) => c.command === 'skills_rescan') && skillTyped.noRowsInSettings && skillTyped.reopenedSkillsTab, JSON.stringify(skillTyped));
+ok('skill update stages a plain terminal command without Enter and rescans on return', skillTyped.calls.some((c) => c.command === 'open_term_tab' && c.args.plain === true) && skillTerm?.args.text === 'npx skills update release-review --global' && !/[\r\n]/.test(skillTerm.args.text) && !skillTyped.calls.some((c) => c.command === 'term_key') && skillTyped.calls.some((c) => c.command === 'skills_rescan') && skillTyped.noRowsInSettings && skillTyped.leftSkillsTab && skillTyped.reopenedSkillsTab, JSON.stringify(skillTyped));
 await page.evaluate(() => {
   window.__SKILL_FOREGROUND_OLD__ = window.__ANSWER__.term_has_running_process;
   window.__SKILL_FOREGROUND_CALLS__ = 0;

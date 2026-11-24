@@ -11654,6 +11654,7 @@ await test("Remote link turns the phone link on, shows a one-time QR, and revoke
 
   // A phone pairing is told to the person, by its name, until they look —
   // anything on this machine can reach the listener from loopback.
+  await openSettings(pageA, "general");
   const pairedAt = backend.calls.length;
   await pageA.evaluate(() => window.__SETTINGS_TEST_EMIT__("phone-link:paired", {
     name: "Fixture phone",
@@ -11661,10 +11662,21 @@ await test("Remote link turns the phone link on, shows a one-time QR, and revoke
   }));
   const notice = pageA.locator(".toast", { hasText: "Fixture phone" });
   await notice.waitFor({ state: "visible" });
-  await backend.waitForCall("A", "phone_link_status", pairedAt);
+  const clickAt = backend.calls.length;
   await notice.locator(".toast-action").click();
   await pageA.waitForFunction(() => settingsPane === "ssh" && !settingsView.hidden);
+  await backend.waitForCall("A", "phone_link_status", pairedAt);
   await notice.waitFor({ state: "detached" });
+  assert(
+    !backend.calls.slice(clickAt).some((entry) => entry.command === "ssh_import_config"),
+    "opening the phone list from a pairing toast triggered ssh_import_config",
+  );
+  const phoneBox = await pageA.evaluate(() => {
+    const frame = document.querySelector(".settings-frame")?.getBoundingClientRect();
+    const btn = document.getElementById("remote-link-new-code")?.getBoundingClientRect();
+    return frame && btn ? { inView: btn.top >= frame.top - 1 && btn.bottom <= frame.bottom + 1, btnTop: Math.round(btn.top), frameBottom: Math.round(frame.bottom) } : null;
+  });
+  assert(phoneBox?.inView, "phone pairing toast did not scroll the phone device section into view", phoneBox);
 
   const offAt = backend.calls.length;
   await pageA.locator("#remote-link-toggle").click();
@@ -19225,6 +19237,83 @@ await test("automations owed strip, paused fold, inline failure reasons, lazy ca
       autoSelectedId = null;
       setAutoOpen(false);
     });
+  }
+});
+
+await test("re-editing a saved API connection preserves its checked models and saves renames", async () => {
+  const savedProviders = structuredClone(backend.zoSettings.providers ?? []);
+  try {
+    backend.zoSettings.providers = [
+      ...savedProviders,
+      {
+        name: "EditKeepRouter",
+        base_url: "https://api.example.test/v1",
+        requires_auth: true,
+        auth_env: "ZEROCODE_ROUTER_EDITKEEPROUTER_KEY",
+        models: [{ id: "keep/model-alpha", context_window: 128000 }],
+      },
+    ];
+    backend.keychain.set("dev.zerocode.router.ZEROCODE_ROUTER_EDITKEEPROUTER_KEY", "[합성-키]");
+    await openSettings(pageA, "judgment-models");
+    await pageA.waitForFunction(() =>
+      (modelConnectionsController.state?.connections ?? []).some((c) => c.provider?.name === "EditKeepRouter"));
+    await pageA.evaluate(() => {
+      const row = modelConnectionsController.state.connections.find((c) => c.provider?.name === "EditKeepRouter");
+      modelConnectionsController.edit(row);
+    });
+    await renderSettled(pageA);
+    const editState = await pageA.evaluate(() => ({
+      view: modelConnectionsController.view,
+      checked: document.querySelectorAll("#router-models-tbody .router-model-check:checked").length,
+      disabled: document.getElementById("router-save-btn")?.disabled ?? true,
+    }));
+    assertEqual(editState, { view: "add", checked: 1, disabled: false }, "re-editing cleared saved models or blocked save");
+    const saveAt = backend.calls.length;
+    await pageA.fill("#router-name-input", "EditKeepRouterRenamed");
+    await pageA.click("#router-save-btn");
+    const saved = await backend.waitForCall("A", "save_api_router", saveAt);
+    assertEqual(saved.args.name, "EditKeepRouterRenamed", "renamed router did not save");
+    assertEqual(saved.args.models.map((m) => m.id), ["keep/model-alpha"], "saved router lost its checked model");
+    return "saved model row preserved on edit + rename saved";
+  } finally {
+    backend.zoSettings.providers = savedProviders;
+    backend.keychain.delete("dev.zerocode.router.ZEROCODE_ROUTER_EDITKEEPROUTER_KEY");
+    await pageA.evaluate(() => modelConnectionsController.paintView("catalog"));
+  }
+});
+
+await test("settings search finds models and API connections that arrive after an initial search", async () => {
+  const savedProviders = structuredClone(backend.zoSettings.providers ?? []);
+  try {
+    await openSettings(pageA, "general");
+    await pageA.fill("#settings-search", "일반");
+    await renderSettled(pageA);
+    backend.zoSettings.providers = [
+      ...savedProviders,
+      {
+        name: "LateArrivalKey",
+        base_url: "https://late.example.test/v1",
+        requires_auth: true,
+        auth_env: "ZEROCODE_ROUTER_LATEARRIVALKEY_KEY",
+        models: [{ id: "late-arrival/unique-model-94975", context_window: 64000 }],
+      },
+    ];
+    backend.keychain.set("dev.zerocode.router.ZEROCODE_ROUTER_LATEARRIVALKEY_KEY", "[합성-키]");
+    await pageA.evaluate(() => modelConnectionsController.refresh());
+    await pageA.fill("#settings-search", "unique-model-94975");
+    await renderSettled(pageA);
+    const foundModel = await pageA.locator('.settings-rail-item[data-pane="judgment-models"]').isVisible();
+    assert(foundModel, "settings search missed a model that arrived after the first search");
+    await pageA.fill("#settings-search", "LateArrivalKey");
+    await renderSettled(pageA);
+    const foundConn = await pageA.locator('.settings-rail-item[data-pane="judgment-models"]').isVisible();
+    assert(foundConn, "settings search missed an API connection that arrived after the first search");
+    await pageA.fill("#settings-search", "");
+    return "late-arriving model and API key connection matched in live search";
+  } finally {
+    backend.zoSettings.providers = savedProviders;
+    backend.keychain.delete("dev.zerocode.router.ZEROCODE_ROUTER_LATEARRIVALKEY_KEY");
+    await pageA.fill("#settings-search", "");
   }
 });
 
