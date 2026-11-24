@@ -4516,7 +4516,12 @@ function flowBySlug(slug) {
 
 function paintFlows() {
   const card = el("flow-card");
-  if (!flowData) { card.hidden = true; return; }
+  if (!flowData) {
+    const flowTabOpen = !autoView.hidden && autoPage === "flows";
+    card.hidden = !flowTabOpen;
+    if (flowTabOpen) el("flow-empty").hidden = false;
+    return;
+  }
   card.hidden = false;
   const flows = flowData.flows ?? [];
   el("flow-empty").hidden = flows.length !== 0;
@@ -5542,6 +5547,7 @@ function ownLoginRow({ chosen, name, under, pick: chose, alarmed = false, action
     button.className = action.className;
     button.type = "button";
     button.textContent = action.label;
+    if (action.hidden) button.hidden = true;
     button.addEventListener("click", () => action.press(button));
     line.appendChild(button);
   }
@@ -6493,11 +6499,12 @@ function codexAccountNote(rows) {
 /* The machine's own login as a row. Named when it can be named, and honest
  * about a key login having no name to give. */
 function codexSystemRow() {
+  const signedOut = codexSystemSignedOut();
   return ownLoginRow({
     chosen: !codexAccountReport.active,
     name: t("settings.codexAccounts.system", "이 기계의 로그인"),
     under: codexSystemUnder(),
-    alarmed: codexSystemSignedOut(),
+    alarmed: signedOut,
     pick: () => pickCodexAccount(null),
     // The CLI's own two verbs for its own home, and nothing more: a dead
     // `~/.codex` token used to have no road out of this pane at all
@@ -6511,6 +6518,7 @@ function codexSystemRow() {
       {
         className: "account-logout",
         label: t("settings.accounts.logout", "로그아웃"),
+        hidden: signedOut,
         press: () => logoutCodexLogin(),
       },
     ],
@@ -12007,6 +12015,7 @@ function paintAutoPage() {
   if (flows) {
     el("auto-list-page").hidden = true;
     el("auto-detail").hidden = true;
+    if (!flowData) paintFlows();
   }
   el("auto-page-count-schedules").textContent = automations.length > 0 ? String(automations.length) : "";
   const flowCount = flowData?.flows?.length ?? 0;

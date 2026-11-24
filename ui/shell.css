@@ -27310,7 +27310,8 @@ progress:indeterminate::-webkit-progress-bar {
 /* The subtitle's own colour, Orca's `text-destructive` at `:1464`. It takes
  * the row's muted ink because this is the line that says WHAT is wrong, while
  * the badge beside the name only says THAT something is. */
-.account-row.is-alarmed .agent-row-cmd {
+.account-row.is-alarmed .agent-row-cmd,
+.account-row.is-alarmed .account-pick.is-active .account-mark {
   color: var(--signal-halt-ink);
 }
 
