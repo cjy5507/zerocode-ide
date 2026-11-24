@@ -269,13 +269,17 @@ pub struct ActedWindow {
 
 impl ActedWindow {
     /// This window, for the answer of an act aimed at it to name
-    /// (`actedWindow`), given the window its provider saw take the act's
-    /// input (`took_input`, by its number). As the Windows provider answers
-    /// today: every act names the window it checked itself against
-    /// (`current_snapshot`), whatever took its input.
+    /// (`actedWindow`), when its provider saw this window take the act's
+    /// input (`took_input`, the number of the window it saw take it) — and
+    /// none when it saw another window take it, or did not see (review
+    /// t-129021 §3). A step's evidence keeps a look of the window its answer
+    /// names, so a window the input was only aimed at — a wheel or a drag
+    /// sent at a point of the screen, which whatever window stands there
+    /// takes; keys sent while another window of the app stood in front over
+    /// it — is named by no answer, and its step keeps no picture.
     #[must_use]
-    pub fn if_it_took(self, _took_input: Option<u64>) -> Option<Self> {
-        Some(self)
+    pub fn if_it_took(self, took_input: Option<u64>) -> Option<Self> {
+        (took_input == Some(self.id)).then_some(self)
     }
 }
 

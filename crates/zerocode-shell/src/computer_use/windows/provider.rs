@@ -32,8 +32,12 @@ pub(super) struct Provider {
     /// Process descriptions, kept across calls (`apps::Catalog`).
     pub(super) apps: Catalog,
     /// The window the act being run checked itself against
-    /// (`current_snapshot`), for its answer to name (`run_action`).
+    /// (`current_snapshot`), for its answer to name (`run_action`) once
+    /// that window was seen to take the act's input (`took_input`).
     acted: Option<ActedWindow>,
+    /// The window the act being run saw take its input, by its number
+    /// (`input_taken_by`).
+    took_input: Option<u64>,
 }
 
 impl Provider {
@@ -43,6 +47,7 @@ impl Provider {
             cache: SnapshotCache::new(),
             apps: Catalog::default(),
             acted: None,
+            took_input: None,
         })
     }
 
@@ -214,20 +219,41 @@ impl Provider {
         current
     }
 
+    /// The window an act's road saw take its input, by its number: the
+    /// act's own window when an element of its tree was worked or the click
+    /// fence let a press through only over it, the window in front when
+    /// keys went (`require_focused`), the window a focused element says it
+    /// lives in. `None` where the road saw nothing take it: the wheel or a
+    /// drag sent at a point of the screen, which whatever window stands
+    /// there takes, or text written into a focused element only its process
+    /// ties to the window. The act's answer names its window only when that
+    /// window took the input (`run_action`, review t-129021 §3).
+    pub(super) fn input_taken_by(&mut self, window: Option<u64>) {
+        self.took_input = window;
+    }
+
     /// `actionResult`: run the action, observe after it, and when the
     /// requested window is gone report its unavailable observation. The
     /// answer names the window the act went to (`actedWindow`), as the macOS
     /// helper's does: the look after the act may land on another window of
     /// the app, and a step's evidence is held to the acted one
-    /// (I-t123731-rc1, review t-128987 §2).
+    /// (I-t123731-rc1, review t-128987 §2). It names it only when the act's
+    /// road saw that window take the input (`input_taken_by`): a step's
+    /// evidence is a look of the window its answer names, and a window the
+    /// input was only aimed at may not be where it went (review t-129021 §3).
     fn run_action(
         &mut self,
         params: &Map<String, Value>,
         action: fn(&mut Self, &Map<String, Value>) -> Result<ActionMetadata, ProviderError>,
     ) -> Result<Value, ProviderError> {
         self.acted = None;
+        self.took_input = None;
         let mut metadata = action(self, params)?;
-        metadata.acted_window = self.acted.take();
+        let took_input = self.took_input.take();
+        metadata.acted_window = self
+            .acted
+            .take()
+            .and_then(|window| window.if_it_took(took_input));
         let include_screenshot = !params::flag(params, "noScreenshot");
         Self::action_result(params, metadata, self.observe(params, include_screenshot))
     }

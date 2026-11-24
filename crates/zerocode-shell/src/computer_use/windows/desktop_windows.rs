@@ -414,19 +414,21 @@ pub(super) fn is_owned_by_target(root: HWND, target: Recipient) -> bool {
     false
 }
 
-/// `isTargetWindowFocused`: the foreground root is the target, or belongs to
-/// the same process and mostly covers the same rectangle.
-pub(super) fn is_focused(target: &WindowCandidate) -> bool {
-    let Some((pid, root)) = foreground() else {
-        return false;
-    };
+/// `isTargetWindowFocused`: the foreground root, by its number, when it is
+/// the target, or belongs to the same process and mostly covers the same
+/// rectangle; `None` when it is neither. Keys sent now go to the window in
+/// front — the target only when the number is the target's.
+pub(super) fn focused_front(target: &WindowCandidate) -> Option<u64> {
+    let (pid, root) = foreground()?;
     if root == target.hwnd {
-        return true;
+        return Some(target.id());
     }
     if pid != target.host_pid {
-        return false;
+        return None;
     }
-    window_rect(hwnd_from_id(root as u64)).is_some_and(|frame| frame.mostly_covers(&target.bounds))
+    window_rect(hwnd_from_id(root as u64))
+        .is_some_and(|frame| frame.mostly_covers(&target.bounds))
+        .then_some(root as u64)
 }
 
 /// `recoverWindow`: un-minimize, bring forward, give the desktop a moment.

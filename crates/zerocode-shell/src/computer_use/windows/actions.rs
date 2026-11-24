@@ -8,6 +8,13 @@
 //! accessibility road may have written the text, no synthetic road follows:
 //! `replace_selection` answers [`ReplaceOutcome`], and only
 //! `NotApplicable` lets the synthetic road run.
+//!
+//! An act's answer names its window only where its road saw that window
+//! take the input (`Provider::input_taken_by`): an element of the window's
+//! own tree worked, a press the click fence let through only over it, keys
+//! sent with it in front, a focused element whose own window it is. The
+//! wheel and a drag go to a point of the screen, which whatever window
+//! stands there takes, and name none.
 
 use serde_json::{Map, Value};
 use windows::Win32::UI::Accessibility::IUIAutomationElement;
@@ -48,18 +55,11 @@ fn coordinate(
     Ok(snapshot.screen_point(x, y))
 }
 
-/// `requireTargetWindowFocused`.
-fn require_focused(snapshot: &Snapshot, params: &Map<String, Value>) -> Result<(), ProviderError> {
-    match synthetic_input_focus_failure(
-        desktop_windows::is_focused(&snapshot.window),
-        params::flag(params, "restoreWindow"),
-    ) {
-        None => Ok(()),
-        Some(failure) => Err(ProviderError::new(
-            error_code::WINDOW_NOT_FOCUSED,
-            failure.message(&snapshot.app.name),
-        )),
-    }
+/// The window a cached element lives in, by its number: the root of its own
+/// window handle. `None` for an element with no handle of its own, which
+/// only its process ties to a window.
+fn window_of(element: &IUIAutomationElement) -> Option<u64> {
+    uia::cached_root_window(element).map(|root| root.0 as isize as u64)
 }
 
 /// The accessibility road's answer for a replaced selection.
@@ -104,11 +104,32 @@ impl Provider {
     /// when it does not. Anything else is not a place the agent's text may go.
     fn live_focused(&self, snapshot: &Snapshot) -> Option<IUIAutomationElement> {
         let element = self.client.focused_element()?;
-        let in_target = match uia::cached_root_window(&element) {
-            Some(root) => root.0 as isize == snapshot.window.hwnd,
+        let in_target = match window_of(&element) {
+            Some(window) => window == snapshot.window.id(),
             None => uia::cached_process_id(&element) == Some(snapshot.app.pid),
         };
         in_target.then_some(element)
+    }
+
+    /// `requireTargetWindowFocused`: keys go only while the target window,
+    /// or a window of its process mostly covering it, is in front — and
+    /// they go to the window in front, which this act saw take them.
+    fn require_focused(
+        &mut self,
+        snapshot: &Snapshot,
+        params: &Map<String, Value>,
+    ) -> Result<(), ProviderError> {
+        let front = desktop_windows::focused_front(&snapshot.window);
+        if let Some(failure) =
+            synthetic_input_focus_failure(front.is_some(), params::flag(params, "restoreWindow"))
+        {
+            return Err(ProviderError::new(
+                error_code::WINDOW_NOT_FOCUSED,
+                failure.message(&snapshot.app.name),
+            ));
+        }
+        self.input_taken_by(front);
+        Ok(())
     }
 
     pub(super) fn click(
@@ -159,6 +180,7 @@ impl Provider {
                     .filter(|action| uia::perform_action(element, action).is_ok())
                     .map(str::to_string);
                 if let Some(action) = performed {
+                    self.input_taken_by(Some(snapshot.window.id()));
                     return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
                 }
             }
@@ -173,12 +195,14 @@ impl Provider {
                 ));
             };
             input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
+            self.input_taken_by(Some(snapshot.window.id()));
             return Ok(ActionMetadata::new(ActionPath::Synthetic)
                 .fallback("actionUnsupported")
                 .verified_as(Verification::synthetic_input()));
         }
         let (x, y) = coordinate(params, "x", "y", &snapshot)?;
         input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
+        self.input_taken_by(Some(snapshot.window.id()));
         Ok(ActionMetadata::new(ActionPath::Synthetic).verified_as(Verification::synthetic_input()))
     }
 
@@ -205,6 +229,7 @@ impl Provider {
                 )
             })?;
         uia::perform_action(element, &action)?;
+        self.input_taken_by(Some(snapshot.window.id()));
         Ok(ActionMetadata::new(ActionPath::Accessibility).named(action))
     }
 
@@ -269,6 +294,7 @@ impl Provider {
             }
             (ValueKind::Text, _) => return Err(not_settable()),
         }
+        self.input_taken_by(Some(snapshot.window.id()));
         // A password field is never read back, and what was written is not
         // repeated in the answer.
         if secret {
@@ -317,11 +343,14 @@ impl Provider {
         let mut fallback = None;
         if let Some(element) = target {
             match replace_selection(&UiaTextField(&element), &text) {
-                ReplaceOutcome::Applied(verification) => return Ok(replaced(verification)),
+                ReplaceOutcome::Applied(verification) => {
+                    self.input_taken_by(window_of(&element));
+                    return Ok(replaced(verification));
+                }
                 ReplaceOutcome::NotApplicable(reason) => fallback = Some(reason),
             }
         }
-        require_focused(&snapshot, params)?;
+        self.require_focused(&snapshot, params)?;
         Self::gate_secret_entry(
             &snapshot,
             self.client.focused_element().as_ref(),
@@ -345,7 +374,7 @@ impl Provider {
         let chord = parse_key_spec(&params::required_string(params, "key")?)?;
         let writes = chord.writes_on(Platform::Windows);
         Self::gate_secret_entry(&snapshot, self.live_focused(&snapshot).as_ref(), writes)?;
-        require_focused(&snapshot, params)?;
+        self.require_focused(&snapshot, params)?;
         Self::gate_secret_entry(&snapshot, self.client.focused_element().as_ref(), writes)?;
         input::press_chord(&chord)?;
         Ok(ActionMetadata::new(ActionPath::Synthetic)
@@ -369,6 +398,7 @@ impl Provider {
             && let Some(element) = self.live_focused(&snapshot)
             && let Some(whole) = uia::select_all_text(&element)
         {
+            self.input_taken_by(window_of(&element));
             let verification = if whole {
                 Verification::verified(
                     "selection",
@@ -382,7 +412,7 @@ impl Provider {
                 .named("SelectAll")
                 .verified_as(verification));
         }
-        require_focused(&snapshot, params)?;
+        self.require_focused(&snapshot, params)?;
         Self::gate_secret_entry(&snapshot, self.client.focused_element().as_ref(), writes)?;
         input::press_chord(&chord)?;
         Ok(ActionMetadata::new(ActionPath::Synthetic)
@@ -402,9 +432,10 @@ impl Provider {
             && let ReplaceOutcome::Applied(verification) =
                 replace_selection(&UiaTextField(&element), &text)
         {
+            self.input_taken_by(window_of(&element));
             return Ok(replaced(verification));
         }
-        require_focused(&snapshot, params)?;
+        self.require_focused(&snapshot, params)?;
         Self::gate_secret_entry(
             &snapshot,
             self.client.focused_element().as_ref(),
@@ -466,6 +497,7 @@ impl Provider {
                 for _ in 0..(pages as usize).max(1) {
                     let _ = uia::scroll_page(element, direction);
                 }
+                self.input_taken_by(Some(snapshot.window.id()));
                 return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
             }
             let Some((x, y)) = snapshot.center_of(record) else {
@@ -474,6 +506,8 @@ impl Provider {
                     format!("element {index} has no scrollable frame"),
                 ));
             };
+            // The wheel at a point of the screen goes to whatever window
+            // stands there; nothing sees which, so the answer names none.
             input::scroll(x, y, direction, pages)?;
             return Ok(ActionMetadata::new(ActionPath::Synthetic).fallback("actionUnsupported"));
         }
@@ -510,6 +544,8 @@ impl Provider {
                 coordinate(params, "toX", "toY", &snapshot)?,
             )
         };
+        // A drag between points of the screen, like the wheel: the answer
+        // names no window.
         input::drag(start, end)?;
         Ok(ActionMetadata::new(ActionPath::Synthetic))
     }
