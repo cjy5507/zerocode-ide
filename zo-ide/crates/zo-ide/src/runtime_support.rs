@@ -1910,34 +1910,57 @@ const STARTUP_SWEEP_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// Minimum interval between store-wide retention sweeps across concurrent `zo`
 /// processes (e.g. 4-5 restored panes starting together on app restart).
 const RETENTION_SWEEP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+const RETENTION_SWEEP_LOCK_FILE: &str = ".retention-sweep.lock";
+const RETENTION_SWEEP_STAMP_FILE: &str = ".retention-last-sweep";
 
-/// Claim the cross-process retention sweep stamp if no other `zo` process swept
-/// within `cooldown`. Uses `create_new(true)` after pruning a stale stamp so
-/// only one restarting pane walks every project store on disk.
-fn claim_retention_sweep_slot(
+fn retention_sweep_is_fresh(
     stamp_path: &std::path::Path,
     now: std::time::SystemTime,
     cooldown: std::time::Duration,
 ) -> bool {
-    if let Ok(modified) = std::fs::metadata(stamp_path).and_then(|meta| meta.modified()) {
-        // Treat a stamp newer than `now` (concurrent peer or sub-ms clock skew)
-        // as fresh so simultaneous panes never remove each other's claim.
-        let expired = now
-            .duration_since(modified)
-            .is_ok_and(|age| age >= cooldown);
-        if !expired {
-            return false;
-        }
+    std::fs::metadata(stamp_path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .is_some_and(|modified| {
+            !now.duration_since(modified)
+                .is_ok_and(|age| age >= cooldown)
+        })
+}
+
+/// Run the store-wide retention sweep at most once per `cooldown` across
+/// processes, using the same `secure_fs::try_lock_owner_only` + under-lock
+/// re-check + post-completion stamp pattern as `dreamer::try_auto_dream`.
+fn run_retention_sweep_if_due<F>(
+    root: &std::path::Path,
+    now: std::time::SystemTime,
+    cooldown: std::time::Duration,
+    sweep: F,
+) -> bool
+where
+    F: FnOnce(),
+{
+    let stamp = root.join(RETENTION_SWEEP_STAMP_FILE);
+    if retention_sweep_is_fresh(&stamp, now, cooldown) {
+        return false;
     }
-    if let Some(parent) = stamp_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if std::fs::create_dir_all(root).is_err() {
+        return false;
     }
-    let _ = std::fs::remove_file(stamp_path);
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(stamp_path)
-        .is_ok()
+    let Ok(Some(_lock)) = runtime::secure_fs::try_lock_owner_only(
+        root,
+        std::path::Path::new(RETENTION_SWEEP_LOCK_FILE),
+    ) else {
+        return false;
+    };
+    if retention_sweep_is_fresh(&stamp, now, cooldown) {
+        return false;
+    }
+    sweep();
+    let _ = crate::write_atomic(
+        &stamp,
+        format!("{}", runtime::model_discovery::now_secs()).as_bytes(),
+    );
+    true
 }
 
 fn spawn_session_retention_cleanup(config: &runtime::RuntimeConfig) {
@@ -1953,67 +1976,63 @@ fn spawn_session_retention_cleanup(config: &runtime::RuntimeConfig) {
             // warm-up (first paint, first prompt) is past; a session shorter
             // than the delay simply defers the sweep to the next boot.
             std::thread::sleep(STARTUP_SWEEP_DELAY);
-            let stamp = runtime::session_control::managed_projects_root()
-                .join(".retention-last-sweep");
-            if !claim_retention_sweep_slot(
-                &stamp,
+            let projects_root = runtime::session_control::managed_projects_root();
+            run_retention_sweep_if_due(
+                &projects_root,
                 std::time::SystemTime::now(),
                 RETENTION_SWEEP_COOLDOWN,
-            ) {
-                return;
-            }
-            // Age out content-addressed tool-output artifacts on the same
-            // retention horizon. Only the workflow retention path retires
-            // artifacts by hash, so ordinary tool-output artifacts would
-            // otherwise accumulate under `.zo/artifacts` without bound. Reuse
-            // `days` as the max age (best-effort; failures are ignored).
-            let pruned_artifacts =
-                tools::prune_artifact_files_older_than(std::time::Duration::from_secs(
-                    u64::from(days).saturating_mul(24 * 60 * 60),
-                ));
-            // …and every other project's store, which only a session opened in
-            // that project would otherwise ever sweep.
-            let pruned_elsewhere = std::time::SystemTime::now()
-                .checked_sub(std::time::Duration::from_secs(
-                    u64::from(days).saturating_mul(24 * 60 * 60),
-                ))
-                .map_or(0, |cutoff| {
-                    tools::prune_artifact_stores_under(
-                        &runtime::session_control::managed_projects_root(),
-                        cutoff,
-                    )
-                });
-            let pruned_artifacts = pruned_artifacts + pruned_elsewhere;
-            if pruned_artifacts > 0 {
-                eprintln!(
-                    "[zo] artifact retention: removed {pruned_artifacts} stale artifact file(s) (older than {days}d)"
-                );
-            }
-            let report = runtime::session_control::cleanup_expired_sessions(days);
-            if !report.is_empty() {
-                // Boot-time stderr reaches zo.log on the TUI path and the
-                // terminal on headless runs; silent when nothing expired.
-                eprintln!(
-                    "[zo] session retention: removed {} transcript(s), {} pref file(s), {} stale lock(s), {} sidecar(s), {} empty dir(s) (~{} MB, older than {days}d)",
-                    report.removed_sessions,
-                    report.removed_prefs,
-                    report.removed_locks,
-                    report.removed_sidecars,
-                    report.removed_dirs,
-                    report.reclaimed_bytes / (1024 * 1024),
-                );
-                // A sweep this large on one boot is almost always a restored
-                // backup or a repointed ZO_CONFIG_HOME whose mtimes predate
-                // the cutoff — not organic aging. Call it out loudly so a
-                // surprised user can set cleanupPeriodDays: 0 and recover from
-                // backup before the next boot sweeps the rest.
-                if report.removed_sessions >= LARGE_SWEEP_WARN {
-                    eprintln!(
-                        "[zo] warning: that retention sweep removed {} transcripts at once — if this was a restored backup or a moved config home, set `cleanupPeriodDays: 0` to stop further deletion",
-                        report.removed_sessions,
-                    );
-                }
-            }
+                || {
+                    // Age out content-addressed tool-output artifacts on the same
+                    // retention horizon. Only the workflow retention path retires
+                    // artifacts by hash, so ordinary tool-output artifacts would
+                    // otherwise accumulate under `.zo/artifacts` without bound. Reuse
+                    // `days` as the max age (best-effort; failures are ignored).
+                    let pruned_artifacts =
+                        tools::prune_artifact_files_older_than(std::time::Duration::from_secs(
+                            u64::from(days).saturating_mul(24 * 60 * 60),
+                        ));
+                    // …and every other project's store, which only a session opened in
+                    // that project would otherwise ever sweep.
+                    let pruned_elsewhere = std::time::SystemTime::now()
+                        .checked_sub(std::time::Duration::from_secs(
+                            u64::from(days).saturating_mul(24 * 60 * 60),
+                        ))
+                        .map_or(0, |cutoff| {
+                            tools::prune_artifact_stores_under(&projects_root, cutoff)
+                        });
+                    let pruned_artifacts = pruned_artifacts + pruned_elsewhere;
+                    if pruned_artifacts > 0 {
+                        eprintln!(
+                            "[zo] artifact retention: removed {pruned_artifacts} stale artifact file(s) (older than {days}d)"
+                        );
+                    }
+                    let report = runtime::session_control::cleanup_expired_sessions(days);
+                    if !report.is_empty() {
+                        // Boot-time stderr reaches zo.log on the TUI path and the
+                        // terminal on headless runs; silent when nothing expired.
+                        eprintln!(
+                            "[zo] session retention: removed {} transcript(s), {} pref file(s), {} stale lock(s), {} sidecar(s), {} empty dir(s) (~{} MB, older than {days}d)",
+                            report.removed_sessions,
+                            report.removed_prefs,
+                            report.removed_locks,
+                            report.removed_sidecars,
+                            report.removed_dirs,
+                            report.reclaimed_bytes / (1024 * 1024),
+                        );
+                        // A sweep this large on one boot is almost always a restored
+                        // backup or a repointed ZO_CONFIG_HOME whose mtimes predate
+                        // the cutoff — not organic aging. Call it out loudly so a
+                        // surprised user can set cleanupPeriodDays: 0 and recover from
+                        // backup before the next boot sweeps the rest.
+                        if report.removed_sessions >= LARGE_SWEEP_WARN {
+                            eprintln!(
+                                "[zo] warning: that retention sweep removed {} transcripts at once — if this was a restored backup or a moved config home, set `cleanupPeriodDays: 0` to stop further deletion",
+                                report.removed_sessions,
+                            );
+                        }
+                    }
+                },
+            );
         });
     });
 }
@@ -4727,27 +4746,48 @@ mod headless_color_tests {
     }
 
     #[test]
-    fn retention_sweep_slot_admits_only_one_process_within_cooldown() {
-        use crate::runtime_support::claim_retention_sweep_slot;
+    fn retention_sweep_locks_rechecks_and_stamps_only_after_completion() {
+        use crate::runtime_support::{
+            run_retention_sweep_if_due, RETENTION_SWEEP_LOCK_FILE, RETENTION_SWEEP_STAMP_FILE,
+        };
         let dir = tempfile::tempdir().expect("tempdir");
-        let stamp = dir.path().join(".retention-last-sweep");
+        let root = dir.path();
+        let stamp = root.join(RETENTION_SWEEP_STAMP_FILE);
         let now = std::time::SystemTime::now();
         let cooldown = std::time::Duration::from_secs(3_600);
-        assert!(
-            claim_retention_sweep_slot(&stamp, now, cooldown),
-            "first process claims the sweep slot"
-        );
-        assert!(
-            !claim_retention_sweep_slot(&stamp, now, cooldown),
-            "second concurrent process skips the sweep within cooldown"
-        );
-        assert!(
-            claim_retention_sweep_slot(
-                &stamp,
-                now + cooldown + std::time::Duration::from_secs(1),
-                cooldown,
-            ),
-            "sweep runs again once cooldown expires"
-        );
+
+        // While another holder owns the advisory lock, sweep does not run and writes no stamp.
+        let held = runtime::secure_fs::try_lock_owner_only(
+            root,
+            std::path::Path::new(RETENTION_SWEEP_LOCK_FILE),
+        )
+        .expect("lock call")
+        .expect("lock acquired");
+        let mut ran = 0usize;
+        assert!(!run_retention_sweep_if_due(root, now, cooldown, || ran += 1));
+        assert_eq!(ran, 0);
+        assert!(!stamp.exists(), "locked skip must not write stamp");
+        drop(held);
+
+        // First uncontended sweep runs and writes the stamp only after completion.
+        let mut saw_stamp_during_sweep = false;
+        assert!(run_retention_sweep_if_due(root, now, cooldown, || {
+            saw_stamp_during_sweep = stamp.exists();
+            ran += 1;
+        }));
+        assert!(!saw_stamp_during_sweep, "stamp must be written after sweep completes");
+        assert_eq!(ran, 1);
+        assert!(stamp.exists());
+
+        // Second call within cooldown skips; after cooldown runs again.
+        assert!(!run_retention_sweep_if_due(root, now, cooldown, || ran += 1));
+        assert_eq!(ran, 1);
+        assert!(run_retention_sweep_if_due(
+            root,
+            now + cooldown + std::time::Duration::from_secs(1),
+            cooldown,
+            || ran += 1,
+        ));
+        assert_eq!(ran, 2);
     }
 }
