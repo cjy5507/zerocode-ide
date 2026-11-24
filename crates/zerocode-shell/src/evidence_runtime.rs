@@ -15,7 +15,9 @@
 //! looks — would be framed showing that later action, and is shown by that
 //! later frame instead. A step that answered a picture — a look, or an app
 //! act in a walk that frames its steps, whose answer carries the helper's
-//! look after the act — is its own frame, kept at once (t-4229).
+//! look after the act — is its own frame, kept at once (t-4229); an act's
+//! only while that look is of the window the act went to, since the look
+//! lands where the app's focus leads (review t-128939 §1).
 //!
 //! Three rules keep the writer honest. A verb that reads or writes the step
 //! log (`verdict`, `evidence`, `recipe-save`) waits for it to be written
@@ -436,6 +438,24 @@ fn own_frame(result: Option<&serde_json::Value>) -> Option<Picture> {
     })
 }
 
+/// Whether the picture an answer carries is of what its step did (review
+/// t-128939 §1): a look's, of which no act was heard, is; an act's only when
+/// its look is of the window the act went to — the same number, the same
+/// owner (`acted`). The look after an act is of the window the app's focus
+/// and window order lead to, which may be another of its windows, where a
+/// person's other document stands; an act that named no window has none to
+/// match it with.
+fn pictures_its_act(result: &serde_json::Value, acted: Option<Acted>) -> bool {
+    let Some(acted) = acted else {
+        return true;
+    };
+    let shows = |pointer: &str| result.pointer(pointer).and_then(serde_json::Value::as_u64);
+    acted.window.is_some_and(|window| {
+        shows("/snapshot/window/id") == Some(window.id)
+            && shows("/snapshot/app/pid") == Some(window.pid)
+    })
+}
+
 /// Where a desktop step that took the desk is framed: the region of the
 /// window an app action answered in its result (the screen as a person would
 /// see it there), or the whole display. Never `getAppState`: that would
@@ -549,14 +569,18 @@ pub(super) fn leave_browser_evidence(
 /// The frame a step on the desktop or emulator road leaves, from its answer
 /// (§1.4): none for a refusal or a verb that frames nothing (`frames`); a
 /// session folder past its table says `capped`; a picture the answer
-/// exported is the step's own — kept at once, whatever follows it; else the
-/// frame `after` names from the answer's result: a surface framed once it
-/// has settled, or why there is none. The envelope is read once, for both.
+/// exported is the step's own — kept at once, whatever follows it — when it
+/// is of what the step did (`pictures_its_act`, by `acted`: what its act did,
+/// as the helper answered it); else the frame `after` names from the
+/// answer's result, as for an answer that carried no picture: a surface
+/// framed once it has settled, or why there is none. The envelope is read
+/// once, for both.
 fn frame_of<S>(
     dir: &Path,
     frames: bool,
     capped: bool,
     answer: &zerocode_hookd::TeamAnswer,
+    acted: Option<Acted>,
     after: impl FnOnce(Option<&serde_json::Value>) -> Frame<S>,
 ) -> Frame<S> {
     if answer.exit_code != 0 || !frames {
@@ -570,7 +594,7 @@ fn frame_of<S>(
     let result = envelope
         .as_ref()
         .and_then(|envelope| envelope.get("result"));
-    match own_frame(result) {
+    match own_frame(result.filter(|result| pictures_its_act(result, acted))) {
         Some(picture) => Frame::Own(picture),
         None => after(result),
     }
@@ -593,7 +617,9 @@ pub(super) fn leave_emulator_evidence(
     let Some(frames) = run_evidence::captures("emulator", verb) else {
         return;
     };
-    let frame = frame_of(dir, frames, false, answer, |_| {
+    // No helper hears an emulator's act: a picture its answer exported is
+    // an explicit screenshot's.
+    let frame = frame_of(dir, frames, false, answer, None, |_| {
         emulator_capture(argv).map_or(Frame::None, Frame::After)
     });
     send(Message::Step(Job::new(
@@ -607,13 +633,14 @@ pub(super) fn leave_emulator_evidence(
 }
 
 /// A run's step on the desktop road: the line, and the frame of the surface
-/// it acted on (`frame_of`) — a picture the answer exported is the step's own
-/// frame; else, by what its act did (`desktop_frame`), the window it went to
-/// alone after an act that went no further, or the acted window's region or
-/// the whole screen after one that took the desk. `argv` is the words that
-/// ran; `logged` the words its line keeps; `acted` what its act did, as the
-/// helper answered it. An `ssh` command is not a surface, and the emulator
-/// has its own road (`leave_emulator_evidence`).
+/// it acted on (`computer_frame`) — a picture the answer exported of the
+/// window its act went to is the step's own frame; else, by what its act did
+/// (`desktop_frame`), the window it went to alone after an act that went no
+/// further, or the acted window's region or the whole screen after one that
+/// took the desk. `argv` is the words that ran; `logged` the words its line
+/// keeps; `acted` what its act did, as the helper answered it. An `ssh`
+/// command is not a surface, and the emulator has its own road
+/// (`leave_emulator_evidence`).
 pub(super) fn leave_computer_evidence(
     dir: &Path,
     argv: &[String],
@@ -642,9 +669,10 @@ pub(super) fn leave_computer_evidence(
 }
 
 /// The frame a step on the desktop road leaves (`frame_of`): a picture its
-/// answer exported, kept at once; else the surface its act's road frames
-/// (`desktop_frame`). `argv` is the words that ran; `acted` what its act
-/// did, as the helper answered it.
+/// answer exported, kept at once, when it is of the window its act went to
+/// (review t-128939 §1); else the surface its act's road frames
+/// (`desktop_frame`), as for an answer that carried no picture. `argv` is
+/// the words that ran; `acted` what its act did, as the helper answered it.
 fn computer_frame(
     dir: &Path,
     frames: bool,
@@ -653,7 +681,7 @@ fn computer_frame(
     answer: &zerocode_hookd::TeamAnswer,
     acted: Option<Acted>,
 ) -> Frame<Capture> {
-    frame_of(dir, frames, capped, answer, |result| {
+    frame_of(dir, frames, capped, answer, acted, |result| {
         desktop_frame(argv, result, acted)
     })
 }
@@ -927,16 +955,20 @@ mod tests {
     /// A step whose answer exported a picture is framed by it, at once and
     /// whatever follows (t-4229): an explicit look's, or — in a walk that
     /// frames its steps, which leaves the picture flag on — the helper's
-    /// look after an app act, placed at the window it shows. Twenty acts at
-    /// a replay's pace all keep their frame, where the same twenty framed
-    /// after a settle keep one (the desk's 1 of 20); a walk that frames
-    /// nothing keeps none, as before. No picture: framed after the settle.
+    /// look after an app act, of the window the act went to, placed at the
+    /// window it shows. Twenty acts at a replay's pace all keep their frame,
+    /// where the same twenty framed after a settle keep one (the desk's 1 of
+    /// 20); a walk that frames nothing keeps none, as before. No picture:
+    /// framed after the settle.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_step_that_answered_its_own_picture_is_framed_by_it_not_by_a_later_capture() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("shot.png");
         std::fs::write(&file, PNG).unwrap();
-        let window = serde_json::json!({ "window": { "id": 7, "x": 10, "y": 20, "width": 300, "height": 200 } });
+        let window = serde_json::json!({ "app": { "pid": 501 },
+            "window": { "id": 7, "x": 10, "y": 20, "width": 300, "height": 200 } });
+        // The act went to the window its look shows (review t-128939 §1).
+        let acted = heard(true, Some((7, 501)));
         let mut pictured = answered(true);
         pictured.stdout = format!(
             "{}\n",
@@ -957,7 +989,7 @@ mod tests {
         );
         assert!(own_frame(result_of(&unpictured).as_ref()).is_none());
         let framed_by = |answer: &zerocode_hookd::TeamAnswer, frames: bool| {
-            frame_of(dir.path(), frames, false, answer, |_| {
+            frame_of(dir.path(), frames, false, answer, acted, |_| {
                 Frame::After(Fixed("computer"))
             })
         };
@@ -991,7 +1023,7 @@ mod tests {
                 })
                 .unwrap();
             for _ in 0..20 {
-                let frame = frame_of(folder.path(), true, false, answer, |_| {
+                let frame = frame_of(folder.path(), true, false, answer, acted, |_| {
                     Frame::After(Fixed("computer"))
                 });
                 writer
