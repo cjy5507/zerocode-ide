@@ -20,6 +20,7 @@ use zerocode_core::computer_use_protocol::{
 };
 
 use super::super::ComputerUseError;
+use super::super::took_input::{self, Road};
 use super::apps::{AppDescriptor, Catalog};
 use super::desktop_windows;
 use super::snapshot::{self, BuildRequest, SharedSnapshot, Snapshot};
@@ -35,9 +36,8 @@ pub(super) struct Provider {
     /// (`current_snapshot`), for its answer to name (`run_action`) once
     /// that window was seen to take the act's input (`took_input`).
     acted: Option<ActedWindow>,
-    /// The window the act being run saw take its input, by its number
-    /// (`input_taken_by`).
-    took_input: Option<u64>,
+    /// The roads the act being run sent its input by, in order (`sent_by`).
+    roads: Vec<Road>,
 }
 
 impl Provider {
@@ -47,7 +47,7 @@ impl Provider {
             cache: SnapshotCache::new(),
             apps: Catalog::default(),
             acted: None,
-            took_input: None,
+            roads: Vec::new(),
         })
     }
 
@@ -187,7 +187,7 @@ impl Provider {
                 ProviderError::invalid_argument("a mark's pin needs its elementIndex")
             })?;
             validate_pinned_element(&SharedSnapshot::from_observed(&current), index, &pin)?;
-            return Ok(self.acts_in(current));
+            return Ok(self.acts_in(current, params));
         }
         self.cache.prune(Instant::now());
         let cached = self
@@ -206,33 +206,30 @@ impl Provider {
             &SharedSnapshot::from_observed(&current),
             &requested,
         )?;
-        Ok(self.acts_in(current))
+        Ok(self.acts_in(current, params))
     }
 
     /// The window an act checks itself against, as it finds it — its number
-    /// and its app's process — kept for the act's answer to name.
-    fn acts_in(&mut self, current: Snapshot) -> Snapshot {
+    /// and its app's process — kept for the act's answer to name. An act
+    /// asked to `restoreWindow` brought it to the front as it looked
+    /// (`snapshot::build`).
+    fn acts_in(&mut self, current: Snapshot, params: &Map<String, Value>) -> Snapshot {
         self.acted = Some(ActedWindow {
             id: current.window.id(),
             pid: u64::from(current.window.pid),
         });
+        if params::flag(params, "restoreWindow") {
+            self.sent_by(Road::Raise);
+        }
         current
     }
 
-    /// The window an act's road saw take its input, by its number, as the
-    /// one rule tells it from what the road saw (`took_input::Delivered`):
-    /// the act's own window when an element of its tree answered a call or
-    /// every press found the window itself in front and under the point,
-    /// the window a focused element says it lives in when it answered a
-    /// write. `None` where the road saw nothing take it: keys, which the
-    /// input stream takes without saying where; the wheel or a drag sent at
-    /// a point of the screen, which whatever window stands there takes; a
-    /// press that went to a window the target owns; calls or a write nobody
-    /// answered; text written into a focused element only its process ties
-    /// to the window. The act's answer names its window only when that
-    /// window took the input (`run_action`, reviews t-129021 §3, t-129057).
-    pub(super) fn input_taken_by(&mut self, window: Option<u64>) {
-        self.took_input = window;
+    /// Put a road the act being run sent input by on its record. Every road
+    /// an act takes goes here and nowhere else: the act's answer names its
+    /// window only as the one policy reads the record (`took_input::took`,
+    /// `run_action`), never by a number an act hands it.
+    pub(super) fn sent_by(&mut self, road: Road) {
+        self.roads.push(road);
     }
 
     /// `actionResult`: run the action, observe after it, and when the
@@ -240,23 +237,26 @@ impl Provider {
     /// answer names the window the act went to (`actedWindow`), as the macOS
     /// helper's does: the look after the act may land on another window of
     /// the app, and a step's evidence is held to the acted one
-    /// (I-t123731-rc1, review t-128987 §2). It names it only when the act's
-    /// road saw that window take the input (`input_taken_by`): a step's
-    /// evidence is a look of the window its answer names, and a window the
-    /// input was only aimed at may not be where it went (review t-129021 §3).
+    /// (I-t123731-rc1, review t-128987 §2). It names it only when the roads
+    /// the act took saw that window take the input (`sent_by`,
+    /// `took_input::took`): a step's evidence is a look of the window its
+    /// answer names, and a window the input was only aimed at may not be
+    /// where it went (reviews t-129021 §3, t-129079 §1). An act that answers
+    /// an error names no window, whatever its roads saw.
     fn run_action(
         &mut self,
         params: &Map<String, Value>,
         action: fn(&mut Self, &Map<String, Value>) -> Result<ActionMetadata, ProviderError>,
     ) -> Result<Value, ProviderError> {
         self.acted = None;
-        self.took_input = None;
-        let mut metadata = action(self, params)?;
-        let took_input = self.took_input.take();
+        self.roads.clear();
+        let answered = action(self, params);
+        let roads = std::mem::take(&mut self.roads);
+        let mut metadata = answered?;
         metadata.acted_window = self
             .acted
             .take()
-            .and_then(|window| window.if_it_took(took_input));
+            .and_then(|window| window.if_it_took(took_input::took(&roads, window.id)));
         let include_screenshot = !params::flag(params, "noScreenshot");
         Self::action_result(params, metadata, self.observe(params, include_screenshot))
     }

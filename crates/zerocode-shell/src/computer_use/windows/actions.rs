@@ -9,15 +9,13 @@
 //! `replace_selection` answers [`ReplaceOutcome`], and only
 //! `NotApplicable` lets the synthetic road run.
 //!
-//! An act's answer names its window only where its road saw that window
-//! take the input (`Provider::input_taken_by`, the one rule in
-//! `took_input`): an element of the window's own tree answered a call,
-//! every press found the window itself in front and under the point, a
-//! focused element whose own window it is answered a write. Allowing an
-//! act is a judgement of its own: the click fence lets a press through
-//! over a window the target owns, and the focus check lets keys go with
-//! the target in front, but neither says the target took them. Keys, the
-//! wheel and a drag name no window.
+//! Every road an act sends input by goes on its record by name
+//! (`Provider::sent_by`, `took_input::Road`), where it is sent; the act's
+//! answer names its window only as the one policy reads that record
+//! (`Road::check`). No act hands the answer a window number of its own.
+//! Allowing an act is a judgement apart: the click fence lets a press
+//! through over a window the target owns, and the focus check lets keys go
+//! with the target in front, but neither says the target took them.
 
 use serde_json::{Map, Value};
 use windows::Win32::UI::Accessibility::IUIAutomationElement;
@@ -26,7 +24,7 @@ use zerocode_core::computer_use_protocol::coerce::{
     AttributeValue, ReadbackComparison, ValueCoercion,
 };
 use zerocode_core::computer_use_protocol::keys::{
-    ChordWrites, Platform, parse_click_modifiers, parse_key_spec,
+    ChordWrites, Modifier, Platform, parse_click_modifiers, parse_key_spec,
 };
 use zerocode_core::computer_use_protocol::marks::Pin;
 use zerocode_core::computer_use_protocol::params;
@@ -40,7 +38,7 @@ use zerocode_core::computer_use_protocol::{
     ActionMetadata, ActionPath, ProviderError, Verification, error_code, unverified_reason,
 };
 
-use super::super::took_input::Delivered;
+use super::super::took_input::{ElementCalls, PressSeen, Road};
 use super::clipboard::{RestoreOutcome, Snapshot as ClipboardSnapshot};
 use super::desktop_windows;
 use super::input;
@@ -64,6 +62,15 @@ fn coordinate(
 /// only its process ties to a window.
 fn window_of(element: &IUIAutomationElement) -> Option<u64> {
     uia::cached_root_window(element).map(|root| root.0 as isize as u64)
+}
+
+/// Calls a road made on `element`, `answered` of which came back with
+/// success, with the window the element lives in (`window_of`).
+fn calls_on(element: &IUIAutomationElement, answered: usize) -> ElementCalls {
+    ElementCalls {
+        window: window_of(element),
+        answered,
+    }
 }
 
 /// The accessibility road's answer for a replaced selection.
@@ -119,9 +126,8 @@ impl Provider {
     /// or a window of its process mostly covering it, is in front. That
     /// allows them; it does not see where they go — the input stream takes
     /// them for whatever holds the focus when it hands them on — so the
-    /// answer names no window (`Delivered::Keys`).
+    /// roads that type name no window (`Road::check`).
     fn require_focused(
-        &mut self,
         snapshot: &Snapshot,
         params: &Map<String, Value>,
     ) -> Result<(), ProviderError> {
@@ -134,8 +140,34 @@ impl Provider {
                 failure.message(&snapshot.app.name),
             ));
         }
-        self.input_taken_by(Delivered::Keys.took(snapshot.window.id()));
         Ok(())
+    }
+
+    /// Presses at a screen point through the click fence, with the
+    /// modifier keys held around them on the record first: what the fence
+    /// saw just before each press, for the click's own road.
+    fn press_at(
+        &mut self,
+        (x, y): (f64, f64),
+        button: MouseButton,
+        count: usize,
+        modifiers: &[Modifier],
+        snapshot: &Snapshot,
+    ) -> Result<Vec<PressSeen>, ProviderError> {
+        if !modifiers.is_empty() {
+            self.sent_by(Road::ClickModifiers);
+        }
+        input::deliver_click(x, y, button, count, modifiers, snapshot.recipient())
+    }
+
+    /// Text written into the focused element (`replace_selection`), on the
+    /// record: the write, and the caret it puts after the text once the
+    /// write answered.
+    fn wrote_into(&mut self, element: &IUIAutomationElement, answered: bool) {
+        self.sent_by(Road::FocusedWrite(calls_on(element, usize::from(answered))));
+        if answered {
+            self.sent_by(Road::CaretAfterWrite);
+        }
     }
 
     pub(super) fn click(
@@ -160,6 +192,7 @@ impl Provider {
         input::click_modifier_keys(&modifiers)?;
         // A click into the target makes the next keyboard action safe, on
         // either road.
+        self.sent_by(Road::Raise);
         desktop_windows::bring_to_front(&snapshot.window);
         if let Some(index) = params::optional_index(params, "elementIndex")? {
             let (record, element) = snapshot.element(index)?;
@@ -186,7 +219,7 @@ impl Provider {
                     .filter(|action| uia::perform_action(element, action).is_ok())
                     .map(str::to_string);
                 if let Some(action) = performed {
-                    self.input_taken_by(Some(snapshot.window.id()));
+                    self.sent_by(Road::PressPattern(calls_on(element, 1)));
                     return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
                 }
             }
@@ -194,22 +227,21 @@ impl Provider {
             // delivering WM_CONTEXTMENU. Send one guarded pointer click,
             // rather than reporting that acknowledgement as a right-click
             // or retrying a request that may have already opened a menu.
-            let Some((x, y)) = snapshot.center_of(record) else {
+            let Some(centre) = snapshot.center_of(record) else {
                 return Err(ProviderError::new(
                     error_code::ELEMENT_NOT_CLICKABLE,
                     format!("element {index} has no clickable frame"),
                 ));
             };
-            let presses =
-                input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
-            self.input_taken_by(Delivered::Presses(presses).took(snapshot.window.id()));
+            let presses = self.press_at(centre, button, count, &modifiers, &snapshot)?;
+            self.sent_by(Road::PressAtElementCentre(presses));
             return Ok(ActionMetadata::new(ActionPath::Synthetic)
                 .fallback("actionUnsupported")
                 .verified_as(Verification::synthetic_input()));
         }
-        let (x, y) = coordinate(params, "x", "y", &snapshot)?;
-        let presses = input::deliver_click(x, y, button, count, &modifiers, snapshot.recipient())?;
-        self.input_taken_by(Delivered::Presses(presses).took(snapshot.window.id()));
+        let point = coordinate(params, "x", "y", &snapshot)?;
+        let presses = self.press_at(point, button, count, &modifiers, &snapshot)?;
+        self.sent_by(Road::PressAtPoint(presses));
         Ok(ActionMetadata::new(ActionPath::Synthetic).verified_as(Verification::synthetic_input()))
     }
 
@@ -236,7 +268,7 @@ impl Provider {
                 )
             })?;
         uia::perform_action(element, &action)?;
-        self.input_taken_by(Some(snapshot.window.id()));
+        self.sent_by(Road::SecondaryAction(calls_on(element, 1)));
         Ok(ActionMetadata::new(ActionPath::Accessibility).named(action))
     }
 
@@ -284,16 +316,26 @@ impl Provider {
         // The calls the element answered: one SetValue, or the Toggles a
         // check box took to reach the state — none when it already stood
         // there or its state could not be read.
-        let answered = match (probe.kind, &coercion.write_value) {
+        let road = match (probe.kind, &coercion.write_value) {
             (ValueKind::Text, AttributeValue::String(value)) => {
                 uia::set_text_value(element, value)?;
-                1
+                Road::SetText(calls_on(element, 1))
             }
             (ValueKind::Range, AttributeValue::Double(value)) => {
                 uia::set_range_value(element, *value)?;
-                1
+                Road::SetRange(calls_on(element, 1))
             }
-            (ValueKind::Toggle, AttributeValue::Boolean(value)) => uia::toggle_to(element, *value)?,
+            (ValueKind::Toggle, AttributeValue::Boolean(value)) => {
+                match uia::toggle_to(element, *value) {
+                    Ok(answered) => Road::Toggles(calls_on(element, answered)),
+                    Err(refused) => {
+                        // Maybe after one Toggle answered: the act answers
+                        // the refusal.
+                        self.sent_by(Road::ToggleRefused);
+                        return Err(refused);
+                    }
+                }
+            }
             (ValueKind::Range, _) => {
                 return Err(ProviderError::invalid_argument(format!(
                     "element {index} takes a number, not '{expected}'"
@@ -306,7 +348,7 @@ impl Provider {
             }
             (ValueKind::Text, _) => return Err(not_settable()),
         };
-        self.input_taken_by(Delivered::TreeCalls { answered }.took(snapshot.window.id()));
+        self.sent_by(road);
         // A password field is never read back, and what was written is not
         // repeated in the answer.
         if secret {
@@ -358,25 +400,20 @@ impl Provider {
             let answered = outcome.write_answered();
             match outcome {
                 ReplaceOutcome::Applied(verification) => {
-                    self.input_taken_by(
-                        Delivered::FocusedWrite {
-                            window: window_of(&element),
-                            answered,
-                        }
-                        .took(snapshot.window.id()),
-                    );
+                    self.wrote_into(&element, answered);
                     return Ok(replaced(verification));
                 }
                 ReplaceOutcome::NotApplicable(reason) => fallback = Some(reason),
             }
         }
-        self.require_focused(&snapshot, params)?;
+        Self::require_focused(&snapshot, params)?;
         Self::gate_secret_entry(
             &snapshot,
             self.client.focused_element().as_ref(),
             ChordWrites::Character,
         )?;
         input::type_text(&text)?;
+        self.sent_by(Road::TypedText);
         let mut metadata = ActionMetadata::new(ActionPath::Synthetic)
             .named("typeText")
             .verified_as(Verification::synthetic_input());
@@ -394,9 +431,10 @@ impl Provider {
         let chord = parse_key_spec(&params::required_string(params, "key")?)?;
         let writes = chord.writes_on(Platform::Windows);
         Self::gate_secret_entry(&snapshot, self.live_focused(&snapshot).as_ref(), writes)?;
-        self.require_focused(&snapshot, params)?;
+        Self::require_focused(&snapshot, params)?;
         Self::gate_secret_entry(&snapshot, self.client.focused_element().as_ref(), writes)?;
         input::press_chord(&chord)?;
+        self.sent_by(Road::Keys);
         Ok(ActionMetadata::new(ActionPath::Synthetic)
             .named("pressKey")
             .verified_as(Verification::synthetic_input()))
@@ -414,11 +452,12 @@ impl Provider {
         let chord = parse_key_spec(&params::required_string(params, "key")?)?;
         let writes = chord.writes_on(Platform::Windows);
         Self::gate_secret_entry(&snapshot, self.live_focused(&snapshot).as_ref(), writes)?;
-        if chord.selects_all_on(Platform::Windows)
+        let selects_all = chord.selects_all_on(Platform::Windows);
+        if selects_all
             && let Some(element) = self.live_focused(&snapshot)
             && let Some(whole) = uia::select_all_text(&element)
         {
-            self.input_taken_by(window_of(&element));
+            self.sent_by(Road::SelectAllText(calls_on(&element, 1)));
             let verification = if whole {
                 Verification::verified(
                     "selection",
@@ -432,9 +471,16 @@ impl Provider {
                 .named("SelectAll")
                 .verified_as(verification));
         }
-        self.require_focused(&snapshot, params)?;
+        Self::require_focused(&snapshot, params)?;
         Self::gate_secret_entry(&snapshot, self.client.focused_element().as_ref(), writes)?;
         input::press_chord(&chord)?;
+        // Ctrl+A where the Text pattern did not select, or a chord that
+        // selects nothing.
+        self.sent_by(if selects_all {
+            Road::SelectAllKeys
+        } else {
+            Road::Keys
+        });
         Ok(ActionMetadata::new(ActionPath::Synthetic)
             .named("hotkey")
             .verified_as(Verification::synthetic_input()))
@@ -452,17 +498,11 @@ impl Provider {
             let outcome = replace_selection(&UiaTextField(&element), &text);
             let answered = outcome.write_answered();
             if let ReplaceOutcome::Applied(verification) = outcome {
-                self.input_taken_by(
-                    Delivered::FocusedWrite {
-                        window: window_of(&element),
-                        answered,
-                    }
-                    .took(snapshot.window.id()),
-                );
+                self.wrote_into(&element, answered);
                 return Ok(replaced(verification));
             }
         }
-        self.require_focused(&snapshot, params)?;
+        Self::require_focused(&snapshot, params)?;
         Self::gate_secret_entry(
             &snapshot,
             self.client.focused_element().as_ref(),
@@ -476,6 +516,7 @@ impl Provider {
             Ok(replaced) => replaced,
             Err((_, why)) => {
                 input::type_text(&text)?;
+                self.sent_by(Road::TypedPaste);
                 return Ok(ActionMetadata::new(ActionPath::Synthetic)
                     .named("typeText")
                     .fallback("clipboard_not_preservable")
@@ -487,6 +528,7 @@ impl Provider {
             }
         };
         let pasted = input::press_chord(&parse_key_spec("ctrl+v")?);
+        self.sent_by(Road::ClipboardPaste);
         // The app reads the clipboard when it handles the keystroke, which
         // is after SendInput returns; give it a moment before the text is
         // taken back.
@@ -527,7 +569,7 @@ impl Provider {
                         answered += 1;
                     }
                 }
-                self.input_taken_by(Delivered::TreeCalls { answered }.took(snapshot.window.id()));
+                self.sent_by(Road::PageScroll(calls_on(element, answered)));
                 return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
             }
             let Some((x, y)) = snapshot.center_of(record) else {
@@ -536,13 +578,13 @@ impl Provider {
                     format!("element {index} has no scrollable frame"),
                 ));
             };
-            // The wheel at a point of the screen goes to whatever window
-            // stands there; nothing sees which, so the answer names none.
             input::scroll(x, y, direction, pages)?;
+            self.sent_by(Road::WheelAtElementCentre);
             return Ok(ActionMetadata::new(ActionPath::Synthetic).fallback("actionUnsupported"));
         }
         let (x, y) = coordinate(params, "x", "y", &snapshot)?;
         input::scroll(x, y, direction, pages)?;
+        self.sent_by(Road::WheelAtPoint);
         Ok(ActionMetadata::new(ActionPath::Synthetic))
     }
 
@@ -574,9 +616,8 @@ impl Provider {
                 coordinate(params, "toX", "toY", &snapshot)?,
             )
         };
-        // A drag between points of the screen, like the wheel: the answer
-        // names no window.
         input::drag(start, end)?;
+        self.sent_by(Road::Drag);
         Ok(ActionMetadata::new(ActionPath::Synthetic))
     }
 }
