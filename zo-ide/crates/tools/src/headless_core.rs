@@ -52,8 +52,15 @@ pub fn headless_core_tool_set(model: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The shell, as a core run is told of it.
-const SHELL_TEXT: &str = "Run a bash command in the working directory; returns its output and exit code. For servers and long jobs set run_in_background, then read its output with TaskOutput and stop it with TaskStop.";
+/// The shell, as a core run is told of it: a long job's output is read and
+/// stopped with the two task tools a core session is given
+/// ([`BACKGROUND_TASK_TOOLS`]).
+fn shell_text() -> String {
+    let [output, stop] = BACKGROUND_TASK_TOOLS;
+    format!(
+        "Run a bash command in the working directory; returns its output and exit code. For servers and long jobs set run_in_background, then read its output with {output} and stop it with {stop}."
+    )
+}
 
 /// `Read`, as a core run is told of it.
 const READ_TEXT: &str = "Read a workspace text file, image or PDF page. For a long file read the needed part with offset (first line, 1-based) and limit (lines). A whole code-file read ends with [neighbours].";
@@ -95,7 +102,7 @@ pub(crate) fn shown_definition(handler: &str, definition: api::ToolDefinition) -
 /// without the arguments it does not show; every other tool as it is.
 fn core_definition(handler: &str, edit_tool: api::EditToolForm, mut definition: api::ToolDefinition) -> api::ToolDefinition {
     if handler == CoreTool::Bash.handler() {
-        definition.description = Some(SHELL_TEXT.to_string());
+        definition.description = Some(shell_text());
         if let Some(properties) = definition.input_schema.get_mut("properties").and_then(Value::as_object_mut) {
             for argument in HIDDEN_SHELL_ARGUMENTS {
                 properties.remove(argument);
@@ -109,11 +116,11 @@ fn core_definition(handler: &str, edit_tool: api::EditToolForm, mut definition: 
     definition
 }
 
-/// A shell call's input as a core session reads it: without the arguments
-/// the core shell does not show, removed before anything reads the call. Any
-/// other session reads the call as it came.
-pub(crate) fn shown_shell_input(input: &Value) -> Cow<'_, Value> {
-    if shown().is_none() {
+/// A call of the builtin `handler` as this process's session reads it: a
+/// core session's shell call without the arguments the core shell does not
+/// show, removed before anything reads the call; any other call as it came.
+pub(crate) fn shown_shell_input<'a>(handler: &str, input: &'a Value) -> Cow<'a, Value> {
+    if handler != CoreTool::Bash.handler() || shown().is_none() {
         return Cow::Borrowed(input);
     }
     without_hidden_shell_arguments(input)
