@@ -124,20 +124,6 @@ impl Default for Limits {
     }
 }
 
-impl Limits {
-    /// The activity window in milliseconds.
-    #[must_use]
-    pub fn activity_window_ms(&self) -> i64 {
-        i64::from(self.activity_window_minutes) * MS_PER_MINUTE
-    }
-
-    /// 「오늘」 in milliseconds.
-    #[must_use]
-    pub fn today_ms(&self) -> i64 {
-        i64::from(self.today_hours) * MS_PER_HOUR
-    }
-}
-
 /* ---- the recall trace ---------------------------------------------------- */
 
 /// One injection: when, which pages, for whom.

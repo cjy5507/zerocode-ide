@@ -3028,15 +3028,6 @@ impl ComputerMethod {
         )
     }
 
-    /// Whether the verb may leave the pointer at a point its command does not
-    /// name: an app's click presses a window's point — or an element's, when
-    /// the helper falls back to a synthetic press — with the system's own
-    /// pointer. (An app's drag and scroll go to the app, not the pointer.)
-    #[must_use]
-    pub const fn moves_the_pointer_unnamed(self) -> bool {
-        matches!(self, Self::Click)
-    }
-
     /// Whether the verb is the desktop's hand: the pointer at screen points,
     /// the keys where the focus is. It names no app (t-78095).
     #[must_use]
@@ -6852,13 +6843,6 @@ mod windows_shim_tests {
             assert!(manual.lines().all(|line| line.trim() != "'@"), "{manual}");
         }
     }
-}
-
-/// Machine-readable errors keep a code that a skill can recover from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ComputerErrorEnvelope<'a> {
-    pub ok: bool,
-    pub error: ComputerErrorBody<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

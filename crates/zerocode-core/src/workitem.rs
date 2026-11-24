@@ -109,15 +109,6 @@ pub struct JiraSyncPolicy {
 }
 
 impl JiraSyncPolicy {
-    #[must_use]
-    pub fn is_inert(&self) -> bool {
-        self.start_transition_id.is_none()
-            && self.success_transition_id.is_none()
-            && self.failure_transition_id.is_none()
-            && !self.comment_on_success
-            && !self.comment_on_failure
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         for id in [
             self.start_transition_id.as_deref(),
@@ -346,13 +337,6 @@ impl LinkedWorkItem {
     pub fn jira_site_and_key(&self) -> (&str, &str) {
         match &self.source {
             LinkedWorkItemSource::Jira { site_id, key, .. } => (site_id, key),
-        }
-    }
-
-    #[must_use]
-    pub fn jira_url(&self) -> &str {
-        match &self.source {
-            LinkedWorkItemSource::Jira { url, .. } => url,
         }
     }
 }

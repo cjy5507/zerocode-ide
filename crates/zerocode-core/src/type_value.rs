@@ -255,13 +255,6 @@ impl Measured {
         self.runs.iter().map(|run| run.p50_ms).max()
     }
 
-    /// The best p10 across the runs — what the model can do when nothing is
-    /// in front of it, which is a fact about the model rather than a promise.
-    #[must_use]
-    pub fn p10_best_ms(&self) -> Option<u32> {
-        self.runs.iter().map(|run| run.p10_ms).min()
-    }
-
     /// Counted calls across every run, and how many of them this seat would
     /// have taken.
     #[must_use]

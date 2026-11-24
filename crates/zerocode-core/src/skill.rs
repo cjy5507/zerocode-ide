@@ -445,15 +445,6 @@ pub fn summarize(markdown: &str) -> Summary {
     }
 }
 
-/// A document's own title, using the same frontmatter and Markdown readers as
-/// skill summaries. This does not interpret a filename as a description.
-pub fn document_title(markdown: &str) -> Option<String> {
-    let (front, body) = document_sections(markdown);
-    frontmatter_value(front, "title")
-        .or_else(|| first_heading(body))
-        .or_else(|| first_paragraph(body))
-}
-
 /// What a document calls itself: its frontmatter title, else its first heading
 /// of any level outside a code fence (t-36910). Never a paragraph — a caller
 /// that takes prose for want of a heading asks [`document_lead`]. A report whose

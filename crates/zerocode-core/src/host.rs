@@ -79,12 +79,6 @@ impl ExecutionHostId {
     pub fn generate() -> Self {
         Self(Uuid::new_v4())
     }
-
-    /// The UUID used on the persistence wire.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
 }
 
 impl fmt::Display for ExecutionHostId {

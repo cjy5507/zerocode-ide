@@ -838,23 +838,6 @@ pub mod params {
         }
     }
 
-    pub fn required_integer(params: &Map<String, Value>, key: &str) -> Result<i64, ProviderError> {
-        bounded_integer(required_number(params, key)?)
-            .ok_or_else(|| ProviderError::invalid_argument(format!("{key} is out of range")))
-    }
-
-    pub fn optional_integer(
-        params: &Map<String, Value>,
-        key: &str,
-    ) -> Result<Option<i64>, ProviderError> {
-        let Some(raw) = params.get(key).and_then(Value::as_f64) else {
-            return Ok(None);
-        };
-        bounded_integer(raw)
-            .map(Some)
-            .ok_or_else(|| ProviderError::invalid_argument(format!("{key} is out of range")))
-    }
-
     /// A non-negative index (`elementIndex`, `windowIndex`) as `usize`.
     pub fn optional_index(
         params: &Map<String, Value>,
