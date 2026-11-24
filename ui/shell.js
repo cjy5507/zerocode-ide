@@ -4352,8 +4352,8 @@ function agentGraphModel(columns, places, reviews,
   const byPane = new Map(agents.map((entry) => [entry.card.pane, entry]));
   const projectsAt = new Map();
   const workspacesAt = new Map();
-  const unscopedProject = " unscoped-project";
-  const unscopedWorkspace = " unscoped-workspace";
+  const unscopedProject = "\u0000unscoped-project";
+  const unscopedWorkspace = "\u0000unscoped-workspace";
 
   const ensureProject = (projectPath, known = null) => {
     let project = projectsAt.get(projectPath);
@@ -4372,7 +4372,7 @@ function agentGraphModel(columns, places, reviews,
   };
 
   const ensureWorkspace = (project, workspacePath, known = null, card = null) => {
-    const workspaceKey = `${project.path} ${workspacePath}`;
+    const workspaceKey = `${project.path}\u0000${workspacePath}`;
     let workspace = workspacesAt.get(workspaceKey);
     if (workspace) return workspace;
     workspace = {

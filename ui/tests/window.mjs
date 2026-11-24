@@ -4817,7 +4817,7 @@ const packedWire = await page.evaluate(async () => {
     rows: [
       { index: 0, cells: [
         ...[..."error:"].map((ch) => ({ ch, style: bold })),
-        { ch: " " }, { ch: "한" }, { ch: " " },
+        { ch: " " }, { ch: "한" }, { ch: "\u0000" },
         { ch: "e", zw: "́" }, { ch: " " }, { ch: " " },
       ] },
       blank,
@@ -4829,7 +4829,7 @@ const packedWire = await page.evaluate(async () => {
   await feed({
     ...base,
     rows: [
-      { index: 0, text: "error: 한 é ".replace("é", "e") + " ", runs: [[0, 6, bold]], zw: [[9, "́"]] },
+      { index: 0, text: "error: 한\u0000é ".replace("é", "e") + " ", runs: [[0, 6, bold]], zw: [[9, "́"]] },
       blank,
     ],
   });
