@@ -497,6 +497,81 @@ const BACKGROUND_WATCH_SLICE: Duration = Duration::from_millis(200);
 #[cfg(unix)]
 const BACKGROUND_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+#[cfg(unix)]
+#[derive(Default)]
+struct TerminalBackgroundGroups {
+    pids: std::collections::HashSet<u32>,
+    closing: bool,
+}
+
+#[cfg(unix)]
+static TERMINAL_BACKGROUND_GROUPS: OnceLock<Mutex<TerminalBackgroundGroups>> = OnceLock::new();
+
+/// Opt in before starting tools in a terminal frontend. The groups belong to
+/// the process, so switching sessions does not lose track of their owners.
+#[cfg(unix)]
+pub fn track_terminal_background_groups() {
+    TERMINAL_BACKGROUND_GROUPS.get_or_init(Mutex::default);
+}
+
+#[cfg(unix)]
+fn terminal_background_groups() -> Option<std::sync::MutexGuard<'static, TerminalBackgroundGroups>> {
+    TERMINAL_BACKGROUND_GROUPS
+        .get()
+        .map(|groups| groups.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// End the groups still owned by the terminal process and close registration.
+#[cfg(unix)]
+pub fn end_terminal_background_groups() {
+    if let Some(mut groups) = terminal_background_groups() {
+        groups.closing = true;
+        // The window may forcibly close the pane 200 ms after SIGHUP.
+        // Send to every group while its leader is still unreaped.
+        for pid in groups.pids.drain() {
+            let _ = end_group(pid, Group::Kill);
+        }
+    }
+}
+
+fn spawn_background_child(command: &mut Command) -> io::Result<std::process::Child> {
+    #[cfg(unix)]
+    if let Some(mut groups) = terminal_background_groups() {
+        if groups.closing {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let child = command.spawn()?;
+        groups.pids.insert(child.id());
+        return Ok(child);
+    }
+    command.spawn()
+}
+
+fn try_wait_background_child(
+    child: &mut std::process::Child,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    // Reaping releases the pid. Hold the same lock shutdown uses until the
+    // pid has been removed from the live set.
+    #[cfg(unix)]
+    let (mut groups, pid) = (terminal_background_groups(), child.id());
+    let status = child.try_wait();
+    #[cfg(unix)]
+    if let Some(groups) = groups.as_mut().filter(|_| !matches!(status, Ok(None))) {
+        groups.pids.remove(&pid);
+    }
+    status
+}
+
+#[cfg(unix)]
+fn stop_background_group(pid: u32) -> bool {
+    let mut groups = terminal_background_groups();
+    if groups.as_mut().is_some_and(|groups| !groups.pids.remove(&pid)) {
+        // Terminal shutdown has already ended the group.
+        return true;
+    }
+    end_group(pid, Group::Terminate { grace: BASH_GROUP_GRACE }).is_ok()
+}
+
 /// Watch the process for its exit or a `TaskStop` request. The last file read
 /// happens before recording the outcome, so the terminal log is final.
 fn spawn_background_task_watcher(
@@ -515,11 +590,7 @@ fn spawn_background_task_watcher(
                 // Stop the group before reaping its leader. The leader's pid
                 // still belongs to this child while we send both signals.
                 #[cfg(unix)]
-                let ended = end_group(
-                    child.id(),
-                    Group::Terminate { grace: BASH_GROUP_GRACE },
-                )
-                .is_ok();
+                let ended = stop_background_group(child.id());
                 #[cfg(windows)]
                 let ended = end_process_tree_command(child.id())
                     .status()
@@ -536,7 +607,7 @@ fn spawn_background_task_watcher(
                     break;
                 }
             }
-            match child.try_wait() {
+            match try_wait_background_child(&mut child) {
                 Ok(Some(status)) => {
                     registry.refresh_background_output(&task_id, true);
                     let _ = registry.append_output(
@@ -587,7 +658,7 @@ impl TaskRegistry {
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
         }
-        let child = command.stdin(Stdio::null()).spawn()?;
+        let child = spawn_background_child(command.stdin(Stdio::null()))?;
         drop(command);
         let pid = child.id();
         let task = self.create_background_process(prompt, Some(description), session_id);

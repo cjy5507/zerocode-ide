@@ -105,6 +105,8 @@ pub use bash::{
     split_dedicated_read, timeout_stderr, timeout_stderr_with_background_advice, whole_output_pointer, BashCommandInput,
     BashCommandOutput, CommandEnding, BASH_TRANSPORT_MAX_BYTES,
 };
+#[cfg(unix)]
+pub use bash::{end_terminal_background_groups, track_terminal_background_groups};
 #[cfg(windows)]
 pub use bash::end_process_tree_command;
 pub use bash::TOOL_CHILD_ENV;

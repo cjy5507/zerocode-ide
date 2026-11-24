@@ -76,9 +76,7 @@ impl ProcessExitGuard {
             return;
         }
         self.finished = true;
-        self.remove_events_addr_file();
-        emit_exit_line(reason, detail);
-        append_terminal_event_if_open(reason);
+        self.record_exit(reason, detail);
     }
 
     /// Registers the app-discovery file owned by this process. Both an
@@ -87,6 +85,14 @@ impl ProcessExitGuard {
         if let Some(previous) = self.events_addr_file.replace(path) {
             remove_events_addr_file(&previous);
         }
+    }
+
+    fn record_exit(&mut self, reason: &str, detail: Option<&str>) {
+        #[cfg(unix)]
+        runtime::end_terminal_background_groups();
+        self.remove_events_addr_file();
+        emit_exit_line(reason, detail);
+        append_terminal_event_if_open(reason);
     }
 
     fn remove_events_addr_file(&mut self) {
@@ -107,9 +113,7 @@ impl Drop for ProcessExitGuard {
         } else {
             "main_guard_dropped"
         };
-        self.remove_events_addr_file();
-        emit_exit_line(reason, None);
-        append_terminal_event_if_open(reason);
+        self.record_exit(reason, None);
     }
 }
 

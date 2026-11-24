@@ -10335,6 +10335,83 @@ async fn e2e_headless_background_exit_reaches_the_model_at_a_tool_boundary() {
     assert!(requests[2].contains("headless-tail") && requests[2].contains("use TaskOutput"));
 }
 
+async fn terminal_background_group_ends_when_zo_exits(
+    controlling: bool,
+    end: impl FnOnce(&mut PtyRun) -> Option<i32>,
+) {
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpListener;
+
+    let layout = Layout::new();
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    // The shell stays alive beside its child. The child's socket closes when
+    // the whole group exits, or when the test drops its end on failure.
+    let command = format!(
+        "python3 -c 'import socket; s = socket.create_connection((\"127.0.0.1\", {}), 30); s.recv(1)'; :",
+        listener.local_addr().unwrap().port(),
+    );
+    let service = ScriptedAnthropicService::background_bash(&command, "terminal-background-started")
+        .await
+        .unwrap();
+    let args = interactive_args();
+    let mut run = if controlling {
+        PtyRun::spawn_controlling(
+            &layout.cwd,
+            &layout.home,
+            &layout.sessions,
+            &layout.state,
+            service.base_url(),
+            &args,
+        )
+        .expect("spawn zo as the controlling PTY's session leader")
+    } else {
+        pty(&layout, service.base_url(), &args)
+    };
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Start a background server.\r").unwrap();
+    run.wait_for_history_row("terminal-background-started", TEST_TIMEOUT);
+    let (mut socket, _) = tokio::time::timeout(TEST_TIMEOUT, listener.accept())
+        .await
+        .expect("background child announced that it was running")
+        .unwrap();
+
+    assert_eq!(end(&mut run), Some(0), "zo exits promptly");
+    let stopped = tokio::time::timeout(Duration::from_secs(3), socket.read(&mut [0])).await;
+    assert!(
+        matches!(stopped, Ok(Ok(0))),
+        "the background group is still running after zo exited: {stopped:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_terminal_background_group_ends_after_exit() {
+    terminal_background_group_ends_when_zo_exits(true, |run| {
+        run.send(b"/exit\r").unwrap();
+        run.exit_code(TEST_TIMEOUT)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_terminal_background_group_ends_after_hangup() {
+    terminal_background_group_ends_when_zo_exits(true, |run| run.hang_up(TEST_TIMEOUT)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_terminal_background_group_ends_when_a_detached_pty_closes() {
+    terminal_background_group_ends_when_zo_exits(false, |run| run.hang_up(TEST_TIMEOUT)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_terminal_background_group_ends_after_sigterm() {
+    terminal_background_group_ends_when_zo_exits(true, |run| {
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(run.pid()).unwrap());
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("send SIGTERM to test zo");
+        run.exit_code(TEST_TIMEOUT)
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_background_server_keeps_answering_after_headless_zo_exits() {
     use tokio::io::AsyncReadExt as _;

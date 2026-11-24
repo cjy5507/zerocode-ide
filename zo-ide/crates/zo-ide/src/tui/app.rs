@@ -6171,6 +6171,8 @@ impl App {
         flags: RenderFlags,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (cols, rows) = crossterm::terminal::size()?;
+        #[cfg(unix)]
+        runtime::track_terminal_background_groups();
         let (_, cursor_row) = crossterm::cursor::position().unwrap_or((0, 0));
         let color = !crate::render::no_color_env();
         let painter = Painter::new(std::io::stdout(), cols, rows, cursor_row, color);
@@ -7024,6 +7026,8 @@ impl App {
 
     /// 화면을 놓고 세션을 닫는다. 종료 요약을 돌려주면 [`run`] 이 찍는다.
     async fn finish(mut self, reason: ExitReason) -> Option<SessionSummary> {
+        #[cfg(unix)]
+        runtime::end_terminal_background_groups();
         // Lines handed over since the last frame still belong on screen.
         self.ui.commit_quiet_loop_cell();
         self.ui.flush_history();
@@ -8521,6 +8525,8 @@ impl TerminationSignals {
                     _ = signals.terminate.recv() => {}
                     _ = signals.hangup.recv() => {}
                 }
+                // The turn and session hooks may still take time to finish.
+                runtime::end_terminal_background_groups();
             }
             _ => std::future::pending::<()>().await,
         }
