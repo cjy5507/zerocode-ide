@@ -619,6 +619,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
             teammate_harness: None,
             parent_registry: None,
             remote_mcp: None,
+            events_bind: events_bind.clone(),
         },
         render,
         permission_mode_explicit,

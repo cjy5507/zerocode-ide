@@ -21,7 +21,8 @@ use sections::{
     get_actions_section, get_clarification_section, get_context_trust_label_section,
     get_default_coding_harness_section, get_delegation_section, get_grounding_in_code_section,
     get_memory_protocol_section, get_responding_section, get_response_style_contract_section,
-    get_finish_rule_section, get_simple_doing_tasks_section, get_simple_intro_section,
+    get_finish_rule_section, get_headless_core_sections, get_simple_doing_tasks_section,
+    get_simple_intro_section,
     get_simple_system_section, get_skills_and_docs_section, get_solo_delegation_section,
     get_turn_discipline_section,
     render_config_section, render_memory_index, render_second_brain_section, CLARIFICATION_HEADING,
@@ -52,6 +53,44 @@ pub enum PromptMode {
     Autonomous,
     /// Delegated sub-agents and informational surfaces.
     Subagent,
+}
+
+/// The switch that asks for a [`HeadlessProfile`]: `ZO_EXPERIMENT_HEADLESS_PROFILE=core`.
+/// The host reads it where a session opens, before its prompt is built, and
+/// heeds it only for a new root run nobody attends that no window, ledger or
+/// person's own setting is part of.
+pub const HEADLESS_PROFILE_ENV: &str = "ZO_EXPERIMENT_HEADLESS_PROFILE";
+
+/// A prompt written whole for a run nobody attends, sent in place of the
+/// manual every other session is sent — an experiment arm, measured before
+/// any session is given it by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessProfile {
+    /// The core profile: a short manual (`# Working`, `# Care`, `# Final
+    /// message`), one `# Environment` section, and six tools — the shell,
+    /// `Read`, `Write`, the model's edit shape and the two that reach a
+    /// background task.
+    Core,
+}
+
+impl HeadlessProfile {
+    /// Every profile, for the words that list them.
+    pub const ALL: [Self; 1] = [Self::Core];
+
+    /// The profile `value` names, spelled as [`Self::name`] spells it.
+    #[must_use]
+    pub fn named(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|profile| profile.name() == value)
+    }
+
+    /// The value that names the profile, in the switch and beside a stored
+    /// prompt.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+        }
+    }
 }
 
 /// Errors raised while assembling the final system prompt.
@@ -529,6 +568,9 @@ pub struct SystemPromptBuilder {
     /// harness costs before a turn exists — and any host whose reminders really
     /// are fixed for the session.
     reminders: Vec<ReminderCandidate>,
+    /// The prompt written whole for a run nobody attends, when the host chose
+    /// one ([`HeadlessProfile`]); `None` builds the manual.
+    headless_profile: Option<HeadlessProfile>,
 }
 
 impl SystemPromptBuilder {
@@ -601,8 +643,19 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Build the prompt `profile` writes in place of the manual. The host
+    /// decides it may ([`HEADLESS_PROFILE_ENV`]); the builder only writes it.
+    #[must_use]
+    pub fn with_headless_profile(mut self, profile: HeadlessProfile) -> Self {
+        self.headless_profile = Some(profile);
+        self
+    }
+
     #[must_use]
     pub fn build(&self) -> Vec<String> {
+        if let Some(profile) = self.headless_profile {
+            return self.build_headless(profile);
+        }
         let mut sections = Vec::new();
         // The model's harness profile (`api::harness_profile_for_model`): its
         // prompt set picks the arm and its finish rule closes `# Task work`.
@@ -657,24 +710,7 @@ impl SystemPromptBuilder {
         sections.push(self.environment_section());
         if let Some(project_context) = &self.project_context {
             sections.push(render_project_context(project_context));
-            let always_instruction_files = project_context
-                .instruction_files
-                .iter()
-                .filter(|file| file.is_always_instruction())
-                .cloned()
-                .collect::<Vec<_>>();
-            let scoped_instruction_files = project_context
-                .instruction_files
-                .iter()
-                .filter(|file| !file.is_always_instruction())
-                .cloned()
-                .collect::<Vec<_>>();
-            if !always_instruction_files.is_empty() {
-                sections.push(render_instruction_files(&always_instruction_files));
-            }
-            if !scoped_instruction_files.is_empty() {
-                sections.push(render_scoped_instruction_index(&scoped_instruction_files));
-            }
+            sections.extend(render_instruction_sections(project_context));
             if !project_context.skills_index.is_empty() {
                 sections.push(match project_context.skills_index_road {
                     SkillsIndexRoad::Index => render_skills_index(&project_context.skills_index),
@@ -709,6 +745,30 @@ impl SystemPromptBuilder {
         self.build().join("\n\n")
     }
 
+    /// The prompt `profile` writes: its manual, the boundary, then one
+    /// environment section and the workspace's instruction files as the
+    /// manual's dynamic region carries them — nothing of a window, a ledger, a
+    /// memory, a skill, a vault or the settings, which a session the host
+    /// gives the profile does not have.
+    fn build_headless(&self, profile: HeadlessProfile) -> Vec<String> {
+        let mut sections = match profile {
+            HeadlessProfile::Core => get_headless_core_sections(),
+        };
+        sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY.to_string());
+        sections.push(self.environment_section());
+        if let Some(project_context) = &self.project_context {
+            sections.extend(render_instruction_sections(project_context));
+        }
+        sections.extend(render_reminders(&self.reminders, &[]));
+        sections.extend(self.append_sections.iter().cloned());
+        sections
+    }
+
+    /// What the session runs in. The manual's section opens with the model's
+    /// own family; a [`HeadlessProfile`]'s is `# Environment` with `- `
+    /// bullets like the rest of its text, leaves the model line to the
+    /// identity, and carries the git snapshot the manual keeps in
+    /// `# Project context`.
     fn environment_section(&self) -> String {
         let cwd = self.project_context.as_ref().map_or_else(
             || "unknown".to_string(),
@@ -718,10 +778,13 @@ impl SystemPromptBuilder {
             || "unknown".to_string(),
             |context| context.current_date.clone(),
         );
-        let model_family = model_family_line_value(self.model.as_deref());
-        let mut lines = vec![ENVIRONMENT_SECTION_HEADING.to_string()];
-        let mut bullets = vec![
-            format!("{MODEL_FAMILY_LABEL}{model_family}"),
+        let headless = self.headless_profile.is_some();
+        let mut bullets = Vec::new();
+        if !headless {
+            let model_family = model_family_line_value(self.model.as_deref());
+            bullets.push(format!("{MODEL_FAMILY_LABEL}{model_family}"));
+        }
+        bullets.extend([
             format!("Working directory: {cwd}"),
             format!("Date: {date}"),
             format!(
@@ -729,10 +792,19 @@ impl SystemPromptBuilder {
                 self.os_name.as_deref().unwrap_or("unknown"),
                 self.os_version.as_deref().unwrap_or("unknown")
             ),
-        ];
+        ]);
         bullets.extend(self.sandbox_line());
-        lines.extend(prepend_bullets(bullets));
-        lines.join("\n")
+        let (heading, items) = if headless {
+            let git = self.project_context.as_ref().and_then(|context| context.git_status.as_ref());
+            bullets.extend(git.map(|status| format!("Git status snapshot:\n{status}")));
+            (HEADLESS_ENVIRONMENT_HEADING, bullets.into_iter().map(|item| format!("- {item}")).collect::<Vec<_>>())
+        } else {
+            (ENVIRONMENT_SECTION_HEADING, prepend_bullets(bullets))
+        };
+        std::iter::once(heading.to_string())
+            .chain(items)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// What a shell command meets in this session, in one line — or nothing
@@ -957,6 +1029,8 @@ fn hold_out(
 /// Heading of the environment-context section carrying the `Model family:`
 /// line. Shared by the builder and [`retarget_prompt_model`].
 const ENVIRONMENT_SECTION_HEADING: &str = "# Environment context";
+/// Heading of a [`HeadlessProfile`]'s one environment section.
+const HEADLESS_ENVIRONMENT_HEADING: &str = "# Environment";
 /// Bullet label preceding the model-family value.
 const MODEL_FAMILY_LABEL: &str = "Model family: ";
 
@@ -1695,6 +1769,25 @@ pub const SCOPED_INSTRUCTIONS_HEADING: &str = "# Scoped instructions";
 /// has none.
 const PROJECT_INSTRUCTIONS_STANDING: &str = "These are this workspace's standing rules, written by its owner. Follow them for work here unless they conflict with system policy, the user's explicit request, or a safety or tool boundary. Where a rule states a fact about the code and the code says otherwise, the code decides.";
 
+/// The workspace's instruction files: those that always apply, in full, then
+/// the index of those that apply to some paths only — each only when it holds
+/// a file.
+fn render_instruction_sections(project_context: &ProjectContext) -> Vec<String> {
+    let (always, scoped): (Vec<ContextFile>, Vec<ContextFile>) = project_context
+        .instruction_files
+        .iter()
+        .cloned()
+        .partition(ContextFile::is_always_instruction);
+    let mut sections = Vec::new();
+    if !always.is_empty() {
+        sections.push(render_instruction_files(&always));
+    }
+    if !scoped.is_empty() {
+        sections.push(render_scoped_instruction_index(&scoped));
+    }
+    sections
+}
+
 fn render_instruction_files(files: &[ContextFile]) -> String {
     let mut sections = vec![
         PROJECT_INSTRUCTIONS_HEADING.to_string(),
@@ -2016,6 +2109,7 @@ pub fn load_system_prompt(
         // A sub-agent keeps every section: it can still delegate further, and
         // the host's `--no-spawn` is enforced at the wire, not by this prompt.
         PromptToolReach::default(),
+        None,
     )
 }
 
@@ -2080,7 +2174,60 @@ pub fn load_system_prompt_for_main_with_mode_and_reach(
         true,
         mode,
         tool_reach,
+        None,
     )
+}
+
+/// The prompt `profile` writes for a main-loop session in `cwd` that reaches
+/// what `tool_reach` says (its sandbox line names `PowerShell` only to a
+/// session that runs it). The host chose the profile ([`HEADLESS_PROFILE_ENV`]);
+/// the session's git snapshot and instruction files are read as the manual's
+/// are.
+pub fn load_system_prompt_for_headless_profile(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    tool_reach: PromptToolReach,
+    profile: HeadlessProfile,
+) -> Result<Vec<String>, PromptBuildError> {
+    load_system_prompt_with_options(
+        &cwd.into(),
+        current_date.into(),
+        os_name,
+        os_version,
+        None,
+        false,
+        PromptMode::Autonomous,
+        tool_reach,
+        Some(profile),
+    )
+}
+
+/// Which section of the person's own the main prompt for a session in `cwd`
+/// carries — an output style, the project's memory index, a second brain —
+/// read as the main prompt reads them, or `None`. A [`HeadlessProfile`]
+/// carries none of them, so the host does not give it to a session that has
+/// one.
+pub fn persons_prompt_section(cwd: &Path) -> Result<Option<&'static str>, PromptBuildError> {
+    let config = ConfigLoader::default_for(cwd).load()?;
+    Ok(if configured_output_style(cwd, &config).is_some() {
+        Some("an output style")
+    } else if discover_memory_index(cwd).is_some() {
+        Some("a project memory index")
+    } else if crate::second_brain::SecondBrain::resolve(&config).is_some() {
+        Some("a second brain")
+    } else {
+        None
+    })
+}
+
+/// The output style the settings name for a session in `cwd`, resolved.
+fn configured_output_style(cwd: &Path, config: &RuntimeConfig) -> Option<(String, String)> {
+    config
+        .get("outputStyle")
+        .and_then(|value| value.as_str())
+        .and_then(|name| output_style::resolve(cwd, name))
 }
 
 #[allow(clippy::too_many_arguments)] // 평평한 인자 목록 — 옵션 구조체는 별건이다.
@@ -2093,6 +2240,7 @@ fn load_system_prompt_with_options(
     apply_output_style: bool,
     mode: PromptMode,
     tool_reach: PromptToolReach,
+    headless_profile: Option<HeadlessProfile>,
 ) -> Result<Vec<String>, PromptBuildError> {
     let prompt_started = std::time::Instant::now();
     // A sub-agent's context skips the `git status` subprocess (see
@@ -2108,12 +2256,7 @@ fn load_system_prompt_with_options(
     log_prompt_boot_component("prompt/config-load", config_started);
     let style_started = std::time::Instant::now();
     let style = apply_output_style
-        .then(|| {
-            config
-                .get("outputStyle")
-                .and_then(|value| value.as_str())
-                .and_then(|name| output_style::resolve(cwd, name))
-        })
+        .then(|| configured_output_style(cwd, &config))
         .flatten();
     log_prompt_boot_component("prompt/output-style", style_started);
     let render_started = std::time::Instant::now();
@@ -2141,6 +2284,9 @@ fn load_system_prompt_with_options(
     }
     if let Some((name, prompt)) = style {
         builder = builder.with_output_style(name, prompt);
+    }
+    if let Some(profile) = headless_profile {
+        builder = builder.with_headless_profile(profile);
     }
     let built = builder.build();
     log_prompt_boot_component("prompt/render", render_started);

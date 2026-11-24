@@ -7462,6 +7462,7 @@ impl App {
             teammate_harness: None,
             parent_registry: None,
             remote_mcp: None,
+            events_bind: None,
         };
         if clear_terminal {
             self.ui.pending_history.clear();
@@ -7578,6 +7579,7 @@ impl App {
             teammate_harness: None,
             parent_registry: None,
             remote_mcp: None,
+            events_bind: None,
         };
         let (sender, receiver) = tokio::sync::mpsc::channel(OPENING_EVENTS);
         let _ = spawn_resume_reader(id.to_string(), sender);

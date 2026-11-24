@@ -129,10 +129,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
 /// run with any keeps the full set. Settings that do not load count as
 /// attached, since what they hold is unknown.
 pub(crate) fn person_attached_tools(cwd: &Path, mcp_config: Option<&Path>) -> bool {
-    let loader = match mcp_config {
-        Some(path) => ConfigLoader::default_for(cwd).with_mcp_config(path),
-        None => ConfigLoader::default_for(cwd),
-    };
+    let loader = settings_loader(cwd, mcp_config);
     let Ok(config) = loader.load() else {
         return true;
     };
@@ -146,6 +143,33 @@ pub(crate) fn person_attached_tools(cwd: &Path, mcp_config: Option<&Path>) -> bo
         return true;
     }
     !runtime::discover_skills(cwd).is_empty()
+}
+
+/// Whether hooks run in a session opened in `cwd`: the settings' own or an
+/// enabled plugin's, the two [`build_runtime_plugin_state_with_loader`]
+/// merges. Settings that do not load count as hooks, since what they hold is
+/// unknown.
+pub(crate) fn person_hooks(cwd: &Path, mcp_config: Option<&Path>) -> bool {
+    let loader = settings_loader(cwd, mcp_config);
+    let Ok(config) = loader.load() else {
+        return true;
+    };
+    if !config.hooks().is_empty() {
+        return true;
+    }
+    let plugin_hooks = crate::build_plugin_manager(cwd, &loader, &config)
+        .plugin_registry()
+        .and_then(|registry| registry.aggregated_hooks());
+    !plugin_hooks.is_ok_and(|hooks| hooks.is_empty())
+}
+
+/// The settings a session opened in `cwd` loads, with the launch's
+/// `--mcp-config` when it named one.
+fn settings_loader(cwd: &Path, mcp_config: Option<&Path>) -> ConfigLoader {
+    match mcp_config {
+        Some(path) => ConfigLoader::default_for(cwd).with_mcp_config(path),
+        None => ConfigLoader::default_for(cwd),
+    }
 }
 
 fn load_runtime_memory_retriever(
@@ -665,7 +689,7 @@ mod tests {
 
 #[cfg(test)]
 mod attached_tools_tests {
-    use super::person_attached_tools;
+    use super::{person_attached_tools, person_hooks};
 
     /// A bare zo home and workspace attach nothing; an MCP server in the
     /// settings, one in a launch's `--mcp-config` or a skill in the zo home
@@ -692,5 +716,22 @@ mod attached_tools_tests {
         std::fs::create_dir_all(&skill).expect("skill folder");
         std::fs::write(skill.join("SKILL.md"), "---\nname: hello\ndescription: Says hello.\n---\nSay hello.\n").expect("skill");
         assert!(person_attached_tools(cwd, None), "a skill in the zo home is attached");
+    }
+
+    /// A bare zo home runs no hook; a hook in the settings, or settings that
+    /// do not load, count as hooks.
+    #[test]
+    fn a_hook_in_the_settings_or_unreadable_settings_count_as_hooks() {
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = workspace.path();
+        assert!(!person_hooks(cwd, None), "a bare home runs no hook");
+
+        let settings = home.zo_home.join("settings.json");
+        std::fs::write(&settings, r#"{"hooks":{"PreToolUse":["true"]}}"#).expect("settings");
+        assert!(person_hooks(cwd, None), "a settings hook runs");
+        std::fs::write(&settings, "{ not json").expect("settings");
+        assert!(person_hooks(cwd, None), "settings that do not load count as hooks");
     }
 }

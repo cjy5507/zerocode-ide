@@ -3969,6 +3969,11 @@ pub const CLAUDE_CODE_IDENTITY_LINE: &str = "You are Claude Code, Anthropic's of
 /// No other product or company is named: the manual's Claude Code line is
 /// untrue for these models.
 ///
+/// A manual that opens with [`HEADLESS_CORE_INTRO`] — the headless core
+/// profile's — has no response style contract to send the model to, and
+/// teaches its tools in their own text: its identity paragraph says only who
+/// the model is.
+///
 /// The Anthropic backend must never call this: its first system block has to be
 /// the verbatim Claude Code identity line.
 #[must_use]
@@ -3983,13 +3988,28 @@ pub fn apply_non_anthropic_identity(system: &str, model: &str, maker: Option<&st
     let manual = system
         .strip_prefix(CLAUDE_CODE_IDENTITY_LINE)
         .map_or(system, |rest| rest.trim_start_matches(['\r', '\n']));
+    let identity = if manual.starts_with(HEADLESS_CORE_INTRO) {
+        format!("Your identity is {model}")
+    } else {
+        format!(
+            "Follow the operating manual below — its tools, workflow, and provider-neutral \
+             response style contract — but your identity is {model}"
+        )
+    };
     format!(
-        "You are {model}, {maker_clause}, operating through the zo coding CLI. Follow the \
-         operating manual below — its tools, workflow, and provider-neutral response style \
-         contract — but your identity is {model}: do not claim to be another assistant or to be \
-         made by another company.\n\n{manual}"
+        "You are {model}, {maker_clause}, operating through the zo coding CLI. {identity}: do not \
+         claim to be another assistant or to be made by another company.\n\n{manual}"
     )
 }
+
+/// The opening of the manual the headless core profile sends
+/// (`ZO_EXPERIMENT_HEADLESS_PROFILE=core`): a short manual for a run nobody
+/// watches, after the Claude Code identity line like every manual. The prompt
+/// builder writes it and [`apply_non_anthropic_identity`] reads it, so the two
+/// cannot disagree about which manual is the core one.
+pub const HEADLESS_CORE_INTRO: &str = "You work alone on a coding task in the working directory. \
+     Nobody watches this run or answers questions: make reasonable choices yourself and finish \
+     the whole task with the tools you have.";
 
 #[must_use]
 pub fn detect_provider_kind(model: &str) -> ProviderKind {
@@ -5587,7 +5607,7 @@ mod tests {
         PromptCacheStrategy, ProviderKind, STREAM_IDLE_TIMEOUT_ENV, STREAM_IDLE_TIMEOUT_MS,
         ULTRA_BAND_ENV,
         apply_non_anthropic_identity, band_difficulty_for_request, context_window_for_model,
-        declared_model_class, detect_provider_kind,
+        declared_model_class, detect_provider_kind, CLAUDE_CODE_IDENTITY_LINE, HEADLESS_CORE_INTRO,
         effective_effort_for_model, effort_budget_with_floor, effort_level_for_budget, effort_rank,
         ProviderCatalogEntry, catalog_entry_for_token, catalog_provider_for_canonical,
         explicit_non_claude_provider_kind, first_party_lineup, fit_hint_for_model,
@@ -5674,6 +5694,24 @@ mod tests {
             apply_non_anthropic_identity("", "gpt-5.5", Some("OpenAI")),
             ""
         );
+    }
+
+    #[test]
+    fn a_headless_core_manual_is_put_under_the_short_identity() {
+        // The core manual has no response style contract to send the model
+        // to: its identity says who the model is and nothing more.
+        let manual = format!("{CLAUDE_CODE_IDENTITY_LINE}\n{HEADLESS_CORE_INTRO}\n\n# Working\n- x");
+        assert_eq!(
+            apply_non_anthropic_identity(&manual, "acme-coder-1", None),
+            format!(
+                "You are acme-coder-1, a large language model, operating through the zo coding CLI. \
+                 Your identity is acme-coder-1: do not claim to be another assistant or to be made by \
+                 another company.\n\n{HEADLESS_CORE_INTRO}\n\n# Working\n- x"
+            )
+        );
+        // Any other manual keeps the long form, word for word.
+        let other = apply_non_anthropic_identity(&format!("{CLAUDE_CODE_IDENTITY_LINE}\nYou carry out tasks."), "acme-coder-1", None);
+        assert!(other.contains("Follow the operating manual below"), "{other}");
     }
 
     #[test]

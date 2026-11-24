@@ -359,10 +359,11 @@ pub use permissions::{
 };
 pub use prompt::{
     discover_all_skills, discover_skills, load_system_prompt, load_system_prompt_for_main,
-    load_system_prompt_for_main_with_mode, load_system_prompt_for_main_with_mode_and_reach,
+    load_system_prompt_for_headless_profile, load_system_prompt_for_main_with_mode,
+    load_system_prompt_for_main_with_mode_and_reach, persons_prompt_section,
     output_style, prepend_bullets, skill_body, skill_search_roots,
-    split_system_with_identity, teaches_clarifying_questions, ContextFile, ProjectContext,
-    PromptBuildError, PromptMode, PromptToolReach,
+    split_system_with_identity, teaches_clarifying_questions, ContextFile, HeadlessProfile,
+    ProjectContext, PromptBuildError, PromptMode, PromptToolReach, HEADLESS_PROFILE_ENV,
     render_reminders, SkillIndexEntry, SkillInvocationMode, SkillTriggers, SkillsIndexRoad,
     SystemPromptBuilder,
     ReminderCandidate, SKILLS_INDEX_HEADING, SKILL_INDEX_BUDGET_TOKENS, MAX_REMINDER_LINES,

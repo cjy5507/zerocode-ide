@@ -101,7 +101,7 @@ impl World {
                 system_prompt:vec!["A hermetic automatic-work test.".to_string()],
                 inspection_shell:false, permission_rules:None,
             }),
-            parent_registry:None, remote_mcp:None,
+            parent_registry:None, remote_mcp:None, events_bind:None,
         }).expect("open a real session without contacting a provider")
     }
 

@@ -57,6 +57,26 @@ pub(crate) fn build_system_prompt_for_mode(
     Ok(sections)
 }
 
+/// Build the prompt the headless `profile` writes for a main-loop session in
+/// `cwd` that reaches what `offer` says — written whole, so it names no tool
+/// the session lacks and no deferred door, and its sandbox line speaks of the
+/// shells the session runs. The session decided it may take the profile
+/// (`session::headless_profile`).
+pub(crate) fn build_headless_profile_prompt(
+    cwd: &Path,
+    offer: tools::ToolOffer<'_>,
+    profile: runtime::HeadlessProfile,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Ok(runtime::load_system_prompt_for_headless_profile(
+        cwd,
+        default_prompt_date(),
+        env::consts::OS,
+        "unknown",
+        runtime::PromptToolReach::from_fn(|tool| offer.reaches(tool)).with_ledger(offer.reaches_ledger()),
+        profile,
+    )?)
+}
+
 /// The tool the deferred-tool manifest sends a model to for MCP and plugin
 /// tools.
 const TOOL_SEARCH: &str = "ToolSearch";

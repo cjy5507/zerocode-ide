@@ -144,51 +144,57 @@ pub(crate) fn dispatch_result(
         // One reading of the processes for the call's whole way here: the
         // enforcer's `check_bash` and policy and the bash chokepoint share
         // it, or the one the streaming turn read before (t-84911).
-        "bash" => Some(runtime::kill_guard::for_one_command(None, || {
-            maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
-                let tool_call_id = input.get("__zo_tool_call_id").and_then(Value::as_str);
-                runtime::live_output::with_dispatch_key(tool_call_id, || {
-                    let session_id = ctx.session_id();
-                    from_value::<BashCommandInput>(input).and_then(|mut inp| {
-                        let roots = runtime::file_ops::additional_workspace_roots();
-                        if !roots.is_empty() {
-                            let directory = cwd.map_or_else(|| std::env::current_dir().unwrap_or_default(), Path::to_path_buf);
-                            let config = ConfigLoader::default_for(&directory).load().map_err(|error| ToolError::Execution(error.to_string()))?;
-                            let mut mounts = inp.allowed_mounts.take().unwrap_or_else(|| config.sandbox().allowed_mounts.clone());
-                            mounts.extend(roots.iter().map(|root| root.to_string_lossy().into_owned()));
-                            inp.allowed_mounts = Some(mounts);
-                            if inp.filesystem_mode.unwrap_or(config.sandbox().filesystem_mode.unwrap_or_default()) != runtime::FilesystemIsolationMode::Off {
-                                inp.filesystem_mode = Some(runtime::FilesystemIsolationMode::AllowList);
+        "bash" => {
+            // A headless core session reads no argument its shell does not
+            // show, from the permission check on (`headless_core`).
+            let shown = crate::headless_core::shown_shell_input(input);
+            let input: &Value = &shown;
+            Some(runtime::kill_guard::for_one_command(None, || {
+                maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
+                    let tool_call_id = input.get("__zo_tool_call_id").and_then(Value::as_str);
+                    runtime::live_output::with_dispatch_key(tool_call_id, || {
+                        let session_id = ctx.session_id();
+                        from_value::<BashCommandInput>(input).and_then(|mut inp| {
+                            let roots = runtime::file_ops::additional_workspace_roots();
+                            if !roots.is_empty() {
+                                let directory = cwd.map_or_else(|| std::env::current_dir().unwrap_or_default(), Path::to_path_buf);
+                                let config = ConfigLoader::default_for(&directory).load().map_err(|error| ToolError::Execution(error.to_string()))?;
+                                let mut mounts = inp.allowed_mounts.take().unwrap_or_else(|| config.sandbox().allowed_mounts.clone());
+                                mounts.extend(roots.iter().map(|root| root.to_string_lossy().into_owned()));
+                                inp.allowed_mounts = Some(mounts);
+                                if inp.filesystem_mode.unwrap_or(config.sandbox().filesystem_mode.unwrap_or_default()) != runtime::FilesystemIsolationMode::Off {
+                                    inp.filesystem_mode = Some(runtime::FilesystemIsolationMode::AllowList);
+                                }
                             }
-                        }
-                        if ctx.inspection_shell() {
-                            if inp.run_in_background == Some(true) {
-                                return Err(ToolError::PermissionDenied { tool: name.to_string(), reason: "Inspection Bash runs one local query in the foreground.".to_string() });
+                            if ctx.inspection_shell() {
+                                if inp.run_in_background == Some(true) {
+                                    return Err(ToolError::PermissionDenied { tool: name.to_string(), reason: "Inspection Bash runs one local query in the foreground.".to_string() });
+                                }
+                                inp.command = runtime::bash_validation::inspection::command(&inp.command)
+                                    .map_err(|reason| ToolError::PermissionDenied { tool: name.to_string(), reason })?;
                             }
-                            inp.command = runtime::bash_validation::inspection::command(&inp.command)
-                                .map_err(|reason| ToolError::PermissionDenied { tool: name.to_string(), reason })?;
-                        }
-                        // A shell command that IS a plain read goes through the
-                        // tool built for it — see `bash_redirect`.
-                        if let Some(read) = crate::bash_redirect::dedicated_read_for(&inp.command) {
-                            return run_bash_as_dedicated_read(&read, &inp.command, ctx, enforcer, cwd)
-                                .map(ToolExecutionResult::from);
-                        }
-                        mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
-                        if let Some(browser) = crate::browser_execution::BrowserExecution::prepare(&inp) {
-                            return browser.run(inp, ctx, session_id.as_deref(), polls_start_detached(ctx));
-                        }
-                        run_bash(
-                            inp,
-                            cwd,
-                            Some(&ctx.tasks),
-                            session_id.as_deref(),
-                            polls_start_detached(ctx),
-                        ).map(ToolExecutionResult::from)
+                            // A shell command that IS a plain read goes through the
+                            // tool built for it — see `bash_redirect`.
+                            if let Some(read) = crate::bash_redirect::dedicated_read_for(&inp.command) {
+                                return run_bash_as_dedicated_read(&read, &inp.command, ctx, enforcer, cwd)
+                                    .map(ToolExecutionResult::from);
+                            }
+                            mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
+                            if let Some(browser) = crate::browser_execution::BrowserExecution::prepare(&inp) {
+                                return browser.run(inp, ctx, session_id.as_deref(), polls_start_detached(ctx));
+                            }
+                            run_bash(
+                                inp,
+                                cwd,
+                                Some(&ctx.tasks),
+                                session_id.as_deref(),
+                                polls_start_detached(ctx),
+                            ).map(ToolExecutionResult::from)
+                        })
                     })
                 })
-            })
-        })),
+            }))
+        }
         "REPL" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 // REPL has no background mode, so it creates no task to session-stamp.

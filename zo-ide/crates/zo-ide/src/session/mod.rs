@@ -13,6 +13,7 @@ mod scheduled_workflow;
 #[cfg(test)]
 mod automatic_work_tests;
 pub(crate) mod file_search;
+mod headless_profile;
 mod lsp_runtime;
 mod mcp_runtime;
 mod orchestration;

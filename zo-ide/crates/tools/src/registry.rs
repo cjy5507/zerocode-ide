@@ -79,14 +79,19 @@ impl ToolSpec {
     /// fields (`core_types::tool_names`), every other tool as written. The one
     /// door every advertisement goes through — the wire list, a `ToolSearch`
     /// answer and a sub-agent's list — so no road shows a handler's own name.
+    /// A process that runs a headless core session shows three of them in
+    /// that profile's text (`headless_core`).
     #[must_use]
     pub fn wire_definition(&self) -> api::ToolDefinition {
-        api::ToolDefinition {
-            name: core_types::tool_names::wire_tool_name(self.name).to_string(),
-            description: Some(self.description.to_string()),
-            input_schema: core_types::tool_names::schema_to_wire(self.name, &self.input_schema)
-                .unwrap_or_else(|| self.input_schema.clone()),
-        }
+        crate::headless_core::shown_definition(
+            self.name,
+            api::ToolDefinition {
+                name: core_types::tool_names::wire_tool_name(self.name).to_string(),
+                description: Some(self.description.to_string()),
+                input_schema: core_types::tool_names::schema_to_wire(self.name, &self.input_schema)
+                    .unwrap_or_else(|| self.input_schema.clone()),
+            },
+        )
     }
 }
 
@@ -483,7 +488,7 @@ pub(crate) fn is_deferred_tool(name: &str) -> bool {
 }
 
 /// The edit shape a builtin tool realizes, if it is an edit tool at all.
-fn edit_form_of(name: &str) -> Option<api::EditToolForm> {
+pub(crate) fn edit_form_of(name: &str) -> Option<api::EditToolForm> {
     if name == CoreTool::Edit.handler() {
         Some(api::EditToolForm::Edit)
     } else if name == core_types::tool_names::APPLY_PATCH {
@@ -494,7 +499,7 @@ fn edit_form_of(name: &str) -> Option<api::EditToolForm> {
 }
 
 /// The builtin that realizes an edit shape: [`edit_form_of`] read backwards.
-const fn edit_tool_handler(form: api::EditToolForm) -> &'static str {
+pub(crate) const fn edit_tool_handler(form: api::EditToolForm) -> &'static str {
     match form {
         api::EditToolForm::Edit => CoreTool::Edit.handler(),
         api::EditToolForm::ApplyPatch => core_types::tool_names::APPLY_PATCH,
@@ -517,18 +522,22 @@ pub fn harness_tool_set(model: &str, unattended_and_bare: impl FnOnce() -> bool)
         api::ToolSet::Core => true,
         api::ToolSet::HeadlessCore => unattended_and_bare(),
     };
-    core.then(|| {
-        [
-            CoreTool::Bash.handler(),
-            CoreTool::Read.handler(),
-            CoreTool::Write.handler(),
-            edit_tool_handler(profile.edit_tool),
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-    })
+    core.then(|| core_tool_handlers(profile.edit_tool).into_iter().map(str::to_string).collect())
 }
+
+/// The core set: the shell, `Read`, `Write` and the edit shape `edit_tool`.
+pub(crate) const fn core_tool_handlers(edit_tool: api::EditToolForm) -> [&'static str; 4] {
+    [
+        CoreTool::Bash.handler(),
+        CoreTool::Read.handler(),
+        CoreTool::Write.handler(),
+        edit_tool_handler(edit_tool),
+    ]
+}
+
+/// The tools that reach a background task the session started: its output
+/// while it runs, and its stop.
+pub(crate) const BACKGROUND_TASK_TOOLS: [&str; 2] = ["TaskOutput", "TaskStop"];
 
 /// What a session can call, for the text that teaches or names a tool: the
 /// session reaches a tool it advertises, and a deferred one while it
@@ -596,7 +605,7 @@ impl<'a> ToolOffer<'a> {
     /// completion that brings the output back.
     #[must_use]
     pub fn task_reach(&self) -> runtime::task_registry::TaskReach {
-        if self.reaches("TaskOutput") && self.reaches("TaskStop") {
+        if BACKGROUND_TASK_TOOLS.iter().all(|tool| self.reaches(tool)) {
             runtime::task_registry::TaskReach::TaskTools
         } else {
             runtime::task_registry::TaskReach::Completion

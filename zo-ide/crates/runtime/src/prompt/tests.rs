@@ -1,7 +1,8 @@
 use super::{
     collapse_blank_lines, display_context_path, normalize_instruction_content,
     render_instruction_files, split_system_with_identity, truncate_git_status_snapshot,
-    ContextFile, ProjectContext, PromptMode, PromptToolReach, SkillIndexEntry, SystemPromptBuilder,
+    ContextFile, HeadlessProfile, ProjectContext, PromptMode, PromptToolReach, SkillIndexEntry,
+    SystemPromptBuilder,
     CLAUDE_CODE_IDENTITY, MAX_GIT_STATUS_CHARS, MAX_GIT_STATUS_LINES,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
@@ -3137,4 +3138,75 @@ fn the_clarification_section_asks_one_specific_question_per_decision() {
     let reminders = include_str!("../conversation/reminders.rs");
     assert!(!reminders.contains("ONE short clarifying question"));
     assert!(reminders.contains("ask the user, in one AskUserQuestion call, a specific question about which reading is meant"));
+}
+
+/// The headless core profile writes its own prompt: the identity line with
+/// the core opening, `# Working`, `# Care` and `# Final message`, the
+/// boundary, one `# Environment` section in `- ` bullets with no model line
+/// and the git snapshot in it, then the workspace's instruction files —
+/// nothing of the manual's other sections, its project context, memory,
+/// vault or settings.
+#[test]
+fn the_headless_core_profile_writes_its_own_short_prompt() {
+    let context = ProjectContext {
+        cwd: PathBuf::from("/w"),
+        current_date: "2026-11-24".to_string(),
+        git_status: Some("## main\n M src/lib.rs".to_string()),
+        instruction_files: vec![ContextFile {
+            path: PathBuf::from("/w/AGENTS.md"),
+            content: "Run the tests before you finish.".to_string(),
+            globs: Vec::new(),
+            always_apply: true,
+        }],
+        ..ProjectContext::default()
+    };
+    let sections = SystemPromptBuilder::new()
+        .with_os("linux", "unknown")
+        .with_project_context(context)
+        .with_model("acme-coder-1")
+        .with_mode(PromptMode::Autonomous)
+        .with_headless_profile(HeadlessProfile::Core)
+        .build();
+    let headings: Vec<&str> = sections.iter().map(|section| section.lines().next().unwrap_or_default()).collect();
+    assert_eq!(
+        headings,
+        [CLAUDE_CODE_IDENTITY, "# Working", "# Care", "# Final message", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "# Environment", "# Project instructions"]
+    );
+    assert_eq!(sections[0], format!("{CLAUDE_CODE_IDENTITY}\n{}", api::HEADLESS_CORE_INTRO));
+    assert_eq!(
+        sections[5],
+        "# Environment\n- Working directory: /w\n- Date: 2026-11-24\n- Platform: linux unknown\n- Git status snapshot:\n## main\n M src/lib.rs"
+    );
+    assert!(sections[6].contains("Run the tests before you finish."), "{}", sections[6]);
+    assert!(
+        sections[2].contains("if it is not yours to change or not what the task describes, leave it and say so"),
+        "the care section keeps both halves of the manual's target rule: {}",
+        sections[2]
+    );
+}
+
+/// On a backend that is not Anthropic's, the core prompt reaches the wire as
+/// the measured arm sends it: the short identity, the manual, one newline
+/// where the boundary was, then the environment.
+#[test]
+fn a_headless_core_prompt_reaches_another_backend_under_the_short_identity() {
+    let sections = SystemPromptBuilder::new().with_headless_profile(HeadlessProfile::Core).build();
+    let blocks = split_system_with_identity(&sections.join("\n\n"));
+    assert_eq!(blocks.len(), 3, "the identity line, the manual, the environment");
+    let joined = blocks
+        .iter()
+        .map(|block| match block {
+            api::SystemBlock::Text { text, .. } => text.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let wire = api::apply_non_anthropic_identity(&joined, "acme-coder-1", None);
+    assert!(
+        wire.starts_with(&format!(
+            "You are acme-coder-1, a large language model, operating through the zo coding CLI. Your identity is acme-coder-1: do not claim to be another assistant or to be made by another company.\n\n{}\n\n# Working\n",
+            api::HEADLESS_CORE_INTRO
+        )),
+        "{wire}"
+    );
+    assert!(wire.contains("anything left undone.\n# Environment\n- Working directory: unknown"), "{wire}");
 }

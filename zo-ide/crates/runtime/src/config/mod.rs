@@ -3495,6 +3495,56 @@ impl RuntimeHookConfig {
         &self.notification
     }
 
+    /// Whether no hook runs at any stage (a timeout alone runs nothing).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            pre_tool_use,
+            post_tool_use,
+            post_tool_use_failure,
+            session_start,
+            session_end,
+            user_prompt_submit,
+            pre_compact,
+            post_compact,
+            subagent_start,
+            subagent_stop,
+            turn_start,
+            turn_end,
+            permission_request,
+            permission_denied,
+            cwd_changed,
+            task_created,
+            task_completed,
+            file_changed,
+            notification,
+            timeout_seconds: _,
+        } = self;
+        [
+            pre_tool_use,
+            post_tool_use,
+            post_tool_use_failure,
+            session_start,
+            session_end,
+            user_prompt_submit,
+            pre_compact,
+            post_compact,
+            subagent_start,
+            subagent_stop,
+            turn_start,
+            turn_end,
+            permission_request,
+            permission_denied,
+            cwd_changed,
+            task_created,
+            task_completed,
+            file_changed,
+            notification,
+        ]
+        .iter()
+        .all(|rules| rules.is_empty())
+    }
+
     #[must_use]
     pub fn hook_timeout(&self) -> Option<Duration> {
         self.timeout_seconds.map(Duration::from_secs)

@@ -42,6 +42,7 @@ mod file_tools;
 mod image_tools;
 mod file_write_lease;
 mod gateway;
+mod headless_core;
 mod hunk_attribution;
 mod http_bridge;
 mod mcp_tools;
@@ -69,6 +70,7 @@ pub use file_tools::sniff_image_mime;
 
 // Public API.
 pub use tool_digest::{configure_tool_digest, ToolDigestMode, TOOL_DIGEST_ENV};
+pub use headless_core::{headless_core_tool_set, show_headless_core_tools};
 pub use codegraph_tools::codegraph_cache_path;
 pub use aliases::canonical_tool_name;
 pub use bash_redirect::{dedicated_read_for, redirect_note, redirected_read, DedicatedRead};

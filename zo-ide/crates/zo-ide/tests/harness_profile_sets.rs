@@ -929,6 +929,15 @@ fn environment_value<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no `{label}` bullet in:\n{text}"))
 }
 
+/// The fixed head of `run`'s first turn request: its first system message —
+/// the prompt the session built or stored — and its tools, as the wire
+/// carries them. A reopened run's later system messages are its transcript's.
+fn prefix_of(run: &Run) -> String {
+    let (system, tools) = run.turn();
+    let first = system.first().map(|message| content_text(&message["content"]));
+    serde_json::to_string(&(first, tools)).expect("a prefix")
+}
+
 /// The text of the first tool result among `run`'s requests.
 fn first_tool_result(run: &Run) -> String {
     ChatServer::parsed(run.bodies.clone())
@@ -996,6 +1005,15 @@ fn a_core_switch_value_zo_does_not_know_leaves_every_request_as_it_was() {
     }
 }
 
+/// One run of E5 as a scene stages it: what the person or the window brings,
+/// how the scene gets it, and the run's environment and arguments.
+struct Staged<'a> {
+    what: &'a str,
+    stage: &'a dyn Fn(&Scene),
+    env: Vec<(&'a str, &'a str)>,
+    args: &'a [&'a str],
+}
+
 /// E5 of the headless core profile, the part a scene can stage: a run given the
 /// switch that a person or a window may be part of — a launch tool list, an MCP
 /// server or a skill the person attached, a hook, an output style, a pane, an
@@ -1012,17 +1030,17 @@ fn the_core_switch_leaves_a_run_a_person_or_a_window_may_be_part_of_as_it_was() 
     let hook = |scene: &Scene| scene.add_settings(&json!({"hooks": {"PreToolUse": ["true"]}}));
     let style = |scene: &Scene| scene.add_settings(&json!({"outputStyle": "Explanatory"}));
     let nothing = |_: &Scene| {};
-    let cases: [(&str, &dyn Fn(&Scene), Vec<(&str, &str)>, &[&str]); 8] = [
-        ("a launch tool list", &nothing, vec![], &["--allowed-tools", "bash,read_file"]),
-        ("an MCP server", &Scene::attach_mcp_server, vec![], &[]),
-        ("a skill", &Scene::install_skill, vec![], &[]),
-        ("a settings hook", &hook, vec![], &[]),
-        ("an output style", &style, vec![], &[]),
-        ("a pane", &nothing, vec![("ZEROCODE_PANE_KEY", "e5")], &[]),
-        ("an event channel's address file", &nothing, vec![("ZO_EVENTS_ADDR_FILE", addr_file.as_str())], &[]),
-        ("a second brain", &nothing, vec![("ZEROCODE_SECOND_BRAIN", vault.as_str())], &[]),
+    let cases = [
+        Staged { what: "a launch tool list", stage: &nothing, env: vec![], args: &["--allowed-tools", "bash,read_file"] },
+        Staged { what: "an MCP server", stage: &Scene::attach_mcp_server, env: vec![], args: &[] },
+        Staged { what: "a skill", stage: &Scene::install_skill, env: vec![], args: &[] },
+        Staged { what: "a settings hook", stage: &hook, env: vec![], args: &[] },
+        Staged { what: "an output style", stage: &style, env: vec![], args: &[] },
+        Staged { what: "a pane", stage: &nothing, env: vec![("ZEROCODE_PANE_KEY", "e5")], args: &[] },
+        Staged { what: "an event channel's address file", stage: &nothing, env: vec![("ZO_EVENTS_ADDR_FILE", addr_file.as_str())], args: &[] },
+        Staged { what: "a second brain", stage: &nothing, env: vec![("ZEROCODE_SECOND_BRAIN", vault.as_str())], args: &[] },
     ];
-    for (what, stage, env, args) in cases {
+    for Staged { what, stage, env, args } in cases {
         let scene = Scene::new();
         stage(&scene);
         let off = core_scene_run(&scene, &server, &env, args);
@@ -1056,8 +1074,8 @@ fn a_core_run_reopens_on_what_it_opened_on_and_a_reopen_reads_no_switch() {
     let reopened = core_scene_run(&scene, &server, &[], &["--continue"]);
     assert_eq!(tool_order(&opened.turn().1).len(), 6, "the run opened on the core profile:\n{}", opened.told());
     assert_eq!(
-        serde_json::to_string(&reopened.turn()).expect("turn"),
-        serde_json::to_string(&opened.turn()).expect("turn"),
+        prefix_of(&reopened),
+        prefix_of(&opened),
         "a reopened core run sends the text and the tools it opened on"
     );
     assert!(reopened.stderr_naming(CORE_SWITCH).is_empty(), "nothing to say without the switch:\n{}", reopened.stderr);
@@ -1066,11 +1084,7 @@ fn a_core_run_reopens_on_what_it_opened_on_and_a_reopen_reads_no_switch() {
     core_scene_run(&scene, &server, &[], &[]);
     let plain = core_scene_run(&scene, &server, &[], &["--continue"]);
     let switched = core_scene_run(&scene, &server, &[(CORE_SWITCH, "core")], &["--continue"]);
-    assert_eq!(
-        serde_json::to_string(&switched.turn()).expect("turn"),
-        serde_json::to_string(&plain.turn()).expect("turn"),
-        "the switch leaves a reopened run as it was"
-    );
+    assert_eq!(prefix_of(&switched), prefix_of(&plain), "the switch leaves a reopened run as it was");
     assert_eq!(switched.stderr_naming(CORE_SWITCH).len(), 1, "one line says why:\n{}", switched.stderr);
 }
 
