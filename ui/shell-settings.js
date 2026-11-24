@@ -1623,8 +1623,9 @@ function buildKeyRow(action) {
   return row;
 }
 
-function paintSettingsKeys({ force = false } = {}) {
-  if (!force && settingsView.hidden) return;
+let settingsKeysForcePaint = false;
+function paintSettingsKeys() {
+  if (!settingsKeysForcePaint && settingsView.hidden) return;
   const list = el("settings-keys");
   list.replaceChildren();
   paintKeyFilters();
@@ -11216,7 +11217,12 @@ function setSettingsOpen(on, focus = null) {
     // webview last remembers. One full snapshot refreshes every preference,
     // including values committed by another window while this page was shut.
     void refreshSettingsSnapshot({ reportError: true });
-    paintSettingsKeys({ force: true });
+    settingsKeysForcePaint = true;
+    try {
+      paintSettingsKeys();
+    } finally {
+      settingsKeysForcePaint = false;
+    }
     paintLocalePicker();
     paintThemePicker();
     // Before `paintSettingsSearch`, which reads the rendered text to decide

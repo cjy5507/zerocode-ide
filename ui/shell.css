@@ -23005,8 +23005,6 @@ button.helper-sib:hover {
 .settings-frame > .settings-health,
 .settings-frame > .settings-nothing,
 .settings-frame > .settings-pane {
-  width: 100%;
-  max-width: 76rem;
   margin-inline: auto;
   padding-inline: 32px;
 }
@@ -25851,9 +25849,13 @@ button.integration-context-action:hover {
   margin-inline: 0;
 }
 
+.settings-pane[data-pane="judgment-models"] > .settings-section-head,
 .settings-pane[data-pane="judgment-models"] > .settings-card,
-.model-catalog > .settings-card {
+.model-catalog > .settings-card,
+.model-catalog > .model-sources {
   width: 100%;
+  max-width: 72rem;
+  margin-inline: auto;
 }
 
 .judgment-connection-settings {
