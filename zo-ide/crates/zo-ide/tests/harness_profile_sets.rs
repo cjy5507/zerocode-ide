@@ -260,7 +260,7 @@ impl ChatServer {
 
     /// The bodies kept since the last call, and forget them.
     fn take(&self) -> Vec<Value> {
-        Self::parsed(self.take_raw())
+        Self::parsed(&self.take_raw())
     }
 
     /// The bodies kept since the last call as they arrived, byte for byte, and
@@ -269,7 +269,7 @@ impl ChatServer {
         std::mem::take(&mut *self.bodies.lock().expect("bodies"))
     }
 
-    fn parsed(raw: Vec<String>) -> Vec<Value> {
+    fn parsed(raw: &[String]) -> Vec<Value> {
         raw.iter().map(|body| serde_json::from_str(body).expect("a kept body is JSON")).collect()
     }
 }
@@ -437,7 +437,7 @@ impl Scene {
     fn bodies(&self, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> (Vec<Value>, String) {
         let run = self.run(Path::new(env!("CARGO_BIN_EXE_zo")), server, MODEL, env, args);
         let told = run.told();
-        (ChatServer::parsed(run.bodies), told)
+        (ChatServer::parsed(&run.bodies), told)
     }
 
     /// The system text and the tools of the turn request one headless run sends.
@@ -495,7 +495,7 @@ impl Run {
 
     /// The system messages and the tools of the run's first turn request.
     fn turn(&self) -> (Vec<Value>, Value) {
-        turn_of(ChatServer::parsed(self.bodies.clone()))
+        turn_of(ChatServer::parsed(&self.bodies))
             .unwrap_or_else(|| panic!("no turn request reached the endpoint:\n{}", self.told()))
     }
 
@@ -940,7 +940,7 @@ fn prefix_of(run: &Run) -> String {
 
 /// The text of the first tool result among `run`'s requests.
 fn first_tool_result(run: &Run) -> String {
-    ChatServer::parsed(run.bodies.clone())
+    ChatServer::parsed(&run.bodies)
         .iter()
         .filter_map(|body| body["messages"].as_array())
         .flatten()
@@ -1143,7 +1143,7 @@ fn without_the_core_switch_a_run_sends_what_the_baseline_build_sends() {
         let before = scene.run(&baseline, &server, CORE_MODEL, &[], &args);
         scene.reset();
         let after = scene.run(this_build, &server, CORE_MODEL, &[], &args);
-        let turns = ChatServer::parsed(after.bodies.clone()).iter().filter(|body| body.get("tools").is_some()).count();
+        let turns = ChatServer::parsed(&after.bodies).iter().filter(|body| body.get("tools").is_some()).count();
         assert_eq!(turns, calls.len() + 1, "{what}: every step reached the endpoint:\n{}", after.told());
         assert_eq!(before.bodies.len(), after.bodies.len(), "{what}: as many requests:\n{}\n{}", before.told(), after.told());
         for (index, (was, is)) in before.bodies.iter().zip(&after.bodies).enumerate() {
