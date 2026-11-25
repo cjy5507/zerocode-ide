@@ -7781,6 +7781,11 @@ const artifactThumbFailed = new Set();
 const artifactThumbQueue = [];
 let artifactThumbBusy = false;
 let artifactThumbActiveId = null;
+/* 다시 쓴 페이지의 카드가 앞 그림을 입고 서도 되는 끝(t-129552 고침 2) — id → `performance.now()`의 시각. 그 행의 그림
+ * 열쇠가 바뀐 것을 처음 본 때(그때 그린 그림이 있었다)부터 표의 `thumb.timeout_ms`까지다: 숨은 판이 페이지가 뜨기를
+ * 기다리는 상한이고, 그 뒤면 그 그림은 글리프다. 열쇠가 또 바뀌어도 늘지 않고, 그리지 못하면 그 자리에서 끝난다. 새
+ * 그림을 들거나 행이 목록에서 빠지면 지운다. 표가 시한을 말하지 않으면 앞 그림을 들지 않는다 — 창은 제 숫자가 없다. */
+const artifactThumbHoldUntil = new Map();
 
 function artifactThumbnailKey(row) {
   return row ? JSON.stringify([row.kind, row.path, row.url, row.modified_ms, row.bytes, row.version]) : null;
@@ -7958,6 +7963,9 @@ async function refreshArtifacts() {
     const incoming = new Map((answer?.rows ?? []).map((row) => [row.id, row]));
     for (const [id, previous] of artifactRows) {
       if (artifactThumbnailKey(previous) === artifactThumbnailKey(incoming.get(id))) continue;
+      // 그린 그림이 있던 카드는 새 그림을 기다리는 동안 그 그림을 표의 시한까지 입는다(t-129552 고침 2).
+      if (!incoming.has(id)) artifactThumbHoldUntil.delete(id);
+      else if (artifactThumbs.has(id)) holdArtifactThumb(id, answer?.thumb?.timeout_ms);
       artifactThumbs.delete(id);
       artifactThumbFailed.delete(id);
       artifactPreviews.delete(id);
@@ -10218,14 +10226,14 @@ function dressArtifactCard(node, row, selected) {
     const held = pictured ? artifactPreviews.get(row.id) : null;
     // 다시 쓴 페이지(열쇠가 바뀌어 캐시에서 지운 그림)의 카드는 새 그림이 올 때까지 입던 그림을 입고 선다(t-129552,
     // 1.1.176 「화면이 계속 깜박거림」): 글리프로 돌렸다가 숨은 판이 새 그림을 그려 오면 다시 입히면, 에이전트가 페이지를
-    // 다시 쓸 때마다 카드의 그림이 그리는 동안(최대 8 s) 꺼졌다 켜졌다. 새 그림은 아래의 청하기가 부르고, 그리지 못하면
-    // 펌프가 이 카드를 글리프로 돌린다.
-    const redrawing = again && rendered === null && artifactAsksThumbnail(row)
-      && !artifactThumbFailed.has(row.id) && !artifactMissing.has(row.id);
-    const src = rendered ?? held?.data_url ?? (redrawing ? node._thumbSrc ?? "" : "");
+    // 다시 쓸 때마다 카드의 그림이 그리는 동안 꺼졌다 켜졌다. 입던 그림은 행의 그림 상태가 허락하는 동안만이다
+    // (`artifactThumbHolds`: 표의 시한 안 · 그리지 못하지 않음 · 파일이 있음). 새 그림은 아래의 청하기가 부른다.
+    const holding = again && rendered === null && Boolean(node._thumbSrc) && artifactThumbHolds(row);
+    const src = rendered ?? held?.data_url ?? (holding ? node._thumbSrc : "");
     thumb.hidden = src === "";
     thumb.src = src;
     node._thumbSrc = src;
+    markArtifactThumbHeld(node, holding);
     node.classList.toggle("has-thumb", small && src !== "");
     if (pictured && !held && !artifactMissing.has(row.id)) void askArtifactThumb(node, row.id);
   }
@@ -10234,8 +10242,12 @@ function dressArtifactCard(node, row, selected) {
     // 참조면 갈아입는다(같은 그림은 같은 참조라 비교가 한 번의 식별 비교다).
     const kept = artifactThumbs.get(row.id);
     if (kept !== undefined && kept !== node._thumbSrc) wearArtifactThumb(node, row, kept);
+    else if (kept !== undefined) markArtifactThumbHeld(node, false);
     askArtifactThumbnail(row);
   }
+  // 앞 그림은 시한 안에서, 그리지 못하기 전까지만 선다 — 판에서 빠졌다가 다시 붙은 카드, 같은 행으로 다시 그리는 카드도
+  // 여기를 지난다(t-129552 고침 2: 판 밖에서 실패한 카드가 검색을 지우자 앞 그림으로 돌아왔다).
+  if (node._thumbHeld && !artifactThumbHolds(row)) dropArtifactCardThumb(node);
   // 반영 상태는 행과 따로 움직인다(git의 답이 뒤에 온다): 행이 바뀌었거나 그 답이 움직인
   // 때에만 다시 입는다.
   if (node._landingRow !== row || node._landingGeneration !== artifactLandingGeneration) {
@@ -10347,7 +10359,51 @@ function wearArtifactThumb(node, row, src) {
   thumb.src = src;
   thumb.hidden = false;
   node._thumbSrc = src;
+  markArtifactThumbHeld(node, false);
   if (ARTIFACT_SMALL_THUMB_KINDS.has(row.kind) && node.classList.contains("is-plain")) node.classList.add("has-thumb");
+}
+
+/* 열쇠가 바뀐 행의 앞 그림에 시한을 단다 — 이미 달려 있으면(새 그림이 아직 없다) 그대로다. 시한이 오면 판에 선 그 카드를
+ * 다시 입혀 글리프로 돌린다. */
+function holdArtifactThumb(id, ms) {
+  if (artifactThumbHoldUntil.has(id) || !(ms > 0)) return;
+  const until = performance.now() + ms;
+  artifactThumbHoldUntil.set(id, until);
+  setTimeout(() => {
+    if (artifactThumbHoldUntil.get(id) === until) redressHeldArtifactCard(id);
+  }, ms);
+}
+
+/* 카드가 아직 앞 그림을 입어도 되는가 — 시한 안이고, 지금 열쇠를 그리지 못하지 않았고, 파일이 있다. */
+function artifactThumbHolds(row) {
+  return (artifactThumbHoldUntil.get(row.id) ?? 0) > performance.now() && artifactAsksThumbnail(row)
+    && !artifactThumbFailed.has(row.id) && !artifactMissing.has(row.id);
+}
+
+/* 카드가 앞 그림을 입고 새 그림을 기다리는가. 「갱신 중」은 로딩의 한 정의(`aria-busy`)로 말하고 그림 위에 맥박을 켜지
+ * 않는다: 그 맥박(`usage-blank-pulse`)은 얼굴을 1.6 s마다 45 %까지 어둡게 했다 밝혀, 다시 쓰는 페이지마다 깜박임이 된다. */
+function markArtifactThumbHeld(node, held) {
+  if (Boolean(node._thumbHeld) === held) return;
+  node._thumbHeld = held;
+  if (held) node.setAttribute("aria-busy", "true");
+  else node.removeAttribute("aria-busy");
+}
+
+/* 앞 그림을 내려놓는다 — 시한이 지났거나 그리지 못했다. 카드는 글리프로 서고, 새 그림이 오면 그것을 입는다. */
+function dropArtifactCardThumb(node) {
+  const thumb = node.querySelector(".artifact-card-thumb");
+  thumb.hidden = true;
+  thumb.src = "";
+  node._thumbSrc = "";
+  markArtifactThumbHeld(node, false);
+  node.classList.remove("has-thumb");
+}
+
+/* 앞 그림을 입고 판에 선 카드를 다시 입힌다(내려놓는 것은 `dressArtifactCard`). 판에서 빠진 카드는 다시 붙을 때 입는다. */
+function redressHeldArtifactCard(id) {
+  const node = artifactCardNodeFor(id);
+  const row = artifactRows.get(id);
+  if (node?._thumbHeld && row) dressArtifactCard(node, row, id === artifactSelectedId);
 }
 
 /* 판의 이름 — 훅의 판 키(`term-4`)는 판이 머리에 다는 `term:4`로 읽는다. */
@@ -10841,14 +10897,10 @@ async function pumpArtifactThumbs() {
         if (view && artifactSelectedId === id && row && ARTIFACT_THUMB_KINDS.has(row.kind)) void paintArtifactPreview(view, row);
       } else {
         artifactThumbFailed.add(id);
-        // 새 그림을 기다리며 앞 그림을 입고 있던 카드(다시 쓴 페이지)는 글리프로 돌아간다 — 그리지 못한 열쇠의 얼굴은
-        // 글리프다(t-129552).
-        const row = artifactRows.get(id);
-        const node = artifactCardNodeFor(id);
-        if (node && row && node._thumbSrc) {
-          node._artifactRow = null;
-          dressArtifactCard(node, row, id === artifactSelectedId);
-        }
+        // 그리지 못한 열쇠의 얼굴은 글리프다(t-129552): 앞 그림의 시한도 여기서 끝난다 — 다음 다시 쓰기가 실패를 지워도
+        // 앞 그림은 돌아오지 않는다. 판에 선 카드는 지금, 판에서 빠진 카드는 다시 붙을 때 내려놓는다.
+        if (artifactThumbHoldUntil.has(id)) artifactThumbHoldUntil.set(id, 0);
+        redressHeldArtifactCard(id);
       }
       refillArtifactThumbQueue();
     }
@@ -10888,6 +10940,8 @@ function rememberArtifactThumb(id, dataUrl) {
     artifactSeenShots.delete(oldest);
   }
   artifactThumbs.set(id, dataUrl);
+  // 새 그림이 왔다 — 앞 그림의 시한은 끝나고, 다음 다시 쓰기가 새 시한을 연다.
+  artifactThumbHoldUntil.delete(id);
 }
 
 /* 고른 카드가 보이게 격자를 옮긴다 — 서랍이 선 뒤의 격자로 잰다: 서랍이 서면 격자가 좁아져 열이
@@ -13348,12 +13402,7 @@ async function snapArtifactSeen(clock) {
   artifactThumbFailed.delete(row.id);
   rememberArtifactThumb(row.id, answer.data_url);
   const node = artifactCardNodeFor(row.id);
-  if (node) {
-    const thumb = node.querySelector(".artifact-card-thumb");
-    thumb.src = answer.data_url;
-    thumb.hidden = false;
-    node._thumbSrc = answer.data_url;
-  }
+  if (node) wearArtifactThumb(node, artifactRows.get(row.id) ?? row, answer.data_url);
   const view = artifactsView();
   if (view && artifactSelectedId === row.id) void paintArtifactPreview(view, artifactRows.get(row.id) ?? row);
 }

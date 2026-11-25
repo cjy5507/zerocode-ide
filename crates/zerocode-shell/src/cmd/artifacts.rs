@@ -58,6 +58,7 @@ pub(crate) fn artifacts_list(filter: artifact_runtime::Filter) -> Result<Artifac
             height: limits.thumb_height,
             queue_max: limits.thumb_queue_max,
             cache_bytes: limits.preview_cache_bytes,
+            timeout_ms: limits.thumb_timeout_ms,
         },
     })
 }
@@ -238,6 +239,11 @@ pub(crate) struct ThumbTable {
     /// one — so the window's copy is bounded by size and not by count alone
     /// (t-80604).
     pub(crate) cache_bytes: u64,
+    /// How long the hidden pane waits for a page to load before its picture
+    /// is a glyph (`thumb_timeout_ms`). A rewritten page's card wears its
+    /// previous picture no longer than this while the new one is drawn
+    /// (t-129552), so the window keeps no number of its own for it.
+    pub(crate) timeout_ms: u64,
 }
 
 /// The snapshots kept for one page or document (t-3233 §5), oldest first —
