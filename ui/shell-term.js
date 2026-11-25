@@ -3600,7 +3600,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     dragFrom = { y: event.clientY, offset: viewOffset };
     rail.classList.add("is-held");
   });
-  window.addEventListener("mousemove", (event) => {
+  function dragThumb(event) {
     if (dragFrom === null) return;
     // The same watched number: a drag is a mousemove per pixel, and measuring
     // the track under the pointer would force a layout on every one of them
@@ -3615,12 +3615,16 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const wanted = Math.round(dragFrom.offset - moved);
     const clamped = Math.min(scrollbackLen, Math.max(0, wanted));
     scrollToOffset(clamped);
-  });
-  window.addEventListener("mouseup", () => {
+  }
+  function dropThumb() {
     if (dragFrom === null) return;
     dragFrom = null;
     rail.classList.remove("is-held");
-  });
+  }
+  // Heard on the window so a drag that leaves the bar still moves it — and
+  // so `release()` has to take both off again.
+  window.addEventListener("mousemove", dragThumb);
+  window.addEventListener("mouseup", dropThumb);
 
   /* A click on the empty track pages toward it, which is what every scrollbar
    * in every application does and the reason a track is clickable at all. */
@@ -4580,6 +4584,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     host.removeEventListener("mousemove", movePointer);
     window.removeEventListener("mousemove", dragSelection);
     window.removeEventListener("mouseup", finishPointerGesture);
+    window.removeEventListener("mousemove", dragThumb);
+    window.removeEventListener("mouseup", dropThumb);
     endSelectDrag();
     termSelectionViews.delete(view);
     terminalSelectionByHost.delete(host);
