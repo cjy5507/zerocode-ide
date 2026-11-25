@@ -39,6 +39,49 @@ async function stand(page) {
   });
 }
 
+/* Where the why's buttons stand: one line, the two buttons together at the form's end a --space-2 apart, and the
+ * needed-why sentence, when there is one, filling the line before them. That is the one rule ui/shell.css gives the
+ * reply's and the closes' button rows. The parts are named whole here, not joined from the stem the form is built
+ * with, so a search for a class finds this reader too: `.board-desk-close-actions` is only ever joined in the code
+ * (`${prefix}-actions`, shell-inbox.js `questionCloseForm`), and t-129273 once took it for unread and dropped it from
+ * that rule, which left the board's 취소 and 닫기 at the start with no gap between them. */
+function closeButtons(page, form, parts) {
+  return page.evaluate(([form, parts]) => {
+    const node = document.querySelector(form);
+    const [actions, error, cancel, send] = [parts.actions, parts.error, parts.cancel, parts.send]
+      .map((selector) => node?.querySelector(selector) ?? null);
+    if (!actions || !error || !cancel || !send) return { found: false };
+    const style = getComputedStyle(actions);
+    const box = actions.getBoundingClientRect();
+    const end = box.right - parseFloat(style.paddingRight) - parseFloat(style.borderRightWidth);
+    const stop = cancel.getBoundingClientRect();
+    const go = send.getBoundingClientRect();
+    // The token as the page reads it, so the test does not hold its value.
+    const probe = document.body.appendChild(document.createElement("div"));
+    probe.style.cssText = "position: absolute; visibility: hidden; width: var(--space-2)";
+    const space = Math.round(probe.getBoundingClientRect().width);
+    probe.remove();
+    const middle = (one) => (one.top + one.bottom) / 2;
+    const said = error.checkVisibility() ? error.getBoundingClientRect() : null;
+    return {
+      found: true,
+      display: style.display,
+      space,
+      gap: Math.round(go.left - stop.right),
+      fromEnd: Math.round(end - go.right),
+      oneLine: Math.abs(middle(stop) - middle(go)) <= 1,
+      error: said ? { gap: Math.round(stop.left - said.right), oneLine: Math.abs(middle(said) - middle(go)) <= 1 } : null,
+    };
+  }, [form, parts]);
+}
+
+function buttonsAtTheEnd(quiet, refused) {
+  const laidOut = (one) => one.found && one.display === "flex" && one.space > 0 && Math.abs(one.gap - one.space) <= 1
+    && Math.abs(one.fromEnd) <= 1 && one.oneLine;
+  return laidOut(quiet) && quiet.error === null
+    && laidOut(refused) && refused.error?.oneLine === true && Math.abs(refused.error.gap - refused.space) <= 1;
+}
+
 /* The two scenes stand apart: one that cannot go on says so and the other still runs. */
 export async function testQuestionCloseRows(suite) {
   for (const [name, scene] of [["the board's rows", boardScene], ["the sidebar's worker row", sidebarScene]]) {
@@ -127,6 +170,9 @@ async function boardScene({ browser, origin, ok, faults }) {
       asked.shown && asked.focused && asked.max === asked.want && asked.max === 200 && asked.label === "닫는 까닭"
         && asked.sentBy === "닫기" && asked.cancelBy === "취소",
       JSON.stringify(asked));
+    const boardParts = { actions: ".board-desk-close-actions", error: ".board-desk-close-error",
+      cancel: ".board-desk-close-cancel", send: ".board-desk-close-send" };
+    const boardQuiet = await closeButtons(page, `${row} .board-desk-close`, boardParts);
 
     // ② No why, no call; one why, one call.
     await page.click(`${row} .board-desk-close-send`);
@@ -135,6 +181,9 @@ async function boardScene({ browser, origin, ok, faults }) {
       error: document.querySelector(`${row} .board-desk-close-error`)?.textContent ?? "",
     }), row);
     ok("an empty why closes nothing and says it is needed", empty.calls === 0 && empty.error === "닫는 까닭을 한 줄 적어야 닫힙니다.", JSON.stringify(empty));
+    const boardRefused = await closeButtons(page, `${row} .board-desk-close`, boardParts);
+    ok("on the board the why's 취소 and 닫기 stand together at the form's end, a --space-2 apart, and the needed-why sentence fills the line before them",
+      buttonsAtTheEnd(boardQuiet, boardRefused), JSON.stringify({ quiet: boardQuiet, refused: boardRefused }));
 
     await page.fill(`${row} .board-desk-close-field`, "물은 판이 사라졌습니다");
     await page.keyboard.press("Enter");
@@ -323,10 +372,15 @@ async function sidebarScene({ browser, origin, ok, faults }) {
     ok("the form says whose question it closes and what it says — the first line, with the whole of it as the hover — and not a count for one question",
       open.who === "Jev: 판정이 실제로 일어나게" && open.ask === "어느 쪽으로 갈까요?" && open.tip.includes("둘째 줄") && open.count === "",
       JSON.stringify(open));
+    const teamParts = { actions: ".team-close-actions", error: ".team-close-error", cancel: ".team-close-cancel", send: ".team-close-send" };
+    const teamQuiet = await closeButtons(side, ".team-close-form", teamParts);
 
     await side.keyboard.press("Enter");
     const empty = await side.evaluate(() => ({ calls: window.__CLOSED__.length, error: document.querySelector(".team-close-error")?.textContent ?? "" }));
     ok("an empty why closes nothing and says it is needed", empty.calls === 0 && empty.error === "닫는 까닭을 한 줄 적어야 닫힙니다.", JSON.stringify(empty));
+    const teamRefused = await closeButtons(side, ".team-close-form", teamParts);
+    ok("on the sidebar the why's 취소 and 닫기 stand together at the form's end, a --space-2 apart, and the needed-why sentence fills the line before them",
+      buttonsAtTheEnd(teamQuiet, teamRefused), JSON.stringify({ quiet: teamQuiet, refused: teamRefused }));
 
     await side.keyboard.type("답이 필요 없어졌습니다");
     await side.keyboard.press("Enter");
