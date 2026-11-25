@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 
 use super::{LISTING_STANDS_FOR, Listing, Listings, StandIn, listing_key};
 
+const SUBSCRIPTION_ID_KEY: &str = "io.modelcontextprotocol/subscriptionId";
+
 /// A server that logs each method it hears, lists the tools its tools file
 /// holds, answers `pong` to a call, and ends without a word when the tool
 /// called is `die`. Beside its tools file, a `.slow` file makes it answer its
@@ -24,6 +26,9 @@ while IFS= read -r line; do
   method=$(printf '%s\n' "$line" | sed -nE 's/.*"method":"([^"]*)".*/\1/p')
   id=$(printf '%s\n' "$line" | sed -nE 's/.*"id":("[^"]*"|[^,}]+).*/\1/p')
   echo "heard $method" >> "$log"
+  case "$method" in
+    subscriptions/listen|notifications/cancelled) printf '%s\n' "$line" >> "$log" ;;
+  esac
   if [ "$method" = notifications/cancelled ] && [ -n "$waiting_id" ]; then
     request_id=$(printf '%s\n' "$line" | sed -nE 's/.*"requestId":("[^"]*"|[^,}]+).*/\1/p')
     if [ "$request_id" = "$waiting_id" ]; then
@@ -51,6 +56,9 @@ while IFS= read -r line; do
     tools/list)
       if [ -f "$tools.fails" ]; then printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"backend unavailable"}}\n' "$id"
       else printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":%s}}\n' "$id" "$(cat "$tools")"; fi ;;
+    subscriptions/listen)
+      printf '{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{"@SUBSCRIPTION_ID_KEY@":%s}}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
     tools/call)
       case "$line" in
         *'"name":"die"'*) echo "died" >> "$log"; exit 0 ;;
@@ -85,7 +93,8 @@ impl Fixture {
             script: dir.join("server.sh"),
             dir,
         };
-        std::fs::write(&fixture.script, SERVER).expect("server script");
+        let server = SERVER.replace("@SUBSCRIPTION_ID_KEY@", SUBSCRIPTION_ID_KEY);
+        std::fs::write(&fixture.script, server).expect("server script");
         fixture.set_tools(&["ping"]);
         fixture
     }
@@ -383,8 +392,66 @@ fn a_listed_server_starts_on_its_first_call_and_ends_with_the_session() {
     });
 }
 
-/// A server that coerces request ids to int32 can replay the start, update
-/// its listing and answer client ids even if they collide in its format.
+/// The server sees the original listen and cancellation requests, and the
+/// client sees the same ids in both replies and subscription notifications.
+#[test]
+fn a_modern_listen_and_cancellation_keep_the_client_ids() {
+    let fixture = Fixture::new("listen-ids");
+    let mut session = fixture.session(Duration::from_secs(600));
+    let ids = [
+        json!(7),
+        json!(4294967294_u64),
+        json!(-9),
+        json!("abc"),
+        json!("7"),
+        json!("zerocode-first-call-initialize"),
+    ];
+    let requests: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            json!({"jsonrpc": "2.0", "id": id, "method": "subscriptions/listen", "params": {"tools": {"listChanged": true}}})
+        })
+        .collect();
+    for request in &requests {
+        session.send(request);
+    }
+    let cancelled = json!("cancel-this-call");
+    session.send(&json!({"jsonrpc": "2.0", "id": cancelled, "method": "tools/call", "params": {"name": "wait"}}));
+    let cancellation = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": cancelled, "reason": "fixture cancellation"}});
+    session.send(&cancellation);
+    // The fixture answers in order. A ping confirms it has handled every
+    // message even when a listen acknowledgement or the cancellation is wrong.
+    let ping_id = 20;
+    session.request(ping_id, "ping", json!({}));
+
+    let heard: Vec<Value> = fixture
+        .log()
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let expected_requests: Vec<_> = requests.into_iter().chain([cancellation]).collect();
+    let expected_answers: Vec<_> = ids
+        .iter()
+        .flat_map(|id| {
+            [
+                json!({"jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": {"_meta": {(SUBSCRIPTION_ID_KEY): id}}}),
+                json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+            ]
+        })
+        .chain([
+            json!({"jsonrpc": "2.0", "id": cancelled, "error": {"code": -32001, "message": "cancelled"}}),
+            json!({"jsonrpc": "2.0", "id": ping_id, "result": {}}),
+        ])
+        .collect();
+    assert_eq!(
+        (heard, session.answers()),
+        (expected_requests, expected_answers),
+        "listen requests, cancellation, replies and notifications keep the client ids"
+    );
+}
+
+/// A server that coerces request ids to int32 can replay the start and update
+/// its listing without answering the client's call at id 0 with the replay.
 #[test]
 fn a_server_that_coerces_ids_replies_without_leaking_replayed_answers() {
     let fixture = Fixture::new("int32");
@@ -414,30 +481,18 @@ fn a_server_that_coerces_ids_replies_without_leaking_replayed_answers() {
     }
     assert_eq!(call["result"]["content"][0]["text"], "pong", "{call}");
 
-    let ids = [
-        json!(-2),
-        json!(-3),
-        json!(-4),
-        json!(4294967294_u64),
-        json!("7"),
-        json!(7),
-        json!("zerocode-first-call-initialize"),
-    ];
+    // The stand-in's three requests have all answered before the call at 0.
+    // Their ids now belong to the client if it uses them.
+    let ids = [json!(-2), json!(-3), json!(-4), json!(7)];
     for id in &ids {
         session.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "ping"}}));
     }
     for id in &ids {
         assert_eq!(session.answer(id)["result"]["content"][0]["text"], "pong");
     }
-    let cancelled = json!("cancel-this-call");
-    session.send(&json!({"jsonrpc": "2.0", "id": cancelled, "method": "tools/call", "params": {"name": "wait"}}));
-    session.send(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": cancelled}}));
-    assert_eq!(session.answer(&cancelled)["error"]["message"], "cancelled");
-
     let expected_ids: Vec<_> = [json!(1), json!(2), json!(3), json!(0)]
         .into_iter()
         .chain(ids)
-        .chain([cancelled])
         .collect();
     let received_ids: Vec<_> = session
         .answers()
