@@ -4952,7 +4952,6 @@ function paintBrowserView(tab) {
   badge.hidden = held.length === 0;
   badge.textContent = String(held.length);
   const notes = host.querySelector(".browser-notes");
-  const wasHidden = notes.hidden;
   notes.hidden = held.length === 0;
   notes.querySelector(".browser-notes-count").textContent = t(
     "browser.annotate.count",
@@ -4962,7 +4961,6 @@ function paintBrowserView(tab) {
   // 무장한 판의 배너: 모드가 제 문장을 말하고, 방금의 C 복사는 잠깐 제
   // 확인을 말한다 (1-g18).
   const grabbar = host.querySelector(".browser-grabbar");
-  const grabbarWas = grabbar.hidden;
   const armedHere = browserGrab !== null && browserGrab.label === tab.label;
   grabbar.hidden = !armedHere;
   if (armedHere) {
@@ -5014,7 +5012,6 @@ function paintBrowserView(tab) {
   paintBrowserWorkspace(host, tab);
   // 작업 탭이 손을 넘기면 도구줄의 단추가 서고 눕는다 — 한 줄에 드는 폭이 달라진다.
   syncBrowserToolbarRows(host);
-  if (wasHidden !== notes.hidden || grabbarWas !== grabbar.hidden) syncBrowserPanes();
   syncBrowserPanes();
 }
 
