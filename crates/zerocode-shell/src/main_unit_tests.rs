@@ -148,6 +148,14 @@ fn block_after_css<'a>(source: &'a str, opens: &str) -> &'a str {
 /// below names something declared at the top level of `ui/shell.js`, so
 /// the first line that is exactly `}` or `});` ends it.
 pub(crate) fn block_after<'a>(source: &'a str, opens: &str) -> &'a str {
+    // A language other than Korean left `CATALOG` for a file of its own, one
+    // `registerI18nCatalog` call each: `  en: {` now names that call's table,
+    // as `block_after` in the source contracts' support.rs reads it.
+    if let Some(language) = opens.trim().strip_suffix(": {")
+        && let Some(catalog) = crate::ui_source::registered_catalog(source, language)
+    {
+        return catalog;
+    }
     let start = source
         .find(opens)
         .unwrap_or_else(|| panic!("`{opens}` is gone from ui/shell.js"));
