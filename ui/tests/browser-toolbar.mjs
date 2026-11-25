@@ -140,6 +140,38 @@ export async function testBrowserToolbar(browser, origin, ok) {
     } finally { await page.close(); }
   }
   {
+    // The strips under the toolbar keep their hands inside a narrow pane too. The form-fill strip's own rule says
+    // its acts fold under its words at a narrow pane; they stood in one line instead, and at 320px the second
+    // address and 「닫기」 were outside the pane (measured 2026-11-25).
+    const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: true });
+    try {
+      const acts = await page.evaluate(() => {
+        const tab = tabs.find((one) => one.label === "browser-930");
+        tab.fillOffer = newFillOffer(tab.url, {
+          addresses: [{ id: "a1", label: "가짜 주소 하나 · 서울시 중구 세종대로 110" },
+            { id: "a2", label: "가짜 주소 둘 · 성남시 분당구 판교역로 235" }],
+          entries: [{ name: "email", label: "dev@example.com" }],
+        });
+        paintBrowserView(tab);
+        const host = groupOf(tab.pane).browserView;
+        const pane = host.getBoundingClientRect();
+        return {
+          pane: Math.round(pane.width),
+          acts: [...host.querySelectorAll(".browser-fillbar-act")].map((node) => {
+            const box = node.getBoundingClientRect();
+            const under = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+            return { words: node.textContent, left: Math.round(box.left - pane.left), right: Math.round(box.right - pane.left),
+              reachable: under !== null && (under === node || node.contains(under)) };
+          }),
+        };
+      });
+      const lost = acts.acts.filter((one) => one.left < 0 || one.right > acts.pane || !one.reachable).map((one) => one.words);
+      ok("the form-fill strip folds its acts inside a 320px pane: both addresses, the entry and 「닫기」 can be pressed",
+        acts.pane < 360 && acts.acts.length === 4 && lost.length === 0, JSON.stringify({ lost, ...acts }));
+      ok("the folded form-fill strip raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  {
     const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: false });
     try {
       const wide = await toolbar(page);
