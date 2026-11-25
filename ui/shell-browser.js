@@ -1099,6 +1099,7 @@ function forgetAgentBrowserWorkspacesKept() {
 
 function watchBrowserWorkspace(tab, { beside = false } = {}) {
   if (!browserWorkspaceLive(tab) || !tab.agentWorkspace) return;
+  const shownBefore = browserShowsBeside();
   if (beside && !browserWorkspaceOnScreen(tab)) {
     const source = currentTab();
     const priorPane = tab.pane;
@@ -1115,7 +1116,7 @@ function watchBrowserWorkspace(tab, { beside = false } = {}) {
   // could not stand (t-66513).
   tab.workspaceLiveError = false;
   setActiveTab(tab.id);
-  if (beside && stageGroups().length > 1) foldAsideForBrowserBeside();
+  if (beside && stageGroups().length > 1) foldAsideForBrowserBeside(shownBefore);
   paintBrowserWorkspaceTab(tab);
   if (!tab.workspace && !tab.workspaceReading) void refreshBrowserWorkspace(tab);
 }
@@ -6612,8 +6613,17 @@ function standBesideWithRoom(group) {
  * 처음부터 건드리지 않는다. 접힌 동안에는 그 열의 검사 폴러도 쉰다(`setPanelFolded` → `syncChecksPoller`). */
 let browserFoldedAside = false;
 
-function foldAsideForBrowserBeside() {
-  if (browserFoldedAside || folded.aside || rails.aside) return;
+/* 옆에 보이는 브라우저가 있는가: 무대가 둘 이상으로 나뉘어 있고, 이 워크트리의 브라우저가 제 그룹의 앞 탭이다. */
+function browserShowsBeside() {
+  return stageGroups().length > 1 && tabs.some((tab) => tab.kind === "browser"
+    && tab.worktree === activeWorktreePath && activeTabIn(tab.pane)?.id === tab.id);
+}
+
+/* `shownBefore`는 이 브라우저가 서기 전에 물은 `browserShowsBeside()`다. 이미 하나가 옆에 보이던 자리에 또 하나가
+ * 오는 것은 「도착」이 아니다 — 열은 그때의 모습 그대로 둔다. 접어 둔 것이면 접힌 채고, 사람이 그 사이 다시 편
+ * 것이면 편 채다: 사람의 다시 폄은 다음 배치가 표시를 내리므로, 여기서 다시 접으면 방금 편 일곱 탭을 덮는다. */
+function foldAsideForBrowserBeside(shownBefore) {
+  if (shownBefore || browserFoldedAside || folded.aside || rails.aside) return;
   browserFoldedAside = true;
   setPanelFolded("aside", true);
 }
@@ -6627,9 +6637,7 @@ function releaseAsideWithoutBrowserBeside() {
     browserFoldedAside = false;
     return;
   }
-  const beside = stageGroups().length > 1 && tabs.some((tab) => tab.kind === "browser"
-    && tab.worktree === activeWorktreePath && activeTabIn(tab.pane)?.id === tab.id);
-  if (beside) return;
+  if (browserShowsBeside()) return;
   browserFoldedAside = false;
   setPanelFolded("aside", false);
 }
@@ -6805,6 +6813,7 @@ async function openBrowserTab(
   // pane's group the way an agent's own open does (a right neighbour is reused,
   // only a rightmost group is divided), and otherwise the page is a tab of that
   // pane's own group — the caller's answer for a pane too narrow to divide.
+  const shownBefore = browserShowsBeside();
   const splitSeat = makerSeat !== null && makerSeat.split ? standBeside(makerSeat.group) : null;
   const stood = makerSeat !== null
     ? (splitSeat ?? makerSeat.group)
@@ -6837,7 +6846,7 @@ async function openBrowserTab(
   }
   // 옆 그룹의 앞 탭으로 선 브라우저만 오른쪽 열을 접는다 — 이웃 그룹의 뒤 탭으로 합류한 것은 보이지 않는다.
   if (stood !== null && (makerSeat === null || splitSeat !== null) && activeTabIn(stood)?.id === "browser:" + label) {
-    foldAsideForBrowserBeside();
+    foldAsideForBrowserBeside(shownBefore);
   }
   if (closeError && agentOpen?.closeRevision !== closeRevision) {
     void closeAgentBrowserTab({ label, revision: agentOpen.closeRevision });
