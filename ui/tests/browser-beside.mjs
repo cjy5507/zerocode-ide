@@ -340,13 +340,15 @@ export async function testBrowserBeside(browser, origin, ok) {
   // The Jira card's 「ZeroCode 브라우저에서 열기」 stands its page where the + palette last stood a browser. A split
   // chosen there is the person's hand here too, so a narrow group is divided for it as the palette divides it; the
   // room rule had made it a tab of the group in front (Codex review t-130084, 2026-11-25). A chosen single tab is
-  // a tab, as before.
-  for (const chosen of ["split", "single"]) {
+  // a tab, as before. And where nothing was ever chosen, the palette's default is not the person's word: the door
+  // is then one nobody asked to split for, and a narrow group stays whole.
+  for (const chosen of ["split", "single", null]) {
     const { page, faults } = await standWindow(browser, origin, DEFAULT_WINDOW);
     try {
       const before = await seen(page);
       await page.evaluate((chosen) => {
-        rememberBrowserPlacement(chosen);
+        if (chosen === null) localStorage.removeItem(BROWSER_PLACEMENT_KEY);
+        else rememberBrowserPlacement(chosen);
         jiraItem = { url: "https://example.com/browse/ACME-1" };
         document.getElementById("jira-item-open-app").click();
       }, chosen);
@@ -359,12 +361,13 @@ export async function testBrowserBeside(browser, origin, ok) {
             && opened.lastPane !== before.terminalPane && opened.lastWidth * 2 <= opened.stage,
           JSON.stringify({ rule: BESIDE_MIN, before, opened }));
       } else {
-        ok("and a single tab chosen there is a tab of the group in front, the whole group wide",
-          opened.browsers === 1 && opened.groups === before.groups && opened.lastPane === before.terminalPane
-            && wholeStage(opened.lastWidth, before.stage),
-          JSON.stringify({ before, opened }));
+        ok(chosen === "single" ? "and a single tab chosen there is a tab of the group in front, the whole group wide"
+          : "and with no choice ever made there, the door is one nobody asked to split for: a narrow group stays whole",
+          before.stage < BESIDE_MIN && opened.browsers === 1 && opened.groups === before.groups
+            && opened.lastPane === before.terminalPane && wholeStage(opened.lastWidth, before.stage),
+          JSON.stringify({ rule: BESIDE_MIN, before, opened }));
       }
-      ok(`the Jira card's door (${chosen}) raises no page errors`, faults.length === 0, faults.join("\n"));
+      ok(`the Jira card's door (${chosen ?? "no choice"}) raises no page errors`, faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }
