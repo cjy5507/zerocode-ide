@@ -1484,8 +1484,8 @@
         <section id="flow-console" class="flow-console" hidden aria-labelledby="flow-console-title">
           <header><h2 id="flow-console-title" data-i18n="flow.live.title">Flow 실행</h2><select id="flow-console-mirror" aria-label="브라우저 · 기기 화면" data-i18n-aria="flow.live.mirror"></select><button id="flow-console-close" class="btn" type="button" data-i18n="app.close">닫기</button></header>
           <div class="flow-console-body"><div class="flow-console-stream"><p id="flow-console-status"></p><div id="flow-console-steps" role="log" aria-live="polite"></div><button id="flow-console-report" class="btn" type="button" hidden></button></div>
-          <aside><h3 id="flow-console-queue-title" data-i18n="flow.live.queue">큐 · 지난 실행</h3><div id="flow-console-queue"></div></aside></div>
-          <form id="flow-goal-form"><input id="flow-goal" class="settings-input" autocomplete="off"><button id="flow-goal-submit" class="btn" type="submit" data-i18n="flow.run">지금 걷기</button></form>
+          <aside><h3 data-i18n="flow.live.queue">큐 · 지난 실행</h3><div id="flow-console-queue"></div></aside></div>
+          <form id="flow-goal-form"><input id="flow-goal" class="settings-input" autocomplete="off"><button class="btn" type="submit" data-i18n="flow.run">지금 걷기</button></form>
         </section>
         <!-- The first leaf of the stage's split tree. Orca's centre is a
              split tree and every leaf carries its own tab strip
@@ -1584,8 +1584,8 @@
              protocol, a second doorway to every file on the disk. -->
         <section class="file-view" id="image-view" hidden data-i18n-aria="file.image" aria-label="이미지 보기">
           <header class="file-view-head">
-            <span class="file-view-path" id="image-view-path"></span>
-            <span class="file-view-note" id="image-view-note"></span>
+            <span class="file-view-path"></span>
+            <span class="file-view-note"></span>
           </header>
           <div class="image-body">
             <img class="image-shown" id="image-shown" alt="" />
@@ -1645,7 +1645,7 @@
              `px-3 py-2 text-xs` label. -->
         <section class="file-view" id="imagediff-view" hidden data-i18n-aria="file.diff" aria-label="변경 내용">
           <header class="file-view-head">
-            <span class="file-view-path" id="imagediff-view-path"></span>
+            <span class="file-view-path"></span>
           </header>
           <div class="imgdiff-body" id="imgdiff-body"></div>
         </section>
@@ -1675,7 +1675,7 @@
             </header>
             <label class="changes-tree-search">
               <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
-              <input id="changes-tree-query" type="search" autocomplete="off" spellcheck="false"
+              <input type="search" autocomplete="off" spellcheck="false"
                      data-i18n-aria="changes.tree.filter" aria-label="Diff 파일 필터"
                      data-i18n-placeholder="changes.tree.filterPlaceholder" placeholder="파일 필터..." />
             </label>
@@ -2192,7 +2192,7 @@
                  p-dd51a186ac0258e2 v2): Flow 목록은 설정 › 컴퓨터 사용에서 이리로 왔다.
                  쪽은 `setAutoPage`가 바꾸고 `paintAutoPage`가 칠한다. -->
             <div class="auto-detail-tabs auto-pages" role="tablist" data-i18n-aria="auto.pages" aria-label="자동화 쪽">
-              <button class="is-active" id="auto-page-tab-schedules" role="tab" aria-selected="true" type="button" data-auto-page="schedules">
+              <button class="is-active" role="tab" aria-selected="true" type="button" data-auto-page="schedules">
                 <span data-i18n="auto.pageSchedules">예약</span> <span class="auto-page-count" id="auto-page-count-schedules"></span>
               </button>
               <button id="auto-page-tab-flows" role="tab" aria-selected="false" type="button" data-auto-page="flows">
@@ -3886,7 +3886,7 @@
             <span class="fix-split" id="pr-fix-split" hidden>
               <button class="btn pr-fix" id="pr-fix" type="button">
                 <svg class="icon" aria-hidden="true"><use href="#i-wrench"></use></svg>
-                <span id="pr-fix-label" data-i18n="checks.fix">실패한 검사 고치기</span>
+                <span data-i18n="checks.fix">실패한 검사 고치기</span>
               </button>
               <button class="btn fix-pick" id="pr-fix-pick" type="button" data-i18n-aria="composer.pick" aria-label="에이전트와 명령 고르기">
                 <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
@@ -4248,8 +4248,7 @@
             </div>
             <div class="settings-rail-group-box" data-group="security" id="settings-security-group">
               <p class="settings-rail-group" data-i18n="settings.rail.security">개인정보 보호 및 보안</p>
-              <button class="settings-rail-item" type="button" data-pane="macos-permissions"
-                      id="developer-permissions-nav">
+              <button class="settings-rail-item" type="button" data-pane="macos-permissions">
                 <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
                 <span data-i18n="settings.permissions.title">macOS 권한</span>
               </button>
@@ -4361,9 +4360,9 @@
           </div>
           <div class="segment agent-remote-control-choice" id="agent-remote-control-choice" role="group"
                data-i18n-aria="settings.agents.remoteControl" aria-label="폰에서 이어 쓰기 · Claude">
-            <button class="segment-btn" id="agent-remote-control-off" type="button" data-mode="off"
+            <button class="segment-btn" type="button" data-mode="off"
                     aria-pressed="false" data-i18n="settings.agents.remoteControlOff">끔</button>
-            <button class="segment-btn" id="agent-remote-control-mine" type="button" data-mode="mine"
+            <button class="segment-btn" type="button" data-mode="mine"
                     aria-pressed="false" data-i18n="settings.agents.remoteControlMine">내가 연 판</button>
           </div>
         </div>
@@ -4558,7 +4557,7 @@
              the calls it makes of an agent's CLI on the person's behalf as one
              person's. The budget is set here and nowhere else, and a blank is none:
              nobody is stopped on a number nobody gave. -->
-        <div class="settings-card" id="harness-settings">
+        <div class="settings-card">
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="settings.harness.title">토큰 낭비 막기</h3>
             <p class="settings-subhead-desc" data-i18n="settings.harness.about">
@@ -5029,7 +5028,7 @@
           <div class="settings-subhead settings-subhead--acts">
             <div>
               <h2 class="settings-section-title" id="connection-form-title" data-i18n="settings.connections.add">연결 추가</h2>
-              <p class="settings-subhead-desc" id="connection-registration-note" data-i18n="settings.connections.registrationHint">연결을 등록해도 지금 쓰는 모델은 바뀌지 않습니다. 등록한 뒤 위의 두 모델에서 고르세요.</p>
+              <p class="settings-subhead-desc" data-i18n="settings.connections.registrationHint">연결을 등록해도 지금 쓰는 모델은 바뀌지 않습니다. 등록한 뒤 위의 두 모델에서 고르세요.</p>
             </div>
             <span class="settings-state" id="router-card-state" data-state="unchecked"
                   role="status" aria-live="polite"></span>
@@ -5837,7 +5836,7 @@
             <!-- 산문 절반의 lint: 스킬의 주간 리뷰를 창 자동화로 돌린다(t-77377).
                  매주 일요일 06:00 볼트에서 zo 턴을 열고 끝나면 판을 닫으며,
                  영수증 줄이 그 일의 다음·마지막 실행을 말한다. 옵트인이다. -->
-            <label class="settings-check" id="second-brain-weekly-review-field">
+            <label class="settings-check">
               <input type="checkbox" id="second-brain-weekly-review" data-person-only />
               <span class="settings-label" data-i18n="settings.secondBrain.weeklyReview">주간 리뷰를 창 자동화로 실행</span>
             </label>
@@ -5848,7 +5847,7 @@
             <!-- raw 받은편지함(t-43992): 에이전트가 이 창의 브라우저로 통째로 읽은 바깥
                  웹 페이지를 볼트의 raw/에 새 파일로 떨어뜨린다. 「raw 취합」 턴이 그것을
                  먹는다. 옵트인이다. -->
-            <label class="settings-check" id="second-brain-raw-capture-field">
+            <label class="settings-check">
               <input type="checkbox" id="second-brain-raw-capture" />
               <span class="settings-label" data-i18n="settings.secondBrain.rawCapture">에이전트가 읽은 웹 페이지를 raw/에 모으기</span>
             </label>
@@ -6847,7 +6846,7 @@
             </span>
           </span>
         </label>
-        <p class="settings-hint" id="term-look-note" data-i18n="settings.terminal.scrollbackHint">
+        <p class="settings-hint" data-i18n="settings.terminal.scrollbackHint">
           스크롤백을 줄이면 가장 오래된 줄부터 버립니다.
         </p>
         </div>
@@ -7284,7 +7283,7 @@
 
         <!-- A real phone driven from inside (t-90894): the first use asks on a card,
              so consent is only turned off here. -->
-        <div class="settings-card" id="real-phone-card">
+        <div class="settings-card">
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="emulator.realPhone.title">진짜 폰 조작</h3>
             <p class="settings-subhead-desc" data-i18n="emulator.realPhone.about">
@@ -8124,7 +8123,7 @@
               <input type="checkbox" id="show-source-linear" />
               <span class="settings-label">Linear</span>
             </label>
-            <span class="settings-state" id="task-source-linear-status" data-state="available"
+            <span class="settings-state" data-state="available"
                   data-i18n="settings.sources.available">표시 가능</span>
           </div>
           <label class="settings-field settings-field--separated" for="task-default-source">
@@ -8267,7 +8266,7 @@
                그 id로 스크롤해 온다(`:199`). 우리는 이미 도구모음에서 쿠키를
                가져올 수 있었지만, 브라우저를 한 번도 안 연 사람에게는 그
                기능이 없는 것과 같았다. -->
-          <div class="settings-subhead settings-subhead--acts" id="browser-session-cookies">
+          <div class="settings-subhead settings-subhead--acts">
             <div>
               <h3 class="settings-subhead-title" data-i18n="settings.browser.profiles">브라우저 프로필</h3>
               <p class="settings-subhead-desc" data-i18n="settings.browser.profilesHint">
@@ -8760,7 +8759,7 @@
 
         <div class="qc-body-wrap">
           <div class="qc-segment-wrap">
-            <div class="segment qc-segment" id="qc-type-segment" role="tablist" aria-label="명령 유형">
+            <div class="segment qc-segment" role="tablist" aria-label="명령 유형">
               <button class="segment-btn qc-type-btn is-active" id="qc-type-term" type="button" role="tab" aria-selected="true" data-type="term">
                 <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
                 <span data-i18n="quick.typeTerminal">터미널 명령</span>
@@ -8785,7 +8784,7 @@
 
           <div class="qc-field">
             <div class="qc-field-head">
-              <label class="settings-label qc-label-text" for="qc-body" id="qc-body-label" data-i18n="quick.body">내용</label>
+              <label class="settings-label qc-label-text" for="qc-body" data-i18n="quick.body">내용</label>
               <span class="qc-body-hint" id="qc-body-hint" data-i18n="quick.bodyHintTerminal">터미널에서 직접 실행할 셸 명령</span>
             </div>
             <div class="qc-editor-box">
@@ -9724,7 +9723,7 @@
                or browsed; a folder that is not there yet is made with the
                worktree (`git worktree add` makes the way). The value is for
                this create only; 「다음에도 이 위치 사용」 makes it the default. -->
-          <div class="wt-sect" id="wt-directory-sect">
+          <div class="wt-sect">
             <label class="wt-label" for="wt-directory" data-i18n="worktree.directory">저장 위치</label>
             <div class="wt-cell">
               <div class="wt-box">
@@ -10345,7 +10344,7 @@
         </header>
         <p class="perm-why" id="ext-suppress-body"></p>
         <p class="perm-why ext-back">
-          <span id="ext-suppress-back" data-i18n="external.suppressBack">나중에 프로젝트 메뉴에서 다시 켤 수 있습니다.</span>
+          <span data-i18n="external.suppressBack">나중에 프로젝트 메뉴에서 다시 켤 수 있습니다.</span>
           <button class="ext-link" id="ext-suppress-open" type="button" data-i18n="external.suppressOpen">외부 워크트리 설정 열기</button>
         </p>
         <div class="perm-actions">
@@ -10762,7 +10761,7 @@
              않도록). -->
         <div class="segment gh-item-tabs" id="gh-item-tabs" role="tablist" hidden>
           <button type="button" class="segment-btn is-active" role="tab" aria-selected="true"
-                  data-gh-tab="talk" id="gh-item-tab-talk" data-i18n="task.github.tabTalk">대화</button>
+                  data-gh-tab="talk" data-i18n="task.github.tabTalk">대화</button>
           <button type="button" class="segment-btn" role="tab" aria-selected="false"
                   data-gh-tab="files" id="gh-item-tab-files">파일</button>
           <button type="button" class="segment-btn" role="tab" aria-selected="false"
@@ -10836,7 +10835,7 @@
           </span>
         </header>
         <p class="detail-card-meta" id="linear-item-meta"></p>
-        <div class="detail-card-scroll" id="linear-item-scroll" role="region" aria-labelledby="linear-item-title" tabindex="0">
+        <div class="detail-card-scroll" role="region" aria-labelledby="linear-item-title" tabindex="0">
           <div class="task-loading detail-card-loading" id="linear-item-loading" hidden>
             <div class="task-skeleton-row"></div><div class="task-skeleton-row"></div>
           </div>
@@ -10845,7 +10844,7 @@
           <div class="detail-card-body" id="linear-item-body"></div>
           <h3 class="detail-card-comments-head" id="linear-item-attachments-head" hidden data-i18n="task.linear.attachments">첨부</h3>
           <div class="detail-card-attachments" id="linear-item-attachments"></div>
-          <h3 class="detail-card-comments-head" id="linear-item-comments-head" data-i18n="task.linear.comments">댓글</h3>
+          <h3 class="detail-card-comments-head" data-i18n="task.linear.comments">댓글</h3>
           <div class="detail-card-comments" id="linear-item-comments"></div>
         </div>
         <div class="detail-card-editor">
@@ -11017,7 +11016,6 @@
             href="https://id.atlassian.com/manage-profile/security/api-tokens"
             target="_blank"
             rel="noopener noreferrer"
-            id="jira-token-link"
             data-i18n="task.jira.tokenLink"
             >Atlassian 계정 설정</a
           ><span data-i18n="task.jira.helpCloudTail">에서 만듭니다.</span>
@@ -11092,7 +11090,7 @@
           <input class="settings-input" id="linear-api-key" type="password" autocomplete="off" spellcheck="false" />
         </label>
         <p class="settings-hint">
-          <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer" id="linear-api-key-link"
+          <a href="https://linear.app/settings/api" target="_blank" rel="noopener noreferrer"
              data-i18n="task.linear.apiKeyLink">Linear API 설정에서 키 만들기</a>
         </p>
         <p class="task-error" id="linear-connect-error" hidden></p>
