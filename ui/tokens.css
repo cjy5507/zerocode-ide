@@ -516,6 +516,7 @@
    * 22px where `backdrop-blur-2xl` is **40**. Under 40px the room behind the
    * glass stops being legible shapes and becomes colour, which is the whole
    * difference between a translucent panel and a frosted one. */
+  --glass-veil-raised: rgb(10 10 10 / 97%);
   /* No `saturate()`. It was doing real work under a 22px blur, and it is the
    * one part of this material Orca does not have — the utility is not in the
    * bundle at all. At 40px there is little chroma left to rescue, and keeping
@@ -3308,6 +3309,9 @@
    * and the translucent panel are the same colour — turning the blur off
    * changes the depth, never the palette. */
   --glass-veil: rgb(255 255 255 / 62%);
+  /* Orca's `bg-background/96` — the light half of the same declaration whose
+   * dark half is `rgba(23,23,23,0.96)`. */
+  --glass-veil-raised: rgb(255 255 255 / 96%);
   --glass-blur: blur(40px);
   /* `border-black/14`. Ink rather than white here for the obvious reason: on
    * a white floor the boundary of a floating surface can only be drawn by
