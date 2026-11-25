@@ -88,11 +88,12 @@ const REMEMBERED: [&str; 6] = [
     "resources/list",
     "resources/templates/list",
 ];
-/// The ids of the requests the stand-in sends of its own; never a client's,
-/// whose ids are numbers.
-const OWN_INITIALIZE: &str = "zerocode-first-call-initialize";
-const OWN_RELIST: &str = "zerocode-first-call-relist";
-const OWN_LOG_LEVEL: &str = "zerocode-first-call-log-level";
+/// Use signed 32-bit ids for servers that read every id as an int32.
+/// The stand-in uses negative ids for its own requests and positive ids
+/// for requests it forwards, regardless of the client's original id.
+const OWN_INITIALIZE: i32 = -2;
+const OWN_RELIST: i32 = -3;
+const OWN_LOG_LEVEL: i32 = -4;
 /// How long a server is given to go once told to, before the next signal.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
@@ -285,16 +286,6 @@ fn window_data_dir() -> Option<PathBuf> {
     Some(root.join(crate::app::IDENTIFIER))
 }
 
-/// The key two ids are compared by.
-fn id_key(id: &Value) -> String {
-    id.to_string()
-}
-
-fn is_own(id: &Value) -> bool {
-    id.as_str()
-        .is_some_and(|id| id.starts_with("zerocode-first-call-"))
-}
-
 /// The answer a request the server could not be handed gets.
 #[must_use]
 pub fn refusal(id: &Value, server: &str, why: &str) -> Value {
@@ -329,10 +320,12 @@ struct State {
     /// Which start the running server is; a stopped one's late words are not
     /// passed on.
     generation: u64,
-    /// The listing requests passed to the server, by id, and their methods.
-    learning: HashMap<String, String>,
-    /// The client's requests passed to the server and not answered yet.
-    pending: HashMap<String, Value>,
+    /// The last positive id issued to a client request for this server process.
+    last_client_id: i32,
+    /// The listing requests passed to the server, by server-side id.
+    learning: HashMap<i32, String>,
+    /// The client's original ids, keyed by the ids used with the server.
+    pending: HashMap<i32, Value>,
     /// Whether the session asked the server anything but what it offers.
     used: bool,
     /// A `logging/setLevel` answered while the server was not running, sent
@@ -400,6 +393,7 @@ impl StandIn {
                 client_initialize: None,
                 running: None,
                 generation: 0,
+                last_client_id: 0,
                 learning: HashMap::new(),
                 pending: HashMap::new(),
                 used: false,
@@ -440,7 +434,7 @@ impl StandIn {
 
     /// One line from the client; `false` once the client cannot be written to.
     fn from_client(self: &Arc<Self>, line: &str) -> bool {
-        let Ok(message) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut message) = serde_json::from_str::<Value>(line) else {
             // Not a message: the server's to make sense of, while it runs.
             self.to_server_text(line);
             return true;
@@ -451,7 +445,22 @@ impl StandIn {
             .map(str::to_owned);
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         match (method, id) {
-            (Some(method), Some(id)) => self.request(&method, id, &message),
+            (Some(method), Some(id)) => self.request(&method, id, message),
+            (Some(method), None) if method == "notifications/cancelled" => {
+                // Cancellation refers to a client request already forwarded
+                // to this server. A finished request has no id to cancel.
+                let wire_id = message.pointer("/params/requestId").and_then(|id| {
+                    self.lock()
+                        .pending
+                        .iter()
+                        .find_map(|(&wire_id, client_id)| (client_id == id).then_some(wire_id))
+                });
+                if let Some(wire_id) = wire_id {
+                    message["params"]["requestId"] = wire_id.into();
+                    self.to_server(&message);
+                }
+                true
+            }
             // A notification, or the client's answer to a request of the
             // server's: passed on while the server runs. One that comes while
             // it does not concerns nothing it holds — and
@@ -464,7 +473,7 @@ impl StandIn {
         }
     }
 
-    fn request(self: &Arc<Self>, method: &str, id: Value, message: &Value) -> bool {
+    fn request(self: &Arc<Self>, method: &str, id: Value, mut message: Value) -> bool {
         let mut state = self.lock();
         if method == "initialize" {
             let asked = message
@@ -500,18 +509,25 @@ impl StandIn {
         }
         let start = state.running.is_none();
         let replay = start && method != "initialize" && state.client_initialize.is_some();
+        if start {
+            state.last_client_id = 0;
+        }
+        let Some(wire_id) = state.last_client_id.checked_add(1) else {
+            drop(state);
+            return self.to_client(&refusal(&id, &self.name, "ran out of request ids"));
+        };
+        state.last_client_id = wire_id;
         // The request is out from here, before any start: a server that is
         // slow to answer its start is not taken for one left unused, and one
         // that ends meanwhile answers it.
-        let key = id_key(&id);
         if REMEMBERED.contains(&method) {
             if !paged {
-                state.learning.insert(key.clone(), method.to_string());
+                state.learning.insert(wire_id, method.to_string());
             }
         } else if method != "ping" {
             state.used = true;
         }
-        state.pending.insert(key.clone(), id.clone());
+        state.pending.insert(wire_id, id.clone());
         drop(state);
         if start && let Err(why) = self.start(replay) {
             if let Some(listings) = &self.listings {
@@ -519,19 +535,20 @@ impl StandIn {
             }
             let mut state = self.lock();
             state.answering = false;
-            let still_waiting = state.pending.remove(&key).is_some();
-            state.learning.remove(&key);
+            let still_waiting = state.pending.remove(&wire_id).is_some();
+            state.learning.remove(&wire_id);
             drop(state);
             // The server's end may have answered it already.
             return !still_waiting || self.to_client(&refusal(&id, &self.name, &why));
         }
+        message["id"] = wire_id.into();
         let input = self.lock().input();
-        if input.is_some_and(|input| write_to(&input, message)) {
+        if input.is_some_and(|input| write_to(&input, &message)) {
             return true;
         }
         let mut state = self.lock();
-        let still_waiting = state.pending.remove(&key).is_some();
-        state.learning.remove(&key);
+        let still_waiting = state.pending.remove(&wire_id).is_some();
+        state.learning.remove(&wire_id);
         drop(state);
         // The server's end may have answered it already.
         !still_waiting
@@ -641,7 +658,7 @@ impl StandIn {
             let Ok(line) = line else {
                 break;
             };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             let mut state = self.lock();
@@ -649,31 +666,41 @@ impl StandIn {
                 return;
             }
             if message.get("method").is_none()
-                && let Some(id) = message.get("id")
+                && let Some(id) = message.get("id").filter(|id| !id.is_null())
             {
-                if is_own(id) {
-                    match id.as_str() {
-                        Some(OWN_INITIALIZE) => {
-                            if let Some(told) = state.handshake.take() {
-                                let _ = told.send(message);
-                            }
+                let Some(wire_id) = id.as_i64().and_then(|id| i32::try_from(id).ok()) else {
+                    continue;
+                };
+                match wire_id {
+                    OWN_INITIALIZE => {
+                        if let Some(told) = state.handshake.take() {
+                            let _ = told.send(message);
                         }
-                        Some(OWN_RELIST) => {
-                            if message.get("result").is_some()
-                                && state.listing.answers.get("tools/list") != Some(&kept(&message))
-                            {
-                                state.learn("tools/list", &message);
-                                drop(state);
-                                self.save();
-                            }
-                        }
-                        _ => {}
+                        continue;
                     }
+                    OWN_RELIST => {
+                        if message.get("result").is_some()
+                            && state.listing.answers.get("tools/list") != Some(&kept(&message))
+                        {
+                            state.learn("tools/list", &message);
+                            drop(state);
+                            self.save();
+                        }
+                        continue;
+                    }
+                    OWN_LOG_LEVEL => continue,
+                    _ => {}
+                }
+                // The call that triggered replay is pending, but we have not
+                // sent it to the server until the replayed initialize answers.
+                if state.handshake.is_some() {
                     continue;
                 }
-                let key = id_key(id);
-                state.pending.remove(&key);
-                if let Some(method) = state.learning.remove(&key) {
+                let Some(client_id) = state.pending.remove(&wire_id) else {
+                    continue;
+                };
+                message["id"] = client_id;
+                if let Some(method) = state.learning.remove(&wire_id) {
                     state.learn(&method, &message);
                     drop(state);
                     self.save();
