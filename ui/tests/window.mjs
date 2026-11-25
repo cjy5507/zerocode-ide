@@ -18012,6 +18012,51 @@ ok(
   JSON.stringify(diffWrap),
 );
 
+/* A long line keeps both documents in the view, half and half (2026-11-25
+ * audit, t-129273). Side by side is the window's default
+ * (`diff_side_by_side: true`), and at the window's default size the diff gets
+ * 650px. The merge view splits its own box in two (`flex-basis: 0` on each
+ * side), but that box stood in a grid column with no ceiling on its width, so
+ * the longest line widened the column and the working side slid past the
+ * diff's clipped edge — a 60-character line left 111px of it on screen, a
+ * 100-character line none. Each side scrolls its own long lines instead. */
+const longLine = await page.evaluate(async () => {
+  const held = diffSideBySide;
+  const long = '    let text = tokio::time::timeout(READ_TIMEOUT, tokio::fs::read_to_string(&path)).await?.context("reading the session file")?;';
+  window.__ANSWER__.file_diff = () => ({
+    lines: [
+      { kind: "ctx", old: "1", new: "1", text: "fn main() {" },
+      { kind: "add", old: null, new: "2", text: long },
+      { kind: "ctx", old: "2", new: "3", text: "}" },
+    ],
+    texts: { original: "fn main() {\n}\n", modified: `fn main() {\n${long}\n}\n`, version: "diff-long" },
+  });
+  setDiffSideBySide(true);
+  await openDiff("src/long.rs");
+  await new Promise((done) => setTimeout(done, 300));
+  const view = [...document.querySelectorAll(".file-view")]
+    .find((one) => one.querySelector(".diff-merge") && !one.hidden);
+  const frame = view.getBoundingClientRect();
+  const out = {
+    view: Math.round(frame.width),
+    sides: [...view.querySelectorAll(".cm-mergeViewEditor")].map((one) => {
+      const side = one.getBoundingClientRect();
+      return { left: Math.round(side.left - frame.left), width: Math.round(side.width) };
+    }),
+  };
+  delete window.__ANSWER__.file_diff;
+  closeTab(currentTab().id);
+  setDiffSideBySide(held);
+  return out;
+});
+ok(
+  "a side-by-side diff whose line is longer than the view keeps both documents inside the view, half and half",
+  longLine.sides.length === 2 &&
+    longLine.sides.every((one) => one.left + one.width <= longLine.view + 1 &&
+      Math.abs(one.width - longLine.view / 2) <= 2),
+  JSON.stringify(longLine),
+);
+
 /* The ceiling reaches the editor. A file Rust withheld arrives with no
  * documents at all, so there is nothing the toggle could mount — the card is
  * the whole answer and the control says so instead of vanishing. */
