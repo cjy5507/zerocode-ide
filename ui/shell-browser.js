@@ -1703,6 +1703,11 @@ function buildBrowserView() {
     button("browser-find", "search", { key: "browser.find", name: "페이지에서 찾기" }),
     button("browser-menu", "gear", { key: "browser.menu", name: "브라우저 메뉴" }),
   );
+  // ⚙ 는 메뉴를 여는 단추다: 그렇게 말해야 메뉴가 선 동안 「펼침」이 읽히고(`markMenuOpener`), Esc가 키보드를
+  // 이 단추로 돌려준다 — 말하지 않으면 초점이 워크트리 목록으로 간다.
+  const menu = bar.querySelector(".browser-menu");
+  menu.setAttribute("aria-haspopup", "menu");
+  menu.setAttribute("aria-expanded", "false");
   // 주석 수 뱃지 — Orca가 annotate 컨트롤 모서리에 다는 그 수. 뱃지 자체가
   // 보내기 문이다: 단추는 모드 토글이므로, 모인 것을 보내는 손은 따로 산다.
   const annotate = bar.querySelector(".browser-annotate");
@@ -1862,7 +1867,7 @@ function browserViewportWords(tab) {
 /* 뷰포트 크기를 고르는 메뉴(1-g19): 기본 자리와 Orca의 일곱 프리셋. ⚙ 메뉴의 한 줄이 연다 — 아홉 줄이 ⚙ 메뉴에
  * 늘 펼쳐져 있어 그 메뉴가 열여섯 줄이었다(2026-11-25). 에이전트가 건 맞춤 상자(`WxH`)는 줄이 없으므로 어느
  * 줄에도 표시가 서지 않는다. */
-function openBrowserViewportMenu(tab, box) {
+function openBrowserViewportMenu(tab, box, opener = null) {
   const wear = (viewport) => {
     if (!browserWorkspaceLive(tab) || !browserWorkspaceCanControl(tab)) return;
     tab.viewport = viewport;
@@ -1883,7 +1888,7 @@ function openBrowserViewportMenu(tab, box) {
       checked: tab.viewport === preset.id,
       run: () => wear(preset.id),
     })),
-  ]);
+  ], opener);
 }
 
 /* Give a host its hands, once per NODE — the clone a second leaf gets arrives
@@ -2029,7 +2034,9 @@ function wireBrowserHost(host) {
     if (!browserWorkspaceCanControl(tab)) return;
     const revision = tab.workspace?.revision;
     const active = activeTabId;
-    const box = event.currentTarget.getBoundingClientRect();
+    // 기다린 뒤에는 `currentTarget`이 비어 있다 — 메뉴를 띄운 단추를 미리 쥔다.
+    const opener = event.currentTarget;
+    const box = opener.getBoundingClientRect();
     // 목록은 문을 열 때마다 새로 읽는다 — 다른 창이 만든 프로필도 이 메뉴의
     // 것이다.
     await refreshBrowserProfiles();
@@ -2056,7 +2063,7 @@ function wireBrowserHost(host) {
       { separator: true },
       {
         label: browserViewportWords(tab),
-        run: () => openBrowserViewportMenu(tab, box),
+        run: () => openBrowserViewportMenu(tab, box, opener),
       },
       {
         label: t("browser.devtools", "개발자 도구"),
@@ -2088,7 +2095,7 @@ function wireBrowserHost(host) {
         },
       },
     ];
-    openSidebarMenu(box.left, box.bottom + 4, items);
+    openSidebarMenu(box.left, box.bottom + 4, items, opener);
   });
   // Annotate: the same crosshair with Orca's card at the end of it. The
   // BADGE is the send door — the button stays a mode toggle.
