@@ -15,24 +15,49 @@ use super::{LISTING_STANDS_FOR, Listing, Listings, StandIn, listing_key};
 /// holds, answers `pong` to a call, and ends without a word when the tool
 /// called is `die`. Beside its tools file, a `.slow` file makes it answer its
 /// start a second late, and a `.fails` file makes it answer `tools/list` with
-/// an error.
+/// an error. A `.int32` file makes it reply with signed 32-bit ids.
 const SERVER: &str = r#"#!/bin/sh
 log="$1"; tools="$2"
+waiting_id=
 echo "start" >> "$log"
 while IFS= read -r line; do
   method=$(printf '%s\n' "$line" | sed -nE 's/.*"method":"([^"]*)".*/\1/p')
-  id=$(printf '%s\n' "$line" | sed -nE 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
+  id=$(printf '%s\n' "$line" | sed -nE 's/.*"id":("[^"]*"|[^,}]+).*/\1/p')
   echo "heard $method" >> "$log"
+  if [ "$method" = notifications/cancelled ] && [ -n "$waiting_id" ]; then
+    request_id=$(printf '%s\n' "$line" | sed -nE 's/.*"requestId":("[^"]*"|[^,}]+).*/\1/p')
+    if [ "$request_id" = "$waiting_id" ]; then
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":"cancelled"}}\n' "$waiting_id"
+      waiting_id=
+    fi
+  fi
   [ -z "$id" ] && continue
+  if [ -f "$tools.int32" ]; then
+    id=$(awk -v id="$id" 'BEGIN {
+      if (id ~ /^"/) {
+        gsub(/^"|"$/, "", id)
+        if (id !~ /^-?[0-9]+$/) id = 0
+      } else if (id !~ /^-?[0-9]+$/) {
+        id = -1
+      }
+      n = id % 4294967296
+      if (n > 2147483647) n -= 4294967296
+      if (n < -2147483648) n += 4294967296
+      printf "%.0f", n + 0
+    }')
+  fi
   case "$method" in
     initialize) [ -f "$tools.slow" ] && sleep 1; printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"},"instructions":"FIXTURE-INSTRUCTIONS"}}\n' "$id" ;;
     tools/list)
       if [ -f "$tools.fails" ]; then printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"backend unavailable"}}\n' "$id"
       else printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":%s}}\n' "$id" "$(cat "$tools")"; fi ;;
     tools/call)
-      case "$line" in *'"name":"die"'*) echo "died" >> "$log"; exit 0 ;; esac
+      case "$line" in
+        *'"name":"die"'*) echo "died" >> "$log"; exit 0 ;;
+        *'"name":"wait"'*) waiting_id="$id"; continue ;;
+      esac
       printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong"}]}}\n' "$id" ;;
-    ping) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+    ping|logging/setLevel) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
     *) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"no such method"}}\n' "$id" ;;
   esac
 done
@@ -127,6 +152,7 @@ impl Fixture {
         let running = Arc::clone(&stand_in);
         let thread = std::thread::spawn(move || running.run(BufReader::new(reader)));
         Session {
+            stand_in,
             input: Some(writer),
             out,
             thread: Some(thread),
@@ -154,6 +180,7 @@ impl Write for Shared {
 }
 
 struct Session {
+    stand_in: Arc<StandIn>,
     input: Option<std::io::PipeWriter>,
     out: Arc<Mutex<Vec<u8>>>,
     thread: Option<std::thread::JoinHandle<i32>>,
@@ -167,7 +194,7 @@ impl Session {
 
     fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-        self.answer(id)
+        self.answer(&json!(id))
     }
 
     fn answers(&self) -> Vec<Value> {
@@ -179,17 +206,20 @@ impl Session {
     }
 
     /// The answer to `id`, waited for.
-    fn answer(&self, id: u64) -> Value {
+    fn answer(&self, id: &Value) -> Value {
         let until = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Some(found) = self.answers().into_iter().find(|answer| answer["id"] == id) {
+            if let Some(found) = self
+                .answers()
+                .into_iter()
+                .find(|answer| &answer["id"] == id)
+            {
                 return found;
             }
-            assert!(
-                Instant::now() < until,
-                "no answer to {id}: {:?}",
-                self.answers()
-            );
+            if Instant::now() >= until {
+                self.stand_in.end(None);
+                panic!("no answer to {id}: {:?}", self.answers());
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -207,14 +237,19 @@ impl Session {
     /// A session opening: what Claude Code 2.1.322 sent a server (2026-11-12).
     fn open(&mut self) -> (Value, Value) {
         self.request(0, "server/discover", json!({}));
+        let initialize = self.initialize();
+        let tools = self.request(2, "tools/list", json!({}));
+        (initialize, tools)
+    }
+
+    fn initialize(&mut self) -> Value {
         let initialize = self.request(
             1,
             "initialize",
             json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "2.1.322"}}),
         );
         self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-        let tools = self.request(2, "tools/list", json!({}));
-        (initialize, tools)
+        initialize
     }
 }
 
@@ -333,22 +368,97 @@ fn a_listed_server_starts_on_its_first_call_and_ends_with_the_session() {
         "started, it is handed the client's start first: {heard:?}"
     );
     assert!(heard.contains(&"heard tools/call".to_string()), "{heard:?}");
-    let initialize_answers = second
-        .answers()
-        .into_iter()
-        .filter(|answer| answer["id"] == 1)
-        .count();
-    assert_eq!(initialize_answers, 1, "the replayed start is not passed on");
-    assert!(
-        second.answers().iter().all(|answer| !answer["id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("zerocode-first-call-"))),
-        "no answer to the stand-in's own requests reaches the client"
+    assert_eq!(
+        second
+            .answers()
+            .iter()
+            .map(|answer| &answer["id"])
+            .collect::<Vec<_>>(),
+        [&json!(0), &json!(1), &json!(2), &json!(3)],
+        "only the client's answers reach it"
     );
     assert_eq!(second.close(), 0);
     wait_until("the server ends with the session", || {
         fixture.log().last().map(String::as_str) == Some("end")
     });
+}
+
+/// A server that coerces request ids to int32 can replay the start, update
+/// its listing and answer client ids even if they collide in its format.
+#[test]
+fn a_server_that_coerces_ids_replies_without_leaking_replayed_answers() {
+    let fixture = Fixture::new("int32");
+    std::fs::write(fixture.tools.with_extension("json.int32"), "").expect("int32 mark");
+    let mut first = fixture.session(Duration::from_secs(600));
+    let (initialize, tools) = first.open();
+    assert!(initialize["result"].is_object());
+    assert_eq!(tool_names(&tools), ["ping"]);
+    first.close();
+
+    fixture.set_tools(&["ping", "pong"]);
+    let mut session = fixture.session(Duration::from_secs(600));
+    // Leave id 0 free for the first call. The old replay's string id turns
+    // into 0 on the server, exactly the id of that pending client request.
+    session.initialize();
+    let cached = session.request(2, "tools/list", json!({}));
+    assert_eq!(tool_names(&cached), ["ping"]);
+    let level = session.request(3, "logging/setLevel", json!({"level": "debug"}));
+    assert_eq!(level["result"], json!({}));
+    assert_eq!(fixture.starts(), 1);
+
+    let call = session.request(0, "tools/call", json!({"name": "ping"}));
+    if call["result"]["content"][0]["text"] != "pong" {
+        // On the old code the leaked initialization is the reply at id 0.
+        // End the child to wake the replay before Session::drop joins it.
+        session.stand_in.end(None);
+    }
+    assert_eq!(call["result"]["content"][0]["text"], "pong", "{call}");
+
+    let ids = [
+        json!(-2),
+        json!(-3),
+        json!(-4),
+        json!(4294967294_u64),
+        json!("7"),
+        json!(7),
+        json!("zerocode-first-call-initialize"),
+    ];
+    for id in &ids {
+        session.send(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "ping"}}));
+    }
+    for id in &ids {
+        assert_eq!(session.answer(id)["result"]["content"][0]["text"], "pong");
+    }
+    let cancelled = json!("cancel-this-call");
+    session.send(&json!({"jsonrpc": "2.0", "id": cancelled, "method": "tools/call", "params": {"name": "wait"}}));
+    session.send(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": cancelled}}));
+    assert_eq!(session.answer(&cancelled)["error"]["message"], "cancelled");
+
+    let expected_ids: Vec<_> = [json!(1), json!(2), json!(3), json!(0)]
+        .into_iter()
+        .chain(ids)
+        .chain([cancelled])
+        .collect();
+    let received_ids: Vec<_> = session
+        .answers()
+        .into_iter()
+        .map(|answer| answer["id"].clone())
+        .collect();
+    assert_eq!(received_ids, expected_ids);
+    assert_eq!(fixture.starts(), 2);
+    assert!(
+        fixture
+            .log()
+            .iter()
+            .any(|line| line == "heard logging/setLevel")
+    );
+    wait_until("the new listing is kept", || {
+        fixture
+            .listings()
+            .recall(&fixture.key())
+            .is_some_and(|listing| tool_names(&listing.answers["tools/list"]) == ["ping", "pong"])
+    });
+    session.close();
 }
 
 /// A session that calls nothing of a listed server never starts it.
