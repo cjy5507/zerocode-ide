@@ -46,6 +46,14 @@ body {
   overflow: hidden;
 }
 
+/* The boot is waiting for the language's catalog (t-129668): the markup's
+ * Korean stays out of sight until the words it is about to show are in
+ * memory. `paintBootSettings` (shell.js) sets this and always lifts it — when
+ * the words land, or when the first paint's wait runs out. */
+:root[data-locale-hold] body {
+  visibility: hidden;
+}
+
 body {
   position: relative;
   isolation: isolate;

@@ -193,11 +193,15 @@ function applyAppearanceSettingsSnapshot(snapshot, first) {
     repaintLeftSidebar = true;
   }
   if (hasSetting(snapshot, "system_locale")) systemLocale = snapshot.system_locale ?? "ko";
-  if (
-    hasSetting(snapshot, "locale") &&
-    (first || snapshot.locale !== locale || previousSystemLocale !== systemLocale)
-  ) {
-    setLocale(snapshot.locale ?? "system", { refresh: !first, persist: false });
+  if (hasSetting(snapshot, "locale")) {
+    if (first || snapshot.locale !== locale || previousSystemLocale !== systemLocale) {
+      setLocale(snapshot.locale ?? "system", { refresh: !first, persist: false });
+    } else {
+      // This document names the language already on screen. Nothing to
+      // paint — but an older document's choice still waiting for its catalog
+      // must not paint over it when the file lands (t-129668).
+      dropPendingDocumentLocale();
+    }
   }
   if (hasSetting(snapshot, "theme") && (first || snapshot.theme !== theme)) {
     theme = snapshot.theme ?? "system";
@@ -9380,9 +9384,15 @@ function paintLocaleChoice(code, { refresh = true, persist = true } = {}) {
  * warm, else a promise for the repaint — which is also why a test that simply
  * evaluates `setLocale(...)` waits for the language it asked for. */
 let localeChoiceGeneration = 0;
+/* The generation of the last choice a settings document made — `persist:
+ * false`, the language is already the stored one — as opposed to one the
+ * person made in this window, which is newer than any document until it is
+ * saved itself. */
+let documentLocaleGeneration = 0;
 function setLocale(code) {
   const options = arguments[1] ?? {};
   const generation = ++localeChoiceGeneration;
+  if (options.persist === false) documentLocaleGeneration = generation;
   const paint = () => {
     if (generation !== localeChoiceGeneration) return false;
     paintLocaleChoice(code, options);
@@ -9390,6 +9400,17 @@ function setLocale(code) {
   };
   if (localeCatalogReady(code)) return paint();
   return ensureLocaleCatalog(code).then(paint);
+}
+
+/* A newer settings document named the language already on screen
+ * (t-129668): the pop-out showed English while an older document's Japanese
+ * loaded, the main window went back to English, and the late Japanese file
+ * used to repaint the pop-out in Japanese. Moving the generation on retires
+ * that choice — its `paint` reads a generation that has moved. Only a
+ * document's own choice is retired: when the person chose since, theirs is
+ * the newest word, and the echo of an earlier save must not drop it. */
+function dropPendingDocumentLocale() {
+  if (documentLocaleGeneration === localeChoiceGeneration) localeChoiceGeneration += 1;
 }
 
 el("keys-search").addEventListener("input", (event) => {

@@ -23218,15 +23218,57 @@ function paintFirstFrame() {
   return Promise.race([painted, new Promise((resolve) => setTimeout(resolve, FIRST_PAINT_WAIT_MS))]);
 }
 
+/* The boot's settings, painted in the language the boot report names
+ * (t-129668). The markup is born Korean, so a window whose language needs a
+ * catalog keeps its chrome out of sight (`data-locale-hold`, shell.css) until
+ * that catalog is in memory and `paint` has put its words on the page.
+ * Korean, and a catalog already in memory, hold nothing.
+ *
+ * The wait is the first paint's own bound, FIRST_PAINT_WAIT_MS: the words are
+ * part of that paint, the catalog is one local file (the first English change
+ * took 121 ms on a CPU slowed 4×, reports/lazy-i18n-177 §5), and the second
+ * already covers the efficiency-core frames above. Past it, or when the file
+ * fails, the window paints Korean — every call site's own words — says so in
+ * the window log, and `setLocale` repaints the moment the file lands. The
+ * hold is lifted in `finally`, so no road leaves the window hidden. Answers
+ * whether the language's words were there for the paint. */
+async function paintBootSettings(report, paint) {
+  const code = report.locale ?? "system";
+  const system = report.system_locale ?? "ko";
+  const root = document.documentElement;
+  let ready = true;
+  try {
+    if (!localeCatalogReady(code, system)) {
+      const language = localeCatalogCode(code, system);
+      root.dataset.localeHold = language;
+      let timer;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), FIRST_PAINT_WAIT_MS); });
+      const arrived = await Promise.race([ensureLocaleCatalog(code, system), late]);
+      clearTimeout(timer);
+      ready = arrived === true;
+      if (!ready) {
+        const why = arrived === null ? `did not arrive in ${FIRST_PAINT_WAIT_MS} ms` : "failed to load";
+        void Promise.resolve(invoke("log_window_error", {
+          message: `i18n: the ${language} catalog ${why} — the first paint is Korean until it lands`,
+        })).catch(() => {});
+      }
+    }
+    paint();
+  } finally {
+    delete root.dataset.localeHold;
+  }
+  return ready;
+}
+
 async function boot() {
   const report = await invoke("boot_report");
-  // The active language's words arrive before the snapshot paints anything.
-  // Korean needs no file; every other locale is one catalog, not all four.
-  await ensureLocaleCatalog(report.locale ?? "system", report.system_locale ?? "ko");
   // `boot_report` flattens the same document `settings_snapshot` returns.
   // Applying it through the same door is what makes the first frame, a
-  // reopened settings page and another window agree on every preference.
-  applySettingsSnapshot(report);
+  // reopened settings page and another window agree on every preference —
+  // and the door waits for the active language's one catalog first.
+  await paintBootSettings(report, () => {
+    applySettingsSnapshot(report);
+  });
   showLastCrash(report.last_crash);
   if (report.lane_error) {
     stageError = t("stage.laneStorage", "세션 토큰 저장소를 읽거나 쓸 수 없습니다. 터미널과 설정은 계속 사용할 수 있지만, 레인을 열기 전에 앱 데이터 접근을 복구해 주세요.");
@@ -23392,11 +23434,12 @@ async function boot() {
  * 보드를 먹여 주지 않는다 — 이것이 릴레이 계층 전체를 안 만든 이유다. */
 async function bootPopout() {
   const report = await invoke("boot_report");
-  await ensureLocaleCatalog(report.locale ?? "system", report.system_locale ?? "ko");
   // The pop-out consumes the same snapshot and settings events as the main
   // window. Its OS frame is opaque, so blur intent is retained but active
   // material is false for this process window.
-  applySettingsSnapshot({ ...report, window_blur_active: false });
+  await paintBootSettings(report, () => {
+    applySettingsSnapshot({ ...report, window_blur_active: false });
+  });
   // 헬퍼 목록을 먼저 씨앗으로 받는다 — 이 창은 그것들이 시작된 뒤에 열리는
   // 창이고, 다음 이벤트를 기다린다는 것은 곧 그것들이 **멈추기를** 기다린다는
   // 뜻이다. 그리기 전에 await 하는 이유가 그것이다: 헬퍼 없는 보드를 한 프레임

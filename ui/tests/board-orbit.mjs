@@ -553,7 +553,13 @@ async function testOrbitShape(ok) {
   const colours = [...outside.matchAll(/#[0-9a-fA-F]{3,8}\b|\brgba?\(\s*\d/g)].map((hit) => hit[0]);
   ok("orbit_has_no_colour_literal", colours.length === 0, colours.join(", "));
 
-  const catalog = readFileSync(resolve(UI, "shell-i18n.js"), "utf8");
+  // Korean lives in `shell-i18n.js`; every other language is one file, named
+  // by the loader's own `I18N_CATALOG_FILES` table — the files the window
+  // loads are the files this reads (t-129668).
+  const loader = readFileSync(resolve(UI, "shell-i18n.js"), "utf8");
+  const catalogFiles = [...(loader.match(/const I18N_CATALOG_FILES = Object\.freeze\(\{([^}]*)\}\)/)?.[1] ?? "")
+    .matchAll(/"\.\/([^"]+\.js)"/g)].map((hit) => hit[1]);
+  const catalog = [loader, ...catalogFiles.map((file) => readFileSync(resolve(UI, file), "utf8"))].join("\n");
   const markup = readFileSync(resolve(UI, "index.html"), "utf8").replace(/<!--[\s\S]*?-->/g, "");
   const values = [...catalog.matchAll(/"(board\.orbit\.[\w]+)":\s*"((?:\\.|[^"\\])*)"/g)]
     .map((hit) => ({ where: `catalog ${hit[1]}`, words: hit[2] }));
@@ -567,12 +573,8 @@ async function testOrbitShape(ok) {
     .map((hit) => ({ where: `fallback ${hit[1]}`, words: hit[2] }));
   const said = [...values, ...marked, ...fallbacks];
   const planetary = said.filter((one) => PLANET_WORDS.some((word) => word.test(one.words)));
-  // Every language the window ships is measured, each with every word Korean
-  // has: Korean in `shell-i18n.js`, the others one file each in its loader's
-  // `I18N_CATALOG_FILES` table (t-129668).
-  const loader = readFileSync(resolve(UI, "shell-i18n.js"), "utf8");
-  const shipped = 1 + [...(loader.match(/const I18N_CATALOG_FILES = Object\.freeze\(\{([^}]*)\}\)/)?.[1] ?? "")
-    .matchAll(/"\.\/[^"]+\.js"/g)].length;
+  // Every language the window ships is measured, each with every word Korean has.
+  const shipped = 1 + catalogFiles.length;
   const korean = [...loader.matchAll(/"board\.orbit\.\w+":/g)].length;
   ok("the 3D view's words name no planet, star, moon or orbit in any language",
     values.length >= 30 && values.length === shipped * korean && marked.length >= 4 && fallbacks.length >= 4
