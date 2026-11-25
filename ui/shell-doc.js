@@ -10160,6 +10160,8 @@ function artifactKindPlain(kind) {
 /* 카드 한 장의 옷 — 제자리에서. 노드는 풀의 것이고 id만 갈아입는다. */
 function dressArtifactCard(node, row, selected) {
   if (node._artifactRow !== row) {
+    // 같은 카드를 다시 입히는가 — 카탈로그를 다시 읽으면 바뀌지 않은 행도 새 객체로 온다.
+    const again = node._artifactRow?.id === row.id;
     node._artifactRow = row;
     node.dataset.id = row.id;
     node.dataset.kind = row.kind;
@@ -10214,7 +10216,13 @@ function dressArtifactCard(node, row, selected) {
     // 있었다(t-54317). 그림은 서랍이 열 때 청한다.
     const pictured = row.kind === "screenshot" && !plain;
     const held = pictured ? artifactPreviews.get(row.id) : null;
-    const src = rendered ?? held?.data_url ?? "";
+    // 다시 쓴 페이지(열쇠가 바뀌어 캐시에서 지운 그림)의 카드는 새 그림이 올 때까지 입던 그림을 입고 선다(t-129552,
+    // 1.1.176 「화면이 계속 깜박거림」): 글리프로 돌렸다가 숨은 판이 새 그림을 그려 오면 다시 입히면, 에이전트가 페이지를
+    // 다시 쓸 때마다 카드의 그림이 그리는 동안(최대 8 s) 꺼졌다 켜졌다. 새 그림은 아래의 청하기가 부르고, 그리지 못하면
+    // 펌프가 이 카드를 글리프로 돌린다.
+    const redrawing = again && rendered === null && artifactAsksThumbnail(row)
+      && !artifactThumbFailed.has(row.id) && !artifactMissing.has(row.id);
+    const src = rendered ?? held?.data_url ?? (redrawing ? node._thumbSrc ?? "" : "");
     thumb.hidden = src === "";
     thumb.src = src;
     node._thumbSrc = src;
@@ -10833,6 +10841,14 @@ async function pumpArtifactThumbs() {
         if (view && artifactSelectedId === id && row && ARTIFACT_THUMB_KINDS.has(row.kind)) void paintArtifactPreview(view, row);
       } else {
         artifactThumbFailed.add(id);
+        // 새 그림을 기다리며 앞 그림을 입고 있던 카드(다시 쓴 페이지)는 글리프로 돌아간다 — 그리지 못한 열쇠의 얼굴은
+        // 글리프다(t-129552).
+        const row = artifactRows.get(id);
+        const node = artifactCardNodeFor(id);
+        if (node && row && node._thumbSrc) {
+          node._artifactRow = null;
+          dressArtifactCard(node, row, id === artifactSelectedId);
+        }
       }
       refillArtifactThumbQueue();
     }
