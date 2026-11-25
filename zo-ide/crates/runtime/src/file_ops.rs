@@ -333,6 +333,15 @@ fn mask_atif_record_text(content: String) -> String {
     mask_session_record_text(if masked { document.to_string() } else { content })
 }
 
+fn read_text_with_atif_mask(path: &Path) -> io::Result<String> {
+    let content = fs::read_to_string(path)?;
+    Ok(if is_atif_export_file(path) {
+        mask_atif_record_text(content)
+    } else {
+        content
+    })
+}
+
 /// Reads a text file and returns a line-windowed payload.
 ///
 /// PDF files (by extension or `%PDF-` magic) and notebooks (`.ipynb`, by
@@ -380,10 +389,8 @@ pub fn read_file(
         ));
     }
 
-    let content = fs::read_to_string(&absolute_path)?;
-    let content = if is_atif_export_file(&absolute_path) {
-        mask_atif_record_text(content)
-    } else if is_session_record_file(&absolute_path) {
+    let content = read_text_with_atif_mask(&absolute_path)?;
+    let content = if is_session_record_file(&absolute_path) {
         mask_session_record_text(content)
     } else {
         content
@@ -1281,13 +1288,8 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             return Ok(true);
         }
 
-        let Ok(file_contents) = fs::read_to_string(file_path) else {
+        let Ok(file_contents) = read_text_with_atif_mask(file_path) else {
             return Ok(true);
-        };
-        let file_contents = if is_atif_export_file(file_path) {
-            mask_atif_record_text(file_contents)
-        } else {
-            file_contents
         };
 
         if output_mode == "count" {

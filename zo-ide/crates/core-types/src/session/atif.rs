@@ -85,7 +85,8 @@ struct Agent<'a> {
 
 #[derive(Serialize)]
 struct Step {
-    step_id: usize,
+    #[serde(rename = "step_id")]
+    id: usize,
     source: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,9 +111,9 @@ struct Observation {
 }
 
 impl Step {
-    fn new(step_id: usize, source: &'static str, message: String, at_ms: Option<u64>) -> Self {
+    fn new(id: usize, source: &'static str, message: String, at_ms: Option<u64>) -> Self {
         Self {
-            step_id,
+            id,
             source,
             message,
             timestamp: at_ms.and_then(timestamp),
