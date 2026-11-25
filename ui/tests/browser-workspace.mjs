@@ -1710,6 +1710,10 @@ export async function testBrowserWorkspace(browser, origin, ok) {
           last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
           captures: window.__WORKSPACE__.snapshots.length,
           token: getComputedStyle(document.documentElement).getPropertyValue("--signal-ready").trim(),
+          pointer: getComputedStyle(document.documentElement).getPropertyValue("--agent-pointer").trim(),
+          rim: getComputedStyle(document.documentElement).getPropertyValue("--ink-on-solid").trim(),
+          signals: ["--signal-ready", "--signal-wait", "--signal-you", "--signal-done", "--signal-halt"]
+            .map((name) => browserTokenRgb(getComputedStyle(document.documentElement), name)),
           addressReadOnly: host?.querySelector(".browser-address")?.readOnly,
           backDisabled: host?.querySelector(".browser-back")?.disabled,
           words: ["en", "ja", "zh", "es"].map((code) => CATALOG[code]?.["browser.workspace.watchShield"]),
@@ -1721,6 +1725,20 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         live.last?.shown === true && live.last?.watch?.says === "에이전트 조작 중 · 보기만"
           && JSON.stringify(live.last?.watch?.tint) === JSON.stringify(tint) && live.last?.watch?.ink?.length === 3
           && live.captures === 0, JSON.stringify(live));
+      // The agent's pointer over the page is a dart of its own colour inside a white rim — the window hands the
+      // shield both, read off its tokens. The colour is one no state of this window wears: a pointer in the working
+      // green, the caution's amber, the person's blue, the cyan of done or the destructive red would say that state.
+      const bytes = (hex) => /^#[0-9a-f]{6}$/i.test(hex ?? "")
+        ? [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16)) : null;
+      const far = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+      const pointer = bytes(live.pointer);
+      ok("(가) the shield is handed the agent's pointer colour and its white rim off the window's tokens",
+        pointer !== null && JSON.stringify(live.last?.watch?.pointer) === JSON.stringify(pointer)
+          && JSON.stringify(live.last?.watch?.rim) === JSON.stringify(bytes(live.rim))
+          && JSON.stringify(live.last?.watch?.rim) === "[255,255,255]", JSON.stringify(live));
+      ok("the agent's pointer wears none of the window's five state colours",
+        pointer !== null && live.signals.every((signal) => far(signal, pointer) > 150),
+        JSON.stringify({ pointer, signals: live.signals }));
       ok("(가) the live pane leaves the page's controls out of the person's hands", live.addressReadOnly === true
         && live.backDisabled === true, JSON.stringify(live));
       ok("the shield's tag is said in all four other languages", live.words.every((one) => typeof one === "string" && one.length > 0),
