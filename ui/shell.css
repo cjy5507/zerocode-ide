@@ -50927,6 +50927,28 @@ button.board-build-failure-part:focus-visible {
   align-items: center;
 }
 
+/* 좁은 판의 도구줄: 단추들과 주소 슬롯의 바닥이 한 줄에 서지 못하면 두 줄로 선다(창이 재서
+ * `is-toolbar-stacked`를 건다 — `syncBrowserToolbarRows`). 위에 이동 단추와 주소, 아래에 도구. 한 줄에서
+ * 넘친 단추는 판 밖으로 잘려 누를 수 없었다(320px 판의 ⚙ 메뉴). 줄을 가르는 것은 폭 100%의 빈 자리
+ * 하나고, 주소 슬롯 뒤의 형제는 모두 그 뒤로 간다 — 단추가 늘어도 이 규칙은 그대로다. */
+.browser-view.is-toolbar-stacked > .browser-toolbar {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.browser-view.is-toolbar-stacked > .browser-toolbar::after {
+  content: "";
+  order: 1;
+  flex: none;
+  width: 100%;
+  height: 0;
+}
+
+.browser-view.is-toolbar-stacked > .browser-toolbar > .browser-address-slot ~ * {
+  order: 2;
+  margin-top: var(--space-1);
+}
+
 /* 220px 문턱 밑 + focus — 입력이 툴바 행 위의 오버레이로 선다(실측
  * `absolute inset-x-3 top-1/2 z-30 -translate-y-1/2` + 검정 18% 그림자
  * `0 10px 24px rgba(0,0,0,0.18)`, BrowserAddressBar.tsx:353-361 — 색은

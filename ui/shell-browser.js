@@ -1560,10 +1560,45 @@ function syncAddressOverlay(host) {
   const address = host.querySelector(".browser-address");
   if (!slot || !address) return;
   const focused = document.activeElement === address;
+  // 두 줄로 선 도구줄에서는 주소가 제 줄을 다 쓴다 — 띄워서 얻을 폭이 없다.
   address.classList.toggle(
     "is-overlaying",
-    focused && browserAddressCollapsed(slot.getBoundingClientRect().width),
+    focused && !host.classList.contains("is-toolbar-stacked")
+      && browserAddressCollapsed(slot.getBoundingClientRect().width),
   );
+}
+
+/* 좁은 판의 도구줄: 단추들과 주소 슬롯의 바닥 폭이 한 줄에 서지 못하는 판에서는 두 줄로 선다 — 위에 이동
+ * 단추와 주소, 아래에 도구(`is-toolbar-stacked`). 넘친 단추는 판 밖으로 잘려 누를 수 없었다: 창의 기본
+ * 크기에서 옆에 나눈 판(320px)의 ⚙ 메뉴와 「기본 브라우저로 열기」가 그랬다(2026-11-25 실측, 한 줄에 360px).
+ * 한 줄에 드는 폭은 재서 안다 — 보이는 자식의 폭(주소 슬롯은 제 min-width), 틈, 안쪽 여백. 두 줄이 된 뒤에도
+ * 이 값들은 그대로라 재는 것이 접힘과 진동하지 않는다. */
+function browserToolbarOneRowWidth(toolbar) {
+  const style = getComputedStyle(toolbar);
+  let width = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  let shown = 0;
+  for (const child of toolbar.children) {
+    const childStyle = getComputedStyle(child);
+    // 숨은 것과, 줄 위에 떠서 자리를 차지하지 않는 것은 세지 않는다.
+    if (childStyle.display === "none" || childStyle.position === "absolute") continue;
+    width += child.classList.contains("browser-address-slot")
+      ? parseFloat(childStyle.minWidth) || 0
+      : child.getBoundingClientRect().width;
+    shown += 1;
+  }
+  return width + Math.max(0, shown - 1) * (parseFloat(style.columnGap) || 0);
+}
+
+function syncBrowserToolbarRows(host) {
+  const toolbar = host?.querySelector(".browser-toolbar");
+  if (!toolbar) return;
+  const width = host.getBoundingClientRect().width;
+  // 누운 판(폭 0)은 재지 않는다 — 다시 설 때 관찰자가 부른다.
+  if (width === 0) return;
+  const stacked = width < browserToolbarOneRowWidth(toolbar);
+  if (host.classList.contains("is-toolbar-stacked") === stacked) return;
+  host.classList.toggle("is-toolbar-stacked", stacked);
+  syncAddressOverlay(host);
 }
 
 /* focus를 쥔 채 판이 좁아지는 손 — 창 크기 조절, 판 나누기 — 을 위한
@@ -1589,7 +1624,10 @@ function syncArtifactReadingRow(host) {
 }
 
 const browserReadingRowWatch = new ResizeObserver((entries) => {
-  for (const one of entries) syncArtifactReadingRow(one.target);
+  for (const one of entries) {
+    syncBrowserToolbarRows(one.target);
+    syncArtifactReadingRow(one.target);
+  }
 });
 
 /* The browser surface, BUILT rather than found: the markup file is not this
@@ -4974,6 +5012,8 @@ function paintBrowserView(tab) {
   }
   // 줄이 서고 눕는 것은 판의 사각형이 변하는 일 — 곧장 다시 잰다.
   paintBrowserWorkspace(host, tab);
+  // 작업 탭이 손을 넘기면 도구줄의 단추가 서고 눕는다 — 한 줄에 드는 폭이 달라진다.
+  syncBrowserToolbarRows(host);
   if (wasHidden !== notes.hidden || grabbarWas !== grabbar.hidden) syncBrowserPanes();
   syncBrowserPanes();
 }
