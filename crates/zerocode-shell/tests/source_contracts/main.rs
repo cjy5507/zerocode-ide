@@ -13803,7 +13803,10 @@ mod tests {
     /// The rich Jira card (t-105): attachments and the browser button ride
     /// existing doors, never new ones. The ZeroCode-browser button walks
     /// `openBrowserTab` at the seat the + palette last chose
-    /// (`lastBrowserPlacement`). It used to lower the task view first — the
+    /// (`lastBrowserPlacement`), and a split chosen there divides a narrow
+    /// group as the palette's own row does (`splitNarrow`): the room rule is
+    /// for doors nobody asked to split for. It used to lower the task view
+    /// first — the
     /// native pane sits above the DOM, and a browser born under a page still
     /// covering the stage was hidden by `browserCovered()` ("깜박이고 열리지
     /// 않음"). 작업 has been a stage tab since 2026-11-06, so nothing covers the
@@ -13817,10 +13820,11 @@ mod tests {
         let window = window_source();
         let open_app = block_after(window, "el(\"jira-item-open-app\").addEventListener(");
         assert!(
-            open_app.contains(
-                "openBrowserTab(at.url, { beside: lastBrowserPlacement() === \"split\" })"
-            ),
-            "the card's browser button left the one existing browser road:\n{open_app}"
+            open_app.contains("const split = lastBrowserPlacement() === \"split\";")
+                && open_app
+                    .contains("openBrowserTab(at.url, { beside: split, splitNarrow: split })"),
+            "the card's browser button left the one existing browser road, or the seat \
+             the palette last chose:\n{open_app}"
         );
         assert!(
             !open_app.contains("setTaskOpen(false)"),
