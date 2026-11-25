@@ -13,7 +13,8 @@
  *
  * And the room a browser beside gets: while one stands in a side group the file column is folded, so the page has the
  * column's 350px too (960px to 1135px in a 2560px window, measured 2026-11-25). The column comes back when no browser
- * shows beside any more; the person's own press of its toggle, either way, is theirs and is left as they made it.
+ * shows beside any more; the person's own press of its toggle, either way, is theirs and is left as they made it —
+ * for as long as a browser shows beside, so a second one arriving there does not fold what they opened.
  *
  *   node ui/tests/browser-beside.mjs
  *   WINDOW_SUITES=browser-beside node ui/tests/window.mjs */
@@ -93,6 +94,30 @@ const openByPaletteSplit = async (page) => {
       .find((row) => row.textContent.includes(t("tabs.newBrowserSplit", "새 브라우저 탭 — 옆에 분할"))).click();
   });
   await page.waitForFunction(() => tabs.some((one) => one.kind === "browser"));
+  await settled(page);
+};
+
+/* An agent's work browser, standing behind the terminal in front: the title bar's 「옆에 작업 보기」 is what shows it. */
+const standWorkBrowser = async (page) => {
+  await page.evaluate(() => {
+    const terminal = tabs.find((tab) => tab.kind === "term");
+    const term = activePaneOf(terminal) ?? terminal.term;
+    paneSessions.delete(term);
+    paneAgents.set(term, "codex");
+    const state = { label: "browser-960", mode: "agent", revision: 3, inFlight: 0, needsObservation: false,
+      ownerTerm: String(term), snapshotSupported: true };
+    window.__ANSWER__.get_browser_workspaces = () => [state];
+    window.__ANSWER__.browser_snapshot = () => "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=";
+    for (const hear of window.__LISTENERS__["browser:agent-open"] ?? []) {
+      hear({ payload: { label: "browser-960", url: "https://example.com/work", term } });
+    }
+  });
+  await page.waitForFunction(() => tabs.some((one) => one.label === "browser-960"));
+  await page.evaluate(() => {
+    for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) {
+      hear({ payload: window.__ANSWER__.get_browser_workspaces()[0] });
+    }
+  });
   await settled(page);
 };
 
@@ -233,26 +258,7 @@ export async function testBrowserBeside(browser, origin, ok) {
   {
     const { page, faults } = await standWindow(browser, origin, DEFAULT_WINDOW);
     try {
-      await page.evaluate(() => {
-        const terminal = tabs.find((tab) => tab.kind === "term");
-        const term = activePaneOf(terminal) ?? terminal.term;
-        paneSessions.delete(term);
-        paneAgents.set(term, "codex");
-        const state = { label: "browser-960", mode: "agent", revision: 3, inFlight: 0, needsObservation: false,
-          ownerTerm: String(term), snapshotSupported: true };
-        window.__ANSWER__.get_browser_workspaces = () => [state];
-        window.__ANSWER__.browser_snapshot = () => "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=";
-        for (const hear of window.__LISTENERS__["browser:agent-open"] ?? []) {
-          hear({ payload: { label: "browser-960", url: "https://example.com/work", term } });
-        }
-      });
-      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-960"));
-      await page.evaluate(() => {
-        for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) {
-          hear({ payload: window.__ANSWER__.get_browser_workspaces()[0] });
-        }
-      });
-      await settled(page);
+      await standWorkBrowser(page);
       const before = await seen(page);
       await page.evaluate(() => document.querySelector("#browser-workspace-launcher").click());
       await settled(page);
@@ -268,6 +274,67 @@ export async function testBrowserBeside(browser, origin, ok) {
         folded.groups === before.groups && folded.front === "term" && folded.frontPane === before.terminalPane,
         JSON.stringify({ before, folded }));
       ok("the watched work browser raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  {
+    // A column the person opened again while a browser shows beside is theirs for as long as one shows there. The
+    // column is folded when a browser ARRIVES beside where none showed; another one arriving beside the first — by a
+    // link, or by 「옆에 작업 보기」 — folded it a second time over the seven tabs the person had just opened (Codex
+    // review t-130084, 2026-11-25).
+    const { page, faults } = await standWindow(browser, origin, ROOMY_WINDOW);
+    try {
+      await standWorkBrowser(page);
+      const facts = () => page.evaluate(() => {
+        const shown = tabs.filter((one) => one.kind === "browser" && activeTabIn(one.pane)?.id === one.id);
+        return {
+          groups: stageGroups().length,
+          front: currentTab()?.kind ?? null,
+          showing: shown.map((one) => one.label),
+          beside: stageGroups().length > 1 && shown.length > 0,
+          asideFolded: folded.aside,
+          aside: Math.round(document.querySelector("aside.files")?.getBoundingClientRect().width ?? 0),
+        };
+      });
+      const toTerminal = () => page.evaluate(() => setActiveTab(tabs.find((one) => one.kind === "term").id));
+      await openByLink(page, "https://example.com/shows-beside");
+      const first = await facts();
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
+      const reopened = await facts();
+      await toTerminal();
+      await openByLink(page, "https://example.com/arrives-beside");
+      const second = await facts();
+      ok("a file column the person opened again stays open when another browser arrives beside one that shows",
+        first.beside && first.asideFolded === true && reopened.beside && reopened.asideFolded === false && reopened.aside > 0
+          && second.groups === first.groups && second.beside && second.asideFolded === false && second.aside === reopened.aside,
+        JSON.stringify({ first, reopened, second }));
+      // Both leave: nothing shows beside, and the column is as the person left it. The next browser to arrive beside
+      // folds it, as the first did — the rule's first half still stands.
+      await page.evaluate(async () => {
+        for (const one of tabs.filter((tab) => tab.kind === "browser" && !tab.agentWorkspace)) await closeTab(one.id);
+      });
+      await settled(page);
+      const emptied = await facts();
+      await openByLink(page, "https://example.com/arrives-alone");
+      const again = await facts();
+      ok("with no browser left beside, the next one to arrive folds the column as the first did",
+        emptied.showing.length === 0 && emptied.asideFolded === false && again.beside && again.asideFolded === true,
+        JSON.stringify({ emptied, again }));
+      // And 「옆에 작업 보기」 is an arrival like a link's: beside a browser that already shows, it leaves the column
+      // the person opened.
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
+      const reopenedAgain = await facts();
+      await toTerminal();
+      await page.evaluate(() => document.querySelector("#browser-workspace-launcher").click());
+      await settled(page);
+      const watched = await facts();
+      ok("and 「옆에 작업 보기」 beside a browser that shows leaves the column the person opened",
+        reopenedAgain.beside && reopenedAgain.asideFolded === false && watched.groups === again.groups
+          && watched.front === "browser" && watched.showing.includes("browser-960")
+          && watched.asideFolded === false && watched.aside === reopenedAgain.aside,
+        JSON.stringify({ again, reopenedAgain, watched }));
+      ok("the reopened column raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
   // The Jira card's 「ZeroCode 브라우저에서 열기」 stands its page where the + palette last stood a browser. A split
