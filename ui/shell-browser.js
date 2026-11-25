@@ -1104,7 +1104,6 @@ function watchBrowserWorkspace(tab, { beside = false } = {}) {
       dropRecentTab(tab.pane, tab.id);
       tab.pane = nextPane;
     }
-    if (nextPane !== null) foldAsideForBrowserBeside();
   }
   tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
   tab.workspaceViewing = true;
@@ -1112,6 +1111,7 @@ function watchBrowserWorkspace(tab, { beside = false } = {}) {
   // could not stand (t-66513).
   tab.workspaceLiveError = false;
   setActiveTab(tab.id);
+  if (beside && stageGroups().length > 1) foldAsideForBrowserBeside();
   paintBrowserWorkspaceTab(tab);
   if (!tab.workspace && !tab.workspaceReading) void refreshBrowserWorkspace(tab);
 }
@@ -6593,11 +6593,12 @@ function standBesideWithRoom(group) {
   return standBeside(group);
 }
 
-/* 옆에 선 브라우저와 오른쪽 파일 열(2026-11-25). 브라우저가 옆 그룹에 서면 무대의 반을 쓴다 — 2560px 창에서
- * 960px, 그 곁의 파일 열이 350px이었다. 브라우저가 옆에 설 때 파일 열을 접어 그 폭까지 페이지에 준다(1135px).
- * 접는 것은 브라우저가 옆에 「도착할 때」 한 번이고, 어느 브라우저도 옆에 보이지 않게 되면 되돌린다. 사람이
- * 그 사이 열의 단추를 눌렀으면 그 뒤로는 사람의 것이다 — 다시 열었으면 연 채로, 접었으면 접은 채로 둔다.
- * 사람이 미리 접어 둔 열, 레일로 선 열(좁은 창)은 건드리지 않는다. */
+/* 옆에 선 브라우저와 오른쪽 열(2026-11-25). 브라우저가 옆 그룹에 서면 무대의 반을 쓴다 — 2560px 창에서 960px,
+ * 그 곁의 오른쪽 열(대화 · 쌓인 일 · 파일 · 체크의 일곱 탭)이 350px이었다. 브라우저가 옆 그룹의 앞 탭으로
+ * 「도착할 때」 한 번 그 열을 접어 폭까지 페이지에 준다(1135px). 탭을 오갈 때마다 접지는 않는다. 어느
+ * 브라우저도 옆에 보이지 않게 되면 되돌린다. 사람이 그 사이 열의 단추로 다시 열었으면 그때부터 사람의 것이다
+ * — 연 채로 두고, 그 뒤에 사람이 접은 것도 건드리지 않는다. 사람이 미리 접어 둔 열, 레일로 선 열(좁은 창)은
+ * 처음부터 건드리지 않는다. 접힌 동안에는 그 열의 체크 폴러도 쉰다(`setPanelFolded`). */
 let browserFoldedAside = false;
 
 function foldAsideForBrowserBeside() {
@@ -6606,20 +6607,20 @@ function foldAsideForBrowserBeside() {
   setPanelFolded("aside", true);
 }
 
-/* 사람이 파일 열의 단추를 눌렀다: 열은 이제 사람이 둔 대로다. */
-function forgetBrowserAsideFold() {
-  browserFoldedAside = false;
-}
-
-/* 옆에 보이는 브라우저가 더는 없으면 접었던 열을 되돌린다. 메뉴나 대화 상자가 판을 잠깐 가린 것은 「보이지
- * 않음」이 아니다 — 그 그룹의 앞 탭이 브라우저인 동안은 서 있는 것이다. */
+/* 판을 놓을 때마다 묻는다: 접어 둔 열이 아직 이 파일의 것인가, 되돌릴 때인가. 열이 펴져 있으면 사람이 연
+ * 것이다 — 표시를 내린다. 옆에 보이는 브라우저가 더는 없으면 되돌린다. 메뉴나 대화 상자가 판을 잠깐 가린
+ * 것은 「보이지 않음」이 아니다 — 그 그룹의 앞 탭이 브라우저인 동안은 서 있는 것이다. */
 function releaseAsideWithoutBrowserBeside() {
   if (!browserFoldedAside) return;
+  if (!folded.aside) {
+    browserFoldedAside = false;
+    return;
+  }
   const beside = stageGroups().length > 1 && tabs.some((tab) => tab.kind === "browser"
     && tab.worktree === activeWorktreePath && activeTabIn(tab.pane)?.id === tab.id);
   if (beside) return;
   browserFoldedAside = false;
-  if (folded.aside) setPanelFolded("aside", false);
+  setPanelFolded("aside", false);
 }
 
 const RICH_STAGE_WEIGHT = 1.7;
@@ -6797,10 +6798,7 @@ async function openBrowserTab(
   const stood = makerSeat !== null
     ? (splitSeat ?? makerSeat.group)
     : beside && !away ? (splitNarrow ? standBesideFocused() : standBesideWithRoom(focusedPane)) : null;
-  if (stood !== null && (makerSeat === null || splitSeat !== null)) {
-    optimizeRichStageGroup(stood);
-    foldAsideForBrowserBeside();
-  }
+  if (stood !== null && (makerSeat === null || splitSeat !== null)) optimizeRichStageGroup(stood);
   openTab({
     id: "browser:" + label,
     kind: "browser",
@@ -6825,6 +6823,10 @@ async function openBrowserTab(
   if (agentWorkspace) {
     const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
     if (tab) void refreshBrowserWorkspace(tab);
+  }
+  // 옆 그룹의 앞 탭으로 선 브라우저만 오른쪽 열을 접는다 — 이웃 그룹의 뒤 탭으로 합류한 것은 보이지 않는다.
+  if (stood !== null && (makerSeat === null || splitSeat !== null) && activeTabIn(stood)?.id === "browser:" + label) {
+    foldAsideForBrowserBeside();
   }
   if (closeError && agentOpen?.closeRevision !== closeRevision) {
     void closeAgentBrowserTab({ label, revision: agentOpen.closeRevision });

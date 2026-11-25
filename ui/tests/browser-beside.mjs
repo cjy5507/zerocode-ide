@@ -162,6 +162,20 @@ export async function testBrowserBeside(browser, origin, ok) {
       ok("a file column the person opened again beside a browser stays open, then and after the browser closes",
         reopened.asideFolded === false && reopened.aside === before.aside && kept.asideFolded === false,
         JSON.stringify({ reopened, kept }));
+      // Opened again and then folded by the person's own press: that fold is theirs too, and a closing browser
+      // leaves it.
+      await openByLink(page, "https://example.com/roomy-refolded");
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
+      await page.evaluate(() => closeTab(tabs.find((one) => one.kind === "browser").id));
+      await settled(page);
+      const refolded = await seen(page);
+      ok("a file column the person opened and folded again beside a browser stays folded when the browser closes",
+        refolded.browsers === 0 && refolded.asideFolded === true, JSON.stringify(refolded));
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
       // And one the person folded themselves is theirs: a browser beside neither opens it nor, closing, unfolds it.
       await page.evaluate(() => document.getElementById("toggle-aside").click());
       await settled(page);
@@ -175,6 +189,44 @@ export async function testBrowserBeside(browser, origin, ok) {
         Number.isInteger(BESIDE_MIN) && narrowStage < BESIDE_MIN && BESIDE_MIN <= before.stage,
         JSON.stringify({ rule: BESIDE_MIN, narrowStage, roomyStage: before.stage }));
       ok("a roomy window's link raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  {
+    // A browser that joins a right-hand neighbour without taking the keyboard still comes to that group's front, so
+    // it shows beside: the column folds for it once and stays folded — no fold and give-back in the same breath.
+    const { page, faults } = await standWindow(browser, origin, ROOMY_WINDOW);
+    try {
+      await page.evaluate(async () => {
+        const source = currentTab();
+        const right = splitStageBesideFocused("horizontal");
+        await openTermTab({ placement: "tab" });
+        const side = currentTab();
+        side.pane = right;
+        setActiveTab(side.id);
+        setActiveTab(source.id);
+        // Every change of the column's folded state, in order.
+        window.__folds = [];
+        const bench = document.getElementById("workbench");
+        let was = bench.classList.contains("is-aside-folded");
+        new MutationObserver(() => {
+          const now = bench.classList.contains("is-aside-folded");
+          if (now !== was) window.__folds.push(now);
+          was = now;
+        }).observe(bench, { attributes: true, attributeFilter: ["class"] });
+      });
+      await settled(page);
+      const before = await seen(page);
+      await page.evaluate(() => openBrowserTab("https://example.com/joins-quietly", { beside: true, focus: false }));
+      await settled(page);
+      const joined = await page.evaluate(() => {
+        const tab = tabs.find((one) => one.kind === "browser");
+        return { ...window.__besideSeen(), shows: activeTabIn(tab.pane)?.id === tab.id, folds: window.__folds };
+      });
+      ok("a browser that joins a neighbour without the keyboard shows beside, and the file column folds for it once",
+        before.groups === 2 && joined.groups === 2 && joined.browsers === 1 && joined.shows === true
+          && joined.front === "term" && joined.asideFolded === true && JSON.stringify(joined.folds) === "[true]",
+        JSON.stringify({ before, joined }));
+      ok("the neighbour's quiet browser raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
   {
