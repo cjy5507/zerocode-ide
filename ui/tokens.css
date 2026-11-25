@@ -1811,8 +1811,6 @@
   --knowledge-node-stroke: 1;
   --knowledge-node-selected-stroke: 2;
   --knowledge-edge-lit-width: 1.5;
-  --knowledge-halo-core: 0.85;
-  --knowledge-halo-lift: 1.12;
   /* One nebula per cluster (3차): a disc behind the members, sized from their
    * spread. Its paint is one flat, faint layer of the cluster's ink (t-12029,
    * the approved design v2 "colour": 4.5% on the dark ground, no glow at the
@@ -2382,7 +2380,6 @@
   --knowledge-zoom-step: 0.25;
   --knowledge-hub-degree: 4;
   --knowledge-chip-dot: 7px;
-  --knowledge-search-width: 200px;
   /* 검색 후보 목록이 커질 수 있는 높이(t-4140 S3) — 그 뒤는 스크롤. */
   --knowledge-candidates-max-height: 300px;
   --knowledge-tag-chip-max-width: 92px;
