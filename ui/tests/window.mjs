@@ -7607,6 +7607,41 @@ ok(
   JSON.stringify(railing),
 );
 
+/* A screen given back gives back its scrollbar's window listeners too
+ * (2026-11-25 audit, t-129273). The thumb's drag is heard on the window, so a
+ * drag that leaves the bar still moves it; `release()` took the screen's other
+ * window listeners off but not these two, and every closed terminal left a
+ * mousemove and a mouseup behind — closures over that screen's rows and DOM,
+ * run on every mouse move for as long as the window lives. */
+const thumbHeld = await page.evaluate(() => {
+  const held = new Set();
+  const add = window.addEventListener;
+  const remove = window.removeEventListener;
+  window.addEventListener = function (type, listener, options) {
+    if (type === "mousemove" || type === "mouseup") held.add(listener);
+    return add.call(this, type, listener, options);
+  };
+  window.removeEventListener = function (type, listener, options) {
+    if (type === "mousemove" || type === "mouseup") held.delete(listener);
+    return remove.call(this, type, listener, options);
+  };
+  try {
+    for (const term of [9701, 9702, 9703]) {
+      termView(term);
+      dropTermScreen(term);
+    }
+  } finally {
+    window.addEventListener = add;
+    window.removeEventListener = remove;
+  }
+  return { left: held.size };
+});
+ok(
+  "a terminal screen given back leaves no mousemove or mouseup listener on the window",
+  thumbHeld.left === 0,
+  JSON.stringify(thumbHeld),
+);
+
 // ---- ⌘F in a terminal ----
 //
 // It used to be silence: `openFind` returned on anything that was not a file,
