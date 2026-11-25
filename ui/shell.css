@@ -41699,6 +41699,7 @@ details.task-board-section > summary {
 }
 
 .board-desk-reply-actions,
+.board-desk-close-actions,
 .team-close-actions {
   display: flex;
   align-items: center;
