@@ -23,20 +23,21 @@ impl Session {
     /// The host calls this after saving a turn or changing history. Use the
     /// durable snapshot under the same writer lease, so a partial save, a
     /// stale clone or a transient request message cannot enter the document.
-    /// `ZO_DISABLE_ATIF` disables publication for this process.
+    /// Set `ZO_ENABLE_ATIF=1` to opt in to publication for this process.
     pub fn persist_atif(&self, agent_version: &str) -> Result<(), SessionError> {
-        self.persist_atif_with_setting(agent_version, None)
+        let setting = std::env::var("ZO_ENABLE_ATIF").ok();
+        self.persist_atif_with_setting(agent_version, setting.as_deref())
     }
 
     pub(super) fn persist_atif_with_setting(
         &self,
         agent_version: &str,
-        _setting: Option<&str>,
+        setting: Option<&str>,
     ) -> Result<(), SessionError> {
-        let Some(persistence) = self.persistence.as_ref() else { return Ok(()); };
-        if std::env::var_os("ZO_DISABLE_ATIF").is_some() {
+        if !atif_enabled(setting) {
             return Ok(());
         }
+        let Some(persistence) = self.persistence.as_ref() else { return Ok(()); };
         let path = &persistence.path;
         let mut writer = persistence.writer.lock().map_err(|_| {
             SessionError::Conflict("session writer lease poisoned".to_string())
@@ -74,6 +75,26 @@ impl Session {
         }
         writer.atif_revision = Some(expected);
         Ok(())
+    }
+}
+
+fn atif_enabled(setting: Option<&str>) -> bool {
+    // Match ZO_ENABLE_TELEMETRY in OtlpExporterConfig::from_lookup.
+    setting.is_some_and(|value| value.trim() == "1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atif_enabled;
+
+    #[test]
+    fn atif_opt_in_requires_trimmed_one_like_telemetry() {
+        for setting in [None, Some(""), Some("0"), Some("true"), Some("01")] {
+            assert!(!atif_enabled(setting), "unexpected opt-in for {setting:?}");
+        }
+        for setting in ["1", " \t1\n"] {
+            assert!(atif_enabled(Some(setting)), "expected opt-in for {setting:?}");
+        }
     }
 }
 
