@@ -1695,7 +1695,7 @@ function buildBrowserView() {
     button("browser-grab", "wand", { key: "browser.grab", name: "요소 잡아 에이전트로 보내기" }),
     button("browser-annotate", "pencil", { key: "browser.annotate", name: "요소에 주석 달기" }),
     button("browser-markup", "pen-tool", { key: "browser.markup", name: "스크린샷에 그리기" }),
-    button("browser-find", "eye", { key: "browser.find", name: "페이지에서 찾기" }),
+    button("browser-find", "search", { key: "browser.find", name: "페이지에서 찾기" }),
     button("browser-menu", "gear", { key: "browser.menu", name: "브라우저 메뉴" }),
   );
   // 주석 수 뱃지 — Orca가 annotate 컨트롤 모서리에 다는 그 수. 뱃지 자체가
@@ -7376,7 +7376,7 @@ async function paintTabCreate() {
   // 판의 탭으로 선다 — 둘 다 IDE 안이다(별도 OS 창이 아니다: "ide에서
   // 열게 시켰는데 다른 창에 뜸"). 마지막 선택이 기억되어 먼저 선다.
   const browserSplitRow = {
-    glyph: "external",
+    glyph: "globe",
     label: t("tabs.newBrowserSplit", "새 브라우저 탭 — 옆에 분할"),
     hint: "",
     words: [
@@ -7390,7 +7390,7 @@ async function paintTabCreate() {
     },
   };
   const browserSingleRow = {
-    glyph: "external",
+    glyph: "globe",
     label: t("tabs.newBrowserSingle", "새 브라우저 탭 — 단일 창(분할 없음)"),
     hint: "",
     words: [

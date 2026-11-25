@@ -10136,7 +10136,8 @@ const TAB_GLYPH = {
   workspaces: "kanban",
   // The sprite has no globe; `external` is the outward-facing glyph it does
   // have, and a browser tab is the one tab that faces outward.
-  browser: "external",
+  // 지구본: 링크 메뉴가 「ZeroCode 브라우저」에 주는 그 그림이다. ↗는 바깥으로 여는 문의 것이다(2026-11-25).
+  browser: "globe",
   emulator: "phone",
 };
 

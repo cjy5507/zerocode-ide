@@ -147,6 +147,24 @@ export async function testBrowserToolbar(browser, origin, ok) {
         wide.pane >= 300 && wide.rows.length === 1 && wide.controls.length === CONTROLS && outside(wide).length === 0
           && wide.barBottom <= 40,
         JSON.stringify({ pane: wide.pane, rows: wide.rows, barBottom: wide.barBottom, outside: outside(wide) }));
+      // One picture, one meaning: the globe is the built-in browser (the link menu's row, the tab, the palette's
+      // rows), the arrow leaving a box is a door to the outside, and finding is the magnifier every search field wears.
+      const marks = await page.evaluate(async () => {
+        const mark = (node) => node?.querySelector("use")?.getAttribute("href") ?? null;
+        const tab = document.querySelector('.tab[data-tab="browser:browser-930"]');
+        const host = groupOf(tabs.find((one) => one.label === "browser-930").pane).browserView;
+        openTabCreate(document.querySelector(".tab-new"));
+        await new Promise((done) => setTimeout(done, 120));
+        const rows = [...document.querySelectorAll("#tab-create-pop .tc-row")]
+          .filter((row) => row.textContent.includes(t("tabs.newBrowser", "새 브라우저 탭")))
+          .map(mark);
+        closeTabCreate("test");
+        return { tab: mark(tab), find: mark(host.querySelector(".browser-find")), rows };
+      });
+      ok("a browser's tab and the palette's browser rows wear the globe, and the find button the magnifier",
+        marks.tab === "#i-globe" && marks.find === "#i-search" && marks.rows.length === 2
+          && marks.rows.every((one) => one === "#i-globe"),
+        JSON.stringify(marks));
       ok("the wide toolbar raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
