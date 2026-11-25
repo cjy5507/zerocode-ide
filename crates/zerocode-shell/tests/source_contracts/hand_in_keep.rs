@@ -16,7 +16,24 @@ fn shell_source(name: &str) -> String {
 
 fn repo_source(name: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    std::fs::read_to_string(root.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"))
+    let held =
+        std::fs::read_to_string(root.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"));
+    if name != "ui/shell-i18n.js" {
+        return held;
+    }
+    let mut joined = held;
+    for extra in [
+        "ui/shell-i18n-en.js",
+        "ui/shell-i18n-ja.js",
+        "ui/shell-i18n-zh.js",
+        "ui/shell-i18n-es.js",
+    ] {
+        joined.push_str(
+            &std::fs::read_to_string(root.join(extra))
+                .unwrap_or_else(|why| panic!("{extra}: {why}")),
+        );
+    }
+    joined
 }
 
 /// Where `needle` first stands in `haystack`, or a failed assertion that says
@@ -263,7 +280,7 @@ fn the_board_has_a_sentence_for_every_state_and_reason_the_backend_can_say() {
 #[test]
 fn every_kept_sentence_is_in_the_four_catalogs() {
     let board = repo_source("ui/shell-board.js");
-    let catalog = repo_source("ui/shell-i18n.js");
+    let catalog = super::support::I18N_CATALOGS;
     let prefix = "\"board.desk.kept.";
     let mut keys = BTreeSet::new();
     for (at, _) in board.match_indices(prefix) {

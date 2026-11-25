@@ -255,7 +255,7 @@ fn no_source_hands_the_answer_door_on() {
 fn a_refusal_has_words_in_five_catalogs_and_a_signalled_wait_asks_the_board_again() {
     let window = window_source();
     let refusal = block_after(window, "function answerRefusalWords(");
-    let catalogs = ui_file("shell-i18n.js");
+    let catalogs = super::support::I18N_CATALOGS;
     for (word, key) in [
         ("question-changed", "board.ask.changed"),
         ("answer-in-flight", "board.ask.inFlight"),
@@ -609,7 +609,7 @@ fn the_pages_queue_buttons_ask_only_the_doors_and_type_nothing() {
 #[test]
 fn every_word_a_turn_door_refuses_with_has_a_sentence_in_five_catalogs() {
     let window = window_source();
-    let catalogs = ui_file("shell-i18n.js");
+    let catalogs = super::support::I18N_CATALOGS;
     let table = block_after(window, "const QUEUE_ACT_REFUSALS = ");
     let words: Vec<&str> = block_after(CORE_AGENT, "pub mod turn_refusal {")
         .lines()

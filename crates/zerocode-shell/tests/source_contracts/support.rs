@@ -336,12 +336,45 @@ pub(crate) fn block_after_css<'a>(source: &'a str, opens: &str) -> &'a str {
     &rest[..end]
 }
 
+/// One locale's flat string table inside the concatenated window source.
+///
+/// Korean still lives inside `CATALOG`; the other four are one registration
+/// call each after the lazy-catalog split. Tests use this rather than reading
+/// either file shape for themselves.
+pub(crate) fn catalog_block<'a>(source: &'a str, language: &str) -> &'a str {
+    if language == "ko" {
+        let opened = format!("\n  {language}: {{");
+        let at = source
+            .find(&opened)
+            .unwrap_or_else(|| panic!("the `{language}` catalog left ui/shell-i18n.js"));
+        let rest = &source[at + opened.len()..];
+        let end = rest
+            .find("\n  },\n")
+            .unwrap_or_else(|| panic!("the `{language}` catalog is unbounded"));
+        return &rest[..end];
+    }
+    let opened = format!("registerI18nCatalog(\"{language}\", {{");
+    let at = source
+        .find(&opened)
+        .unwrap_or_else(|| panic!("the `{language}` catalog left its locale file"));
+    let rest = &source[at + opened.len()..];
+    let end = rest
+        .find("\n  });")
+        .unwrap_or_else(|| panic!("the `{language}` catalog is unbounded"));
+    &rest[..end]
+}
+
 /// The source from `opens` up to the top-level line that closes it.
 ///
 /// Enough to ask a question about one block without a parser: every caller
 /// below names something declared at the top level of `ui/shell.js`, so
 /// the first line that is exactly `}` or `});` ends it.
 pub(crate) fn block_after<'a>(source: &'a str, opens: &str) -> &'a str {
+    if let Some(language) = opens.trim().strip_suffix(": {")
+        && ["ko", "en", "ja", "zh", "es"].contains(&language)
+    {
+        return catalog_block(source, language);
+    }
     let start = source
         .find(opens)
         .unwrap_or_else(|| panic!("`{opens}` is gone from ui/shell.js"));
@@ -672,15 +705,20 @@ fn r_in_a_name(source: &str, at: usize) -> bool {
         .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
+pub(crate) const I18N_CATALOGS: &str = concat!(
+    include_str!("../../../../ui/shell-i18n.js"),
+    include_str!("../../../../ui/shell-i18n-en.js"),
+    include_str!("../../../../ui/shell-i18n-ja.js"),
+    include_str!("../../../../ui/shell-i18n-zh.js"),
+    include_str!("../../../../ui/shell-i18n-es.js")
+);
+
 pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     (
         "shell-boot.js",
         include_str!("../../../../ui/shell-boot.js"),
     ),
-    (
-        "shell-i18n.js",
-        include_str!("../../../../ui/shell-i18n.js"),
-    ),
+    ("shell-i18n.js", I18N_CATALOGS),
     (
         "shell-pane-lifecycle.js",
         include_str!("../../../../ui/shell-pane-lifecycle.js"),

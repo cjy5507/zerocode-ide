@@ -2936,7 +2936,7 @@ mod tests {
     #[test]
     fn every_feature_speaks_in_every_catalog() {
         let page = include_str!("../../../ui/index.html");
-        let i18n = include_str!("../../../ui/shell-i18n.js");
+        let i18n = crate::ui_source::I18N_CATALOGS;
         let template = &page[page
             .find("<template id=\"jev-features\">")
             .expect("the features' words")..];
@@ -3184,8 +3184,8 @@ mod tests {
             })
             .collect();
 
-        let i18n = include_str!("../../../ui/shell-i18n.js");
-        let english = between(i18n, "\n  en: {\n", "\n  ja: {\n");
+        let i18n = crate::ui_source::I18N_CATALOGS;
+        let english = between(i18n, "\nregisterI18nCatalog(\"en\", {\n", "\n  });");
         for line in english.lines() {
             let line = line.trim();
             let Some((key, value)) = line
@@ -3226,9 +3226,18 @@ mod tests {
         let jev = include_str!("../../../ui/shell-jev.js");
         let catalogs = [
             ("en", english),
-            ("ja", between(i18n, "\n  ja: {\n", "\n  zh: {\n")),
-            ("zh", between(i18n, "\n  zh: {\n", "\n  es: {\n")),
-            ("es", between(i18n, "\n  es: {\n", "\n};")),
+            (
+                "ja",
+                between(i18n, "\nregisterI18nCatalog(\"ja\", {\n", "\n  });"),
+            ),
+            (
+                "zh",
+                between(i18n, "\nregisterI18nCatalog(\"zh\", {\n", "\n  });"),
+            ),
+            (
+                "es",
+                between(i18n, "\nregisterI18nCatalog(\"es\", {\n", "\n  });"),
+            ),
         ];
         let mut unspoken: Vec<String> = Vec::new();
         for table in [
@@ -3854,7 +3863,7 @@ mod tests {
                 "the dashboard's token table does not word `{token}`"
             );
         }
-        let catalogs = include_str!("../../../ui/shell-i18n.js");
+        let catalogs = crate::ui_source::I18N_CATALOGS;
         for refusal in &refusals {
             let key = table
                 .split_once(&format!("\n  {refusal}: {{"))
@@ -3907,7 +3916,7 @@ mod tests {
             .map_or("", |(_, rest)| {
                 rest.split_once("\n});").map_or(rest, |(table, _)| table)
             });
-        let catalogs = include_str!("../../../ui/shell-i18n.js");
+        let catalogs = crate::ui_source::I18N_CATALOGS;
         for cause in causes {
             let row = table
                 .lines()
@@ -4590,7 +4599,7 @@ mod tests {
     #[test]
     fn the_decision_editor_words_every_name_core_hands_it() {
         let page = include_str!("../../../ui/index.html");
-        let i18n = include_str!("../../../ui/shell-i18n.js");
+        let i18n = crate::ui_source::I18N_CATALOGS;
         let dashboard = include_str!("../../../ui/shell-jev.js");
         let template = &page[page
             .find("<template id=\"jev-custom-words\">")

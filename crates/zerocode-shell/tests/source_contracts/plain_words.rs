@@ -61,7 +61,7 @@ fn catalog_values(catalogs: &str) -> Vec<(&str, &str)> {
 
 #[test]
 fn no_catalog_says_wall_in_any_of_the_five_languages() {
-    let catalogs = strip_comments(include_str!("../../../../ui/shell-i18n.js"));
+    let catalogs = strip_comments(super::support::I18N_CATALOGS);
     let values = catalog_values(&catalogs);
     // The reader has to be reading the catalogs at all — four languages of
     // thousands of keys — or every line below passes on nothing.

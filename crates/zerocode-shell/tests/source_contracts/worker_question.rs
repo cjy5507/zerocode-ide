@@ -72,7 +72,6 @@ fn every_reason_a_worker_question_reaches_the_person_has_words_in_five_catalogs(
         "the reader found only these reasons: {reasons:?}"
     );
     let words = block_after(window_source(), "function askRaisedWords(");
-    let catalogs = ui_file("shell-i18n.js");
     for reason in &reasons {
         let case = words
             .split(&format!("case \"{reason}\":"))
@@ -94,11 +93,13 @@ fn every_reason_a_worker_question_reaches_the_person_has_words_in_five_catalogs(
             key.starts_with("board.ask.raised"),
             "`{reason}` is said by `{key}`"
         );
-        assert_eq!(
-            catalogs.matches(&format!("\"{key}\":")).count(),
-            4,
-            "`{key}` is not in the four catalogs"
-        );
+        for language in ["en", "ja", "zh", "es"] {
+            let catalog = ui_file(&format!("shell-i18n-{language}.js"));
+            assert!(
+                catalog.contains(&format!("\"{key}\":")),
+                "`{key}` is not in the {language} catalog"
+            );
+        }
     }
 }
 

@@ -305,7 +305,7 @@ mod tests {
         );
         assert!(!block.contains(" title="), "no native title attributes");
 
-        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        let i18n = crate::support::I18N_CATALOGS;
         for key in [
             "update.readyAppVersion",
             "update.readyAppBuild",
@@ -407,7 +407,7 @@ mod tests {
         assert!(settings.contains("zo.integration.contractRefused"));
         assert!(settings.contains("zo.integration.briefingWithheld"));
         assert!(settings.contains("\"launch-refused\""));
-        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        let i18n = crate::support::I18N_CATALOGS;
         for key in [
             "zo.integration.launchRefused",
             "zo.integration.contractRefused",
@@ -9229,7 +9229,7 @@ mod tests {
                 && hint.contains("다음 판부터"),
             "the per-site user-agent hint stopped saying a row reaches the NEXT pane:\n{hint}"
         );
-        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        let i18n = crate::support::I18N_CATALOGS;
         for key in [
             "settings.browser.userAgents",
             "settings.browser.userAgentsHint",
@@ -10238,7 +10238,7 @@ mod tests {
             markup.contains(r#"<span class="sb-item" id="sb-loans" hidden>"#),
             "the status bar lost its loan line, or shows it with nothing lent"
         );
-        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        let i18n = crate::support::I18N_CATALOGS;
         for key in ["emulator.loans", "emulator.loansNow"] {
             assert_eq!(
                 i18n.matches(&format!("\"{key}\":")).count(),
@@ -10432,7 +10432,7 @@ mod tests {
                 "an agent's mirror lost {owned}:\n{opening}"
             );
         }
-        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        let i18n = crate::support::I18N_CATALOGS;
         assert_eq!(
             i18n.matches("\"emulator.agentOpenUnseated\":").count(),
             4,
@@ -11314,15 +11314,14 @@ mod tests {
         // contract, reaching the same repaint is.
         let setter = block_after(window, "function setLocale(code) {");
         assert!(
-            setter.contains("commitSetting(\"locale\", \"set_locale\""),
-            "the locale setter repaints but no longer persists a person's \
-             choice:\n{setter}"
+            setter.contains("paintLocaleChoice(code"),
+            "the locale setter no longer reaches the synchronous repaint:\n{setter}"
         );
-        let switching = if setter.contains("applyLocaleChoice(code)") {
-            block_after(window, "function applyLocaleChoice(")
-        } else {
-            setter
-        };
+        let switching = block_after(window, "function paintLocaleChoice(");
+        assert!(
+            switching.contains("commitSetting(\"locale\", \"set_locale\""),
+            "the locale repaint no longer persists a person's choice:\n{switching}"
+        );
         for repaint in [
             // The lane rows: the word for their state, and their close control.
             "refreshChrome()",
@@ -12098,7 +12097,7 @@ mod tests {
         // definition line. What is left is the code that could ask for one.
         let blocks: Vec<String> = ["ko", "en", "ja", "zh", "es"]
             .iter()
-            .map(|language| block_after(&code, &format!("  {language}: {{")).to_string())
+            .map(|language| catalog_block(&code, language).to_string())
             .collect();
         let mut callers = code.clone();
         for block in &blocks {
@@ -12193,14 +12192,9 @@ mod tests {
         );
 
         let mut unused: Vec<&str> = Vec::new();
-        // Catalog entries close with `  },`, while `block_after` deliberately
-        // recognises top-level JavaScript blocks ending in a bare `}`. Slice
-        // this object by its next language header so an unused key is reported
-        // once, not once per translated catalog.
-        let catalog = window
-            .split_once("  en: {")
-            .and_then(|(_, rest)| rest.split_once("\n  },\n  ja: {").map(|(en, _)| en))
-            .expect("the English catalog no longer has a bounded object");
+        // Read the English entries alone: every catalog carries the same key
+        // set, and scanning all four would report one unused key four times.
+        let catalog = catalog_block(window, "en");
         for line in catalog.lines() {
             let line = line.trim();
             let Some(rest) = line.strip_prefix('"') else {
@@ -12251,21 +12245,6 @@ mod tests {
         let window = window_source();
         let markup = include_str!("../../../../ui/index.html");
         let code = strip_comments(window);
-
-        /// One language's table, sliced by its own header and the `  },` that
-        /// closes it — the same shape `no_catalog_key_is_shipped_unused` cuts
-        /// the English one by, generalised so all four can be read.
-        fn catalog_block<'a>(source: &'a str, language: &str) -> &'a str {
-            let opened = format!("\n  {language}: {{");
-            let at = source
-                .find(&opened)
-                .unwrap_or_else(|| panic!("the `{language}` catalog left ui/shell.js"));
-            let rest = &source[at + opened.len()..];
-            let end = rest
-                .find("\n  },\n")
-                .unwrap_or_else(|| panic!("the `{language}` catalog is unbounded"));
-            &rest[..end]
-        }
 
         /// A catalog line names a key when its quoted head is followed by a
         /// colon. Written that way rather than looking for `": "` because a
@@ -12441,12 +12420,7 @@ mod tests {
         let table = table.unwrap_or_default();
 
         fn catalog<'a>(window: &'a str, language: &str) -> &'a str {
-            let opened = format!("\n  {language}: {{\n");
-            let at = window
-                .find(&opened)
-                .unwrap_or_else(|| panic!("no `{language}` catalog"));
-            let rest = &window[at..];
-            rest.split_once("\n  },").map_or(rest, |(block, _)| block)
+            catalog_block(window, language)
         }
         let mut wordless: Vec<String> = Vec::new();
         for tag in tags {
@@ -12565,12 +12539,8 @@ mod tests {
             }
         };
         allow("function say(");
-        let setter = block_after(&code, "function setLocale(code) {");
-        let repaint = if setter.contains("applyLocaleChoice(code)") {
-            "function applyLocaleChoice("
-        } else {
-            "function setLocale(code) {"
-        };
+        allow("function setLocale(code) {");
+        let repaint = "function paintLocaleChoice(";
         allow(repaint);
         let sweep = block_after(&code, repaint).to_string();
         for line in sweep.lines() {
@@ -13117,12 +13087,7 @@ mod tests {
         let window = window_source();
 
         fn block<'a>(window: &'a str, code: &str) -> &'a str {
-            let at = window
-                .find(&format!("\n  {code}: {{\n"))
-                .unwrap_or_else(|| panic!("no `{code}` catalog"));
-            let rest = &window[at..];
-            let end = rest.find("\n  },").expect("catalog never closes");
-            &rest[..end]
+            catalog_block(window, code)
         }
         fn entries(block: &str) -> Vec<(&str, &str)> {
             block
@@ -23403,7 +23368,7 @@ mod tests {
             "the inbox commands are not registered with the window"
         );
 
-        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        let i18n = crate::support::I18N_CATALOGS;
         for key in INBOX_KEYS {
             assert_eq!(
                 i18n.matches(&format!("\"{key}\"")).count(),
@@ -37656,25 +37621,8 @@ mod tests {
 
         // Korean is the source language and has no catalog: the fallback beside
         // each call is its entry. The other four have to be complete.
-        for (language, next) in [
-            ("en", Some("ja")),
-            ("ja", Some("zh")),
-            ("zh", Some("es")),
-            ("es", None),
-        ] {
-            let header = format!("  {language}: {{");
-            let rest = window
-                .split_once(&header)
-                .map(|(_, rest)| rest)
-                .unwrap_or_else(|| panic!("the {language} catalog is gone"));
-            let closes = next.map_or_else(
-                || "\n  },\n};".to_string(),
-                |next| format!("\n  }},\n  {next}: {{"),
-            );
-            let catalog = rest
-                .split_once(&closes)
-                .map(|(catalog, _)| catalog)
-                .unwrap_or_else(|| panic!("the {language} catalog is not bounded"));
+        for language in ["en", "ja", "zh", "es"] {
+            let catalog = catalog_block(window, language);
             for key in &named {
                 assert!(
                     catalog.contains(&format!("\"{key}\":")),
@@ -40359,7 +40307,7 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
         !paint.contains("querySelector(\".pane-chat-notice\")"),
         "the page asks the helper, never the bare class"
     );
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = crate::support::I18N_CATALOGS;
     for key in [
         "worker.noPaneTranscript",
         "worker.handoverPending",
@@ -40402,7 +40350,7 @@ fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
     let shell = include_str!("../../../../ui/shell.js");
     let view = include_str!("../../../../ui/shell-conversation-view.js");
     let css = include_str!("../../../../ui/shell.css");
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = crate::support::I18N_CATALOGS;
     let door = support::block_after(view, "function chatEarlierDoorNode(list) {");
     assert!(
         door.contains("document.createElement(\"button\")")
@@ -40850,7 +40798,7 @@ fn the_macos_permission_page_judges_this_process_from_one_table() {
         !window.contains("developerPermissionStatuses = new Set([\n  \"granted\", \"denied\", \"unknown\", \"ready\", \"unsupported\", \"tested\","),
         "the last test must not grow a tenth status word"
     );
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = crate::support::I18N_CATALOGS;
     for key in [
         "settings.permissions.accessHint",
         "settings.permissions.automationHint",
@@ -41036,7 +40984,7 @@ fn the_emulator_pane_opens_on_a_resumed_device() {
         saying.contains("dropEmulatorBootCaption(tab);"),
         "another message can now be overwritten by the caption's next tick:\n{saying}"
     );
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = crate::support::I18N_CATALOGS;
     for key in ["emulator.booting", "emulator.bootingUnnamed"] {
         assert_eq!(
             i18n.matches(&format!("\"{key}\":")).count(),

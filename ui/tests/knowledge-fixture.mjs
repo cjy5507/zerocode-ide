@@ -70,6 +70,7 @@ export const BOOT = {
 };
 
 export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
+  window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = true;
   window.__CALLS__ = [];
   window.__LISTENERS__ = {};
   window.__CLIPBOARD_TEXT__ = "";

@@ -62,7 +62,7 @@ fn the_persons_input_commands_renew_the_room_only_for_the_persons_hand() {
 
 const PEER_ROOM: &str = include_str!("../../src/orchestration/peer_room.rs");
 const INDEX: &str = include_str!("../../../../ui/index.html");
-const CATALOGS: &str = include_str!("../../../../ui/shell-i18n.js");
+const CATALOGS: &str = super::support::I18N_CATALOGS;
 const GUIDE: &str = include_str!("../../../../skills/orchestration/SKILL.md");
 
 /// How often a room letter may wake a pane is one number, the window's

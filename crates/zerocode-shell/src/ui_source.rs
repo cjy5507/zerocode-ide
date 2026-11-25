@@ -17,9 +17,18 @@
 /// (`main.rs:46768`의 게이트 B가 그 둘을 맞춘다), 같아야 하는 이유는
 /// `block_after`가 **첫 일치**를 집기 때문이다: 순서가 곧 답이다.
 #[cfg(test)]
+pub(crate) const I18N_CATALOGS: &str = concat!(
+    include_str!("../../../ui/shell-i18n.js"),
+    include_str!("../../../ui/shell-i18n-en.js"),
+    include_str!("../../../ui/shell-i18n-ja.js"),
+    include_str!("../../../ui/shell-i18n-zh.js"),
+    include_str!("../../../ui/shell-i18n-es.js")
+);
+
+#[cfg(test)]
 pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     ("shell-boot.js", include_str!("../../../ui/shell-boot.js")),
-    ("shell-i18n.js", include_str!("../../../ui/shell-i18n.js")),
+    ("shell-i18n.js", I18N_CATALOGS),
     (
         "shell-pane-lifecycle.js",
         include_str!("../../../ui/shell-pane-lifecycle.js"),

@@ -210,7 +210,7 @@ fn every_release_step_is_named_by_the_lane_itself() {
         .expect("tools/release/lane.sh no longer names its PHASE_LANGS")
         .split_whitespace()
         .collect();
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     let locales: Vec<&str> = i18n
         .split_once("const LOCALES = [")
         .and_then(|(_, rest)| rest.split_once("];"))
@@ -628,7 +628,7 @@ fn the_cards_buttons_start_zo_build_and_write_no_record() {
 /// lane's own card left no word behind.
 #[test]
 fn the_build_cards_sentences_are_in_the_four_catalogs() {
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     let window = window_source();
     let mut keys: Vec<&str> = window
         .match_indices("\"board.build.")

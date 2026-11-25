@@ -23220,6 +23220,9 @@ function paintFirstFrame() {
 
 async function boot() {
   const report = await invoke("boot_report");
+  // The active language's words arrive before the snapshot paints anything.
+  // Korean needs no file; every other locale is one catalog, not all four.
+  await ensureLocaleCatalog(report.locale ?? "system", report.system_locale ?? "ko");
   // `boot_report` flattens the same document `settings_snapshot` returns.
   // Applying it through the same door is what makes the first frame, a
   // reopened settings page and another window agree on every preference.
@@ -23389,6 +23392,7 @@ async function boot() {
  * 보드를 먹여 주지 않는다 — 이것이 릴레이 계층 전체를 안 만든 이유다. */
 async function bootPopout() {
   const report = await invoke("boot_report");
+  await ensureLocaleCatalog(report.locale ?? "system", report.system_locale ?? "ko");
   // The pop-out consumes the same snapshot and settings events as the main
   // window. Its OS frame is opaque, so blur intent is retained but active
   // material is false for this process window.

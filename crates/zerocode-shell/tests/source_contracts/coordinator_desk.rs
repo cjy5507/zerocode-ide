@@ -371,7 +371,7 @@ fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
         reading.find("TaskStatus::Closed") < reading.find("WorkStage::Failed"),
         "a closed task is read as failed before it is read as closed:\n{reading}"
     );
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     for key in [
         "board.closed",
         "board.closedFolded",
@@ -535,7 +535,7 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
     );
 
     // One key, read by every surface, in every language but the source's Korean.
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     assert_eq!(
         i18n.matches("\"board.noReviewRecord\":").count(),
         4,

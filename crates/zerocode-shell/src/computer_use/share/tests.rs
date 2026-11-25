@@ -566,7 +566,7 @@ fn the_panel_reuses_the_renderers_words_without_changing_the_share_stamp() {
 
 #[test]
 fn the_panel_accepts_the_current_control_word_in_every_catalog() {
-    let catalog = include_str!("../../../../../ui/shell-i18n.js");
+    let catalog = crate::ui_source::I18N_CATALOGS;
     let renderer = include_str!("../../../../../ui/shell-computer.js");
     let key = "\"computer.band.take\"";
     let mut labels = Vec::new();

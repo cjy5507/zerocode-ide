@@ -53,7 +53,7 @@ export const BROWSER = Object.freeze([
   "Blob", "CSS", "CSSRule", "DOMMatrixReadOnly", "DOMParser", "Element", "EncodedVideoChunk", "Event", "HTMLAnchorElement",
   "HTMLElement", "HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement", "InputEvent",
   "IntersectionObserver", "KeyboardEvent", "MouseEvent", "MutationObserver", "Node", "NodeFilter",
-  "ResizeObserver", "TextDecoder", "TextEncoder", "URL", "URLSearchParams", "VideoDecoder", "atob", "btoa",
+  "ResizeObserver", "TextDecoder", "XMLHttpRequest", "TextEncoder", "URL", "URLSearchParams", "VideoDecoder", "atob", "btoa",
   "cancelAnimationFrame", "clearInterval", "clearTimeout", "console", "crypto", "document", "fetch",
   "getComputedStyle", "innerWidth", "localStorage", "matchMedia", "navigator", "performance", "queueMicrotask",
   "requestAnimationFrame", "sessionStorage", "setInterval", "setTimeout", "structuredClone", "window",

@@ -329,6 +329,101 @@ suite("window-harness", async ({ browser, origin, ok }) => {
     JSON.stringify({ turns: every.turns, end: every.end.slice(0, 300) }));
 });
 
+suite("i18n-lazy-catalogs", async ({ browser, origin, ok }) => {
+  /* Production's first frame waits for the one language it paints, and only
+   * that language: English here because the boot report says English. The
+   * harness's synchronous-test door is explicitly turned off, so this page
+   * walks the same dynamic-script road the app does. */
+  const productionBoot = { ...BOOT, locale: "en", system_locale: "en" };
+  const { page } = await openWindowTestPage(browser, origin, {
+    boot: productionBoot,
+    before: async (opened) => opened.addInitScript(() => {
+      window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = false;
+    }),
+  });
+  try {
+    const booted = await page.evaluate(() => {
+      const script = (name) => performance.getEntriesByType("resource")
+        .some((entry) => entry.name.endsWith(`/${name}`));
+      return {
+        lang: document.documentElement.lang,
+        systemWord: t("settings.appearance.language.system", ""),
+        enKeys: Object.keys(CATALOG.en ?? {}).length,
+        catalogs: Object.fromEntries(["en", "ja", "zh", "es"].map((code) => [code, typeof CATALOG[code]])),
+        scripts: Object.fromEntries(["en", "ja", "zh", "es"].map((code) => [code, script(`shell-i18n-${code}.js`)])),
+      };
+    });
+    ok(
+      "boot loads the active language's catalog and leaves the other three on disk",
+      booted.lang === "en" && booted.systemWord === "System setting" && booted.enKeys > 8000 &&
+        booted.catalogs.en === "object" && booted.catalogs.ja === "undefined" &&
+        booted.catalogs.zh === "undefined" && booted.catalogs.es === "undefined" &&
+        booted.scripts.en === true && booted.scripts.ja === false &&
+        booted.scripts.zh === false && booted.scripts.es === false,
+      JSON.stringify(booted),
+    );
+
+    const raced = await page.evaluate(async () => {
+      const first = setLocale("zh", { refresh: false, persist: false });
+      const second = setLocale("es", { refresh: false, persist: false });
+      const settled = await Promise.all([first, second]);
+      return {
+        settled,
+        lang: document.documentElement.lang,
+        systemWord: t("settings.appearance.language.system", ""),
+        zh: typeof CATALOG.zh,
+        es: typeof CATALOG.es,
+      };
+    });
+    ok(
+      "a faster second language choice wins even while both catalogs are loading",
+      raced.settled[0] === false && raced.settled[1] === true && raced.lang === "es" &&
+        raced.systemWord === "Ajuste del sistema" && raced.zh === "object" && raced.es === "object",
+      JSON.stringify(raced),
+    );
+
+    const persisted = await page.evaluate(async () => {
+      const before = window.__COUNTS__.set_locale ?? 0;
+      const settled = await setLocale("ja");
+      return {
+        settled,
+        before,
+        after: window.__COUNTS__.set_locale ?? 0,
+        lang: document.documentElement.lang,
+        word: t("settings.appearance.language.system", ""),
+      };
+    });
+    ok(
+      "choosing a language waits for its catalog, repaints once, and persists once",
+      persisted.settled === true && persisted.after - persisted.before === 1 &&
+        persisted.lang === "ja" && persisted.word === "システム設定",
+      JSON.stringify(persisted),
+    );
+  } finally {
+    await page.close();
+  }
+
+  /* The harness keeps the old synchronous reading contract for the many
+   * suites whose business is individual translated rows — but the catalog is
+   * still pulled on first use rather than preloaded on every page. */
+  const harnessed = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await harnessed.page.evaluate(() => ({
+      before: typeof CATALOG.en,
+      word: CATALOG.en?.["settings.appearance.language.system"],
+      after: typeof CATALOG.en,
+      jaStillLazy: Object.getOwnPropertyDescriptor(CATALOG, "ja")?.get !== undefined,
+    }));
+    ok(
+      "test suites keep synchronous catalog reads, still loaded one language at a time",
+      seen.before === "object" && seen.word === "System setting" && seen.after === "object" && seen.jaStillLazy,
+      JSON.stringify(seen),
+    );
+  } finally {
+    await harnessed.page.close();
+  }
+});
+
 suite("explorer", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {

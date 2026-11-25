@@ -336,7 +336,7 @@ fn the_flow_is_a_window_part_with_tips_and_its_own_classes() {
             "the flow's rules reuse the flow console's class `{console}`"
         );
     }
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     for key in [
         "artifacts.tab.flow",
         "artifacts.flow.stageMerged",

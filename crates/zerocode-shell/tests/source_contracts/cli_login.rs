@@ -461,7 +461,7 @@ fn the_status_bar_learns_its_sign_in_roads_from_the_table() {
 
 #[test]
 fn the_cli_login_words_exist_in_every_catalog() {
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     for key in [
         "settings.cliLogins.heading",
         "settings.cliLogins.about",

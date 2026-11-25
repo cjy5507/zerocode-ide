@@ -9259,13 +9259,10 @@ function repaintDocumentsForLocale() {
   for (const [body, top] of scrolled) body.scrollTop = top;
 }
 
-/* Change the language, everywhere, now.
- *
- * The static markup is re-read and every surface that builds its own text is
- * repainted — a language that only took effect on the next boot would be a
- * setting nobody trusts. */
-function setLocale(code) {
-  const { refresh = true, persist = true } = arguments[1] ?? {};
+/* Paint the language, everywhere, once its catalog is in memory. `setLocale`
+ * below is the door; this is the synchronous repaint after the door knows the
+ * words are there. */
+function paintLocaleChoice(code, { refresh = true, persist = true } = {}) {
   locale = code;
   syncComputerSharePanelWords();
   document.documentElement.lang = code === "system" ? systemLocale : code;
@@ -9374,6 +9371,25 @@ function setLocale(code) {
     refreshWorktrees();
   }
   if (persist) void commitSetting("locale", "set_locale", { code });
+}
+
+/* Change the language, everywhere, now. The first choice of a non-Korean
+ * language waits for that one catalog; it does not paint Korean for a frame
+ * and then correct itself. A faster second choice wins the race, so a slow
+ * catalog cannot repaint over it. Answers `true` when the catalog was already
+ * warm, else a promise for the repaint — which is also why a test that simply
+ * evaluates `setLocale(...)` waits for the language it asked for. */
+let localeChoiceGeneration = 0;
+function setLocale(code) {
+  const options = arguments[1] ?? {};
+  const generation = ++localeChoiceGeneration;
+  const paint = () => {
+    if (generation !== localeChoiceGeneration) return false;
+    paintLocaleChoice(code, options);
+    return true;
+  };
+  if (localeCatalogReady(code)) return paint();
+  return ensureLocaleCatalog(code).then(paint);
 }
 
 el("keys-search").addEventListener("input", (event) => {

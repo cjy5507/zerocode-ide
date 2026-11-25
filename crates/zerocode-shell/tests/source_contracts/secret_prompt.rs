@@ -192,7 +192,7 @@ fn the_question_is_heard_without_a_value_and_the_card_listens_for_it() {
 
 #[test]
 fn every_secret_word_is_translated_in_the_four_catalogs_beside_korean() {
-    let catalog = ui_file("shell-i18n.js");
+    let catalog = super::support::I18N_CATALOGS;
     for key in [
         "secret.title.password",
         "secret.title.passphrase",

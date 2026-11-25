@@ -289,7 +289,7 @@ fn the_crash_sheet_names_the_filed_task_through_the_catalog() {
     let shell = std::fs::read_to_string(ui.join("shell.js")).unwrap();
     assert!(shell.contains("listen(\"crash:triaged\""));
     assert!(shell.contains("t(\"crash.filed\""));
-    let catalog = std::fs::read_to_string(ui.join("shell-i18n.js")).unwrap();
+    let catalog = super::support::I18N_CATALOGS;
     assert_eq!(
         catalog.matches("\"crash.filed\":").count(),
         5,

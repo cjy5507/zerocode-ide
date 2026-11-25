@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn the_pane_says_the_phone_ports_the_window_sends() {
         let pane = include_str!("../../../../ui/shell-remote.js");
-        let words = include_str!("../../../../ui/shell-i18n.js");
+        let words = crate::ui_source::I18N_CATALOGS;
         assert!(pane.contains("status?.phonePorts"));
         for https in HTTPS_PORTS {
             let port = https.to_string();

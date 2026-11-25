@@ -326,7 +326,7 @@ fn the_update_pane_is_one_module_with_the_designs_controls_and_words() {
     assert!(section.contains("role=\"radiogroup\""));
     assert!(!section.contains(" title="), "no native title attributes");
 
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let i18n = super::support::I18N_CATALOGS;
     for key in [
         "settings.update.pane",
         "settings.update.about",

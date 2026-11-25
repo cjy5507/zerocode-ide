@@ -4136,6 +4136,7 @@ const installTauri = async (page, windowId) => {
   backend.attach(windowId, page);
   await page.addInitScript((id) => {
     window.__SETTINGS_TEST_WINDOW__ = id;
+    window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = true;
     window.__SETTINGS_TEST_LISTENERS__ = {};
     window.__SETTINGS_TEST_EMIT__ = (name, payload) => {
       for (const handler of window.__SETTINGS_TEST_LISTENERS__[name] ?? []) {

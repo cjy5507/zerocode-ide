@@ -1047,12 +1047,7 @@ fn every_reason_a_press_at_a_wall_can_meet_has_words_in_all_five_languages() {
         }
     }
     fn catalog<'a>(window: &'a str, language: &str) -> &'a str {
-        let opened = format!("\n  {language}: {{\n");
-        let at = window
-            .find(&opened)
-            .unwrap_or_else(|| panic!("no `{language}` catalog"));
-        let rest = &window[at..];
-        rest.split_once("\n  },").map_or(rest, |(block, _)| block)
+        super::support::catalog_block(window, language)
     }
     let mut wordless: Vec<String> = Vec::new();
     for code in &codes {

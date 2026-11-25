@@ -15,7 +15,7 @@ use super::support::{markup_between, strip_rust_comments};
 const TABLE: &str = include_str!("../../../zerocode-core/fixtures/type-value/models.json");
 const MARKUP: &str = include_str!("../../../../ui/index.html");
 const SETTINGS: &str = include_str!("../../../../ui/shell-settings.js");
-const I18N: &str = include_str!("../../../../ui/shell-i18n.js");
+const I18N: &str = super::support::I18N_CATALOGS;
 
 /// Where the card's script begins; it ends where the next section does.
 const SCRIPT_OPENS: &str = "/* ---- the key typing into a page's fields asks with";

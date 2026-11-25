@@ -404,6 +404,9 @@ const pollers = await derivePollerCommands();
 const POLLER_COMMANDS = [...pollers.commands.keys()];
 
 const stubBackend = ({ boot, pollers }) => {
+  // Let the words' suites keep their synchronous `CATALOG.en` reads without
+  // making every harness page preload four locales it may never ask about.
+  window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = true;
   window.__SCM_OBSERVER_HEALTH__ = { root: boot.active_root, rows: [] };
   window.__SCM_OBSERVER_RETRIES__ = [];
   window.__CALLS__ = [];
@@ -2547,10 +2550,10 @@ export async function waitBootSettled(page) {
  *            window boots: the init script a fixture needs.
  *   rails  — the two rails on from the first script, as a person's narrow
  *            window boots; off by default (`railsOff`). */
-export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {}, rails = false } = {}) {
+export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {}, rails = false, boot = BOOT } = {}) {
   for (let turn = 1; ; turn += 1) {
     const opened = await openWindowTestPageOnce(browser, origin,
-      { faults, before, shape, rails, last: turn === OWN_FILES_TURNS });
+      { faults, before, shape, rails, boot, last: turn === OWN_FILES_TURNS });
     if (opened.page) return { page: opened.page, faults };
     process.stderr.write(`window-boot: ${opened.unreached.join(" | ")} — this harness's own file server was not reached; `
       + `the page is opened again (turn ${turn + 1} of ${OWN_FILES_TURNS})\n`);
@@ -2574,7 +2577,7 @@ const unreachedOwnFiles = (requests, origin) => requests.filter((line) => line.s
  * files were not reached and this is not the `last` turn; every other failure is thrown. The caller's `faults` takes
  * this page's renderer errors once the page is kept or its failure is final — a turn that is thrown away leaves the
  * list as it was. */
-async function openWindowTestPageOnce(browser, origin, { faults, before, shape, rails, last }) {
+async function openWindowTestPageOnce(browser, origin, { faults, before, shape, rails, boot, last }) {
   // A context of its own, not `browser.newPage()`: a context a page owns
   // refuses `context.newPage()`, and the axe check opens its blank page that
   // way ("Please use browser.newContext()"). The context leaves with the page.
@@ -2610,7 +2613,7 @@ async function openWindowTestPageOnce(browser, origin, { faults, before, shape, 
       if (said.startsWith("TRACE ")) process.stderr.write(`${said}\n`);
     });
   }
-  await standBackend(page, BOOT, { rails });
+  await standBackend(page, boot, { rails });
   await installHarnessHands(page);
   await lagFrames(page);
   /* `WINDOW_CPU_THROTTLE=4`: the page's CPU slowed 4x over CDP — the cpu4x level of
