@@ -6900,6 +6900,16 @@ function rememberBrowserPlacement(choice) {
   }
 }
 
+/* 사람이 팔레트에서 「옆에 분할」을 고른 적이 있는가. `lastBrowserPlacement`의 "split"은 기록이 없을 때의 기본값이기도
+ * 하다 — 고른 분할만 사람의 손이라 좁은 판도 나눈다. 고른 적이 없으면 그 「옆」은 아무도 청하지 않은 것이다. */
+function browserSplitWasChosen() {
+  try {
+    return localStorage.getItem(BROWSER_PLACEMENT_KEY) === "split";
+  } catch {
+    return false;
+  }
+}
+
 /* Failed navigation is already a backend fact (`dead`, with a generation
  * guard). Keep the recovery UI on screen while a hidden native pane retries,
  * so a refused origin cannot flash white between attempts. */

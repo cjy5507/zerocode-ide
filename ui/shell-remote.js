@@ -4953,11 +4953,10 @@ el("jira-item-open-app").addEventListener("click", () => {
   if (!jiraItem || jiraItemBusy) return;
   const at = jiraItem;
   // 작업은 탭이라 무대를 덮지 않는다 — 브라우저는 + 팔레트와 같은 길로, 마지막으로
-  // 고른 자리(옆 판 또는 지금 판의 탭)에 선다. 이슈 패널은 그대로 남는다. 「옆」은 팔레트의
-  // 「옆에 분할」과 같은 손이다: 좁은 판도 나눈다(`splitNarrow`) — 아무도 청하지 않은 문의
-  // 「자리가 있을 때만」 규칙은 고른 자리를 따르는 이 문의 것이 아니다.
-  const split = lastBrowserPlacement() === "split";
-  void openBrowserTab(at.url, { beside: split, splitNarrow: split });
+  // 고른 자리(옆 판 또는 지금 판의 탭)에 선다. 이슈 패널은 그대로 남는다. 사람이 팔레트에서
+  // 「옆에 분할」을 골라 둔 것이면 그 손 그대로 좁은 판도 나눈다(`splitNarrow`). 고른 적이 없을 때의
+  // 「옆」은 기본값일 뿐 아무도 청하지 않은 것이라, 자리가 있을 때만 옆에 선다.
+  void openBrowserTab(at.url, { beside: lastBrowserPlacement() === "split", splitNarrow: browserSplitWasChosen() });
 });
 
 el("jira-item-start").addEventListener("click", () => {
