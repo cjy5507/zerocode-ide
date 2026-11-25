@@ -3,7 +3,9 @@
  * The layout survives a 320px pane the way it survives a 320px window: a toolbar wraps, and no fixed minimum hides an
  * action. The toolbar held ten buttons and the address in one row that did not wrap, so in the pane a split leaves at
  * the window's default size (320px) the last two — 「기본 브라우저로 열기」 and the ⚙ menu — stood outside the pane,
- * where nothing could press them, and the address was a 44px stub. Measured, 2026-11-25: one row needs 352px.
+ * where nothing could press them, and the address was a 44px stub. Measured, 2026-11-25: one row needed 360px.
+ * Those two doors now stand in the ⚙ menu: eight buttons and the address need 300px, so the default window's split
+ * fits one row again and the two rows are for what is narrower still — a third column, a window under the default.
  *
  * What is held here: a pane too narrow for one row stands the toolbar in two — the navigation and the address above,
  * the tools below — with every control inside the pane and under the pointer; a pane wide enough keeps the one row it
@@ -17,8 +19,12 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
 
 /* The window's default size (crates/zerocode-shell/tauri.conf.json): its stage is 649px, a split leaves 320px. */
 const DEFAULT_WINDOW = { width: 1280, height: 800 };
-/* A window whose split leaves a pane one row fits in (380px). */
+/* A window a little under the default: its split leaves 280px, less than one row needs. */
+const NARROW_WINDOW = { width: 1200, height: 800 };
+/* A window whose split leaves a pane one row fits in with room to spare (380px). */
 const ROOMY_WINDOW = { width: 1400, height: 800 };
+/* The toolbar's own controls: three to navigate, the address, four tools and the menu. */
+const CONTROLS = 9;
 
 async function standBrowser(browser, origin, viewport, { beside }) {
   const opened = await openWindowTestPage(browser, origin, { context: { viewport } });
@@ -82,17 +88,18 @@ const NAVIGATION = ["browser-back", "browser-forward", "browser-reload", "browse
 
 export async function testBrowserToolbar(browser, origin, ok) {
   {
-    const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: true });
+    const { page, faults } = await standBrowser(browser, origin, NARROW_WINDOW, { beside: true });
     try {
       const narrow = await toolbar(page);
       ok("a browser pane too narrow for one toolbar row keeps every control inside it and under the pointer",
-        narrow.pane < 352 && narrow.controls.length === 11 && outside(narrow).length === 0,
+        narrow.pane < 300 && narrow.controls.length === CONTROLS && outside(narrow).length === 0,
         JSON.stringify({ pane: narrow.pane, outside: outside(narrow), controls: narrow.controls }));
       const above = narrow.controls.filter((one) => one.top === narrow.rows[0]).map((one) => one.name);
       const below = narrow.controls.filter((one) => one.top === narrow.rows[1]).map((one) => one.name);
       const address = narrow.controls.find((one) => one.name === "browser-address-slot");
       ok("its toolbar stands in two rows: the navigation and the address above, the tools below, the address to the pane's edge",
-        narrow.rows.length === 2 && JSON.stringify(above) === JSON.stringify(NAVIGATION) && below.length === 7
+        narrow.rows.length === 2 && JSON.stringify(above) === JSON.stringify(NAVIGATION)
+          && below.length === CONTROLS - NAVIGATION.length
           && below.at(-1) === "browser-menu" && address.right >= narrow.pane - narrow.padding - 1,
         JSON.stringify({ rows: narrow.rows, above, below, address, pane: narrow.pane }));
       ok("the page begins under the toolbar's two rows", narrow.pageTop >= narrow.barBottom,
@@ -111,9 +118,9 @@ export async function testBrowserToolbar(browser, origin, ok) {
       await settled(page);
       const widened = await toolbar(page);
       ok("the same pane widened past one row's need stands the toolbar in one row again",
-        widened.pane >= 352 && widened.rows.length === 1 && outside(widened).length === 0,
+        widened.pane >= 300 && widened.rows.length === 1 && outside(widened).length === 0,
         JSON.stringify({ pane: widened.pane, rows: widened.rows, outside: outside(widened) }));
-      await page.setViewportSize(DEFAULT_WINDOW);
+      await page.setViewportSize(NARROW_WINDOW);
       await settled(page);
       const narrowed = await toolbar(page);
       ok("and narrowed again, in two", narrowed.rows.length === 2 && outside(narrowed).length === 0,
@@ -122,11 +129,22 @@ export async function testBrowserToolbar(browser, origin, ok) {
     } finally { await page.close(); }
   }
   {
+    const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: true });
+    try {
+      const split = await toolbar(page);
+      ok("the default window's split (320px) fits the toolbar in one row, the menu inside the pane",
+        split.pane >= 300 && split.pane < 360 && split.rows.length === 1 && split.controls.length === CONTROLS
+          && outside(split).length === 0 && split.controls.at(-1).name === "browser-menu",
+        JSON.stringify({ pane: split.pane, rows: split.rows, outside: outside(split), last: split.controls.at(-1) }));
+      ok("the default split's toolbar raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  {
     const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: false });
     try {
       const wide = await toolbar(page);
       ok("a pane wide enough keeps the one toolbar row it had, the address taking what the buttons leave",
-        wide.pane >= 352 && wide.rows.length === 1 && wide.controls.length === 11 && outside(wide).length === 0
+        wide.pane >= 300 && wide.rows.length === 1 && wide.controls.length === CONTROLS && outside(wide).length === 0
           && wide.barBottom <= 40,
         JSON.stringify({ pane: wide.pane, rows: wide.rows, barBottom: wide.barBottom, outside: outside(wide) }));
       ok("the wide toolbar raises no page errors", faults.length === 0, faults.join("\n"));

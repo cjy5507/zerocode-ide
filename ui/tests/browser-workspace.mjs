@@ -1154,7 +1154,8 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         tab.loading = true;
         paintBrowserView(tab);
         host?.querySelector(".browser-reload")?.click();
-        host?.querySelector(".browser-devtools")?.click();
+        // The ⚙ menu's developer-tools row calls this (it was a toolbar button until 2026-11-25).
+        openBrowserDevtools(tab);
         await runBrowserFind(tab, "example", true);
         dropBrowserFindMarks(tab);
         browserZoomStep(tab, 1);

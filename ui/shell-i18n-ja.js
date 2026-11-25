@@ -7514,7 +7514,6 @@ registerI18nCatalog("ja", {
     "browser.dl.going": "ダウンロード中",
     "browser.dl.open": "開く",
     "browser.dl.show": "表示",
-    "browser.external": "既定のブラウザで開く",
     "browser.find": "ページ内を検索",
     "browser.find.close": "閉じる",
     "browser.find.next": "次の一致",

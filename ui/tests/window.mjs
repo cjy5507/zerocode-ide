@@ -12323,10 +12323,15 @@ const browserTab = await page.evaluate(async () => {
   document.getElementById("note-pop").hidden = true;
   await new Promise((done) => setTimeout(done, 40));
   seen.backAfterPopover = steered.some(([verb, args]) => verb === "browser_place" && args.shown === true);
-  // 개발자 도구 단추 — Orca의 "Open browser devtools".
+  // 개발자 도구 — Orca의 "Open browser devtools". ⚙ 메뉴의 줄이다(도구줄의 단추였다, 2026-11-25).
   const shownHost = [...document.querySelectorAll(".browser-view")].find((one) => !one.hidden);
   steered.length = 0;
-  shownHost.querySelector(".browser-devtools").click();
+  shownHost.querySelector(".browser-menu").click();
+  await new Promise((done) => setTimeout(done, 80));
+  [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")]
+    .find((one) => one.textContent === t("browser.devtools", "개발자 도구"))
+    ?.click();
+  await new Promise((done) => setTimeout(done, 40));
   seen.devtools = steered.some(([verb, args]) => verb === "browser_devtools" && args.label === "browser-91");
   // Orca의 Browser scope chord: 브라우저 탭이 앞일 때 ⌘R은 페이지 새로고침,
   // ⌘=/⌘0은 확대 사다리, ⌘L은 주소창이다.

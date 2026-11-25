@@ -7525,7 +7525,6 @@ registerI18nCatalog("en", {
     "browser.dl.going": "Downloading",
     "browser.dl.open": "Open",
     "browser.dl.show": "Show in folder",
-    "browser.external": "Open in system browser",
     "browser.find": "Find in page",
     "browser.find.close": "Close",
     "browser.find.next": "Next match",

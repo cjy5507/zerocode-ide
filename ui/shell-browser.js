@@ -1307,7 +1307,7 @@ function paintBrowserWorkspace(host, tab) {
   host.querySelector(".browser-address").readOnly = !control;
   host.querySelector(".browser-address").setAttribute("aria-label", managed
     ? t("browser.workspace.address", "작업 페이지 주소") : t("browser.address", "주소를 입력하거나 검색"));
-  for (const name of ["back", "forward", "reload", "find", "devtools", "menu", "markup"]) {
+  for (const name of ["back", "forward", "reload", "find", "menu", "markup"]) {
     host.querySelector(`.browser-${name}`).disabled = !control || (name === "markup" && managed && tab.workspace?.snapshotSupported !== true);
   }
   for (const name of ["grab", "annotate"]) {
@@ -1359,7 +1359,6 @@ function paintBrowserWorkspace(host, tab) {
     ? t("browser.workspace.watching", "보기만 가능합니다. 페이지를 조작하려면 ‘내가 조작’을 누르세요.")
     : t("browser.workspace.folded", "화면을 접어도 작업 브라우저는 유지됩니다. ‘지금 보기’로 화면을 확인하세요."));
   host.querySelector(".browser-failure").hidden = !control || !tab.navFailure;
-  host.querySelector(".browser-external").disabled = !control || externalBrowserUrl(tab.url) === null;
 }
 
 function clearBrowserWorkspaceFrames() {
@@ -1695,8 +1694,6 @@ function buildBrowserView() {
     button("browser-annotate", "pencil", { key: "browser.annotate", name: "요소에 주석 달기" }),
     button("browser-markup", "pen-tool", { key: "browser.markup", name: "스크린샷에 그리기" }),
     button("browser-find", "eye", { key: "browser.find", name: "페이지에서 찾기" }),
-    button("browser-devtools", "wrench", { key: "browser.devtools", name: "개발자 도구" }),
-    button("browser-external", "external", { key: "browser.external", name: "기본 브라우저로 열기" }),
     button("browser-menu", "gear", { key: "browser.menu", name: "브라우저 메뉴" }),
   );
   // 주석 수 뱃지 — Orca가 annotate 컨트롤 모서리에 다는 그 수. 뱃지 자체가
@@ -1832,6 +1829,20 @@ function buildBrowserView() {
   return host;
 }
 
+/* 개발자 도구 — Orca의 "Open browser devtools". ⚙ 메뉴의 줄이 부른다: 도구줄의 단추였으나, 좁은 판에서
+ * 주소가 설 자리를 단추 열 개가 먼저 가져갔다(2026-11-25). */
+function openBrowserDevtools(tab) {
+  if (!browserWorkspaceCanControl(tab)) return;
+  invoke("browser_devtools", browserWorkspaceArgs(tab)).catch(() => {});
+  // macOS의 인스펙터는 이 창 안에 도킹하며 창을 다시 나눈다 — 문서가
+  // 줄어드는 동안 판이 옛 자리에 떠 있으면 인스펙터를 덮는 흰 면이 된다
+  // (라이브 보고 2026-08-14 #63). 반영이 끝날 때까지 몇 번 다시 잰다;
+  // 닫힘도 같은 줄이므로 같은 버스트가 되돌린다.
+  for (const wait of [200, 600, 1200]) {
+    setTimeout(syncBrowserPanes, wait);
+  }
+}
+
 /* Give a host its hands, once per NODE — the clone a second leaf gets arrives
  * with dead buttons, and this is what brings them to life. The handlers read
  * `host._browserTab`, which every paint refreshes: a listener holding the tab
@@ -1920,22 +1931,6 @@ function wireBrowserHost(host) {
     }
     tab.navigationStopped = tab.loading === true;
     invoke(tab.loading ? "browser_stop" : "browser_reload", browserWorkspaceArgs(tab)).catch(() => {});
-  });
-  host.querySelector(".browser-external").addEventListener("click", () => {
-    const out = externalBrowserUrl(held()?.url);
-    if (out) openExternal(out);
-  });
-  host.querySelector(".browser-devtools").addEventListener("click", () => {
-    const tab = held();
-    if (!browserWorkspaceCanControl(tab)) return;
-    invoke("browser_devtools", browserWorkspaceArgs(tab)).catch(() => {});
-    // macOS의 인스펙터는 이 창 안에 도킹하며 창을 다시 나눈다 — 문서가
-    // 줄어드는 동안 판이 옛 자리에 떠 있으면 인스펙터를 덮는 흰 면이 된다
-    // (라이브 보고 2026-08-14 #63). 반영이 끝날 때까지 몇 번 다시 잰다;
-    // 닫힘도 같은 버튼이므로 같은 버스트가 되돌린다.
-    for (const wait of [200, 600, 1200]) {
-      setTimeout(syncBrowserPanes, wait);
-    }
   });
   // Design mode: arm the crosshair in the guest, poll for the pick, hand what
   // it grabbed to an agent terminal (1-g5). The button is a toggle — a second
@@ -2037,6 +2032,20 @@ function wireBrowserHost(host) {
           rememberBrowserOpenTabs();
         },
       })),
+      { separator: true },
+      {
+        label: t("browser.devtools", "개발자 도구"),
+        run: () => openBrowserDevtools(tab),
+      },
+      {
+        // 페이지의 오른쪽 누름 메뉴에 선 그 줄과 같은 말, 같은 문이다.
+        label: t("browser.menu.openPageOut", "기본 브라우저에서 페이지 열기"),
+        disabled: externalBrowserUrl(tab.url) === null,
+        run: () => {
+          const out = externalBrowserUrl(tab.url);
+          if (out) openExternal(out);
+        },
+      },
       { separator: true },
       {
         label: t("browser.openSettings", "브라우저 설정…"),
@@ -4932,7 +4941,6 @@ function paintBrowserView(tab) {
   if (document.activeElement !== address) {
     address.value = tab.url === BROWSER_BLANK_URL ? "" : (tab.url ?? "");
   }
-  host.querySelector(".browser-external").disabled = externalBrowserUrl(tab.url) === null;
   // A blank page has nothing to grab; Orca greys its crosshair the same way.
   const grab = host.querySelector(".browser-grab");
   const blank = !tab.url || tab.url === BROWSER_BLANK_URL;

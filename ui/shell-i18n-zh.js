@@ -7514,7 +7514,6 @@ registerI18nCatalog("zh", {
     "browser.dl.going": "下载中",
     "browser.dl.open": "打开",
     "browser.dl.show": "显示位置",
-    "browser.external": "用默认浏览器打开",
     "browser.find": "在页面中查找",
     "browser.find.close": "关闭",
     "browser.find.next": "下一个",
