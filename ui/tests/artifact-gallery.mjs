@@ -271,6 +271,87 @@ ok("new artifact asks for its recipient, leaves the draft unsent in the chosen a
   newDraft.sent?.term === 3239 && newDraft.sent?.submit === false && newDraft.focused &&
   newDraft.sent?.text.includes("zerocode-artifact publish --file-path"), JSON.stringify(newDraft));
 
+/* 다시 쓴 페이지의 카드는 새 그림이 그려질 때까지 앞 그림을 입고 선다(t-129552, 1.1.176 「화면이 계속 깜박거림」).
+ * 에이전트가 페이지를 다시 쓰면 카탈로그를 다시 읽고 그 행의 그림 열쇠가 바뀐다. 창은 그 그림을 캐시에서 지우고 카드를
+ * 글리프로 돌렸다가, 숨은 판이 새 그림을 그려 오면(표의 상한 8 s 안) 다시 입혔다 — 다시 쓸 때마다 카드의 그림이 한 번
+ * 꺼졌다 켜졌다(Chrome 스크린캐스트: 다시 쓰기 10번에 그 카드 얼굴의 밝기 계단 19번, 한 프레임 최대 180). 재는 것은 새
+ * 그림이 오기 전에 썸네일 <img>가 숨겨지거나 비워진 횟수(MutationObserver)와 카드의 노드 동일성이다. 다시 그리기가
+ * 실패하면 그 열쇠의 끝이라, 앞 그림을 들고 있지 않고 글리프로 물러난다. */
+const redrawn = await page.evaluate(async () => {
+  dropTab("artifacts");
+  artifactFilter.tab = "pages";
+  const rows = window.__buildArtifacts__({ count: 0, gallery: 3, now: Date.now() }).filter((row) => ["gal-0", "gal-2"].includes(row.id));
+  const savedList = window.__ANSWER__.artifacts_list;
+  const savedThumb = window.__ANSWER__.artifact_thumbnail;
+  // 답마다 새 행이다 — 백엔드의 답이 그렇다(바뀌지 않은 행도 새 객체로 온다).
+  window.__ANSWER__.artifacts_list = () => ({ rows: rows.map((row) => ({ ...row })), total: rows.length, thumb: { queue_max: 2 } });
+  // 그림은 열쇠마다 다르다: 같은 1×1 그림에 행과 시각을 조각(#)으로 단다.
+  const picture = (row) => `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${row.id}-${row.modified_ms}`;
+  // 다시 그리는 그림의 답은 붙잡아 둔다 — 숨은 판이 페이지를 읽고 찍는 동안이다.
+  let hold = null;
+  window.__ANSWER__.artifact_thumbnail = (args) => {
+    const row = rows.find((one) => one.id === args.id);
+    if (hold === null || args.id !== "gal-0") return Promise.resolve({ data_url: picture(row), cached: false });
+    return new Promise((done) => { hold.answer = (url) => done({ data_url: url, cached: false }); });
+  };
+  el("nav-artifacts").click();
+  await window.__PAINTED__();
+  await window.__UNTIL__(() => !artifactAsking && !artifactThumbBusy && artifactThumbQueue.length === 0
+    && artifactCardNodeFor("gal-0")?.querySelector(".artifact-card-thumb").getAttribute("src") === picture(rows[0]), "the first pictures");
+  const card = artifactCardNodeFor("gal-0");
+  const img = card.querySelector(".artifact-card-thumb");
+  const first = img.getAttribute("src");
+  // 숨김이 켜진 횟수와 src에 쓴 값들(앞 값의 기록으로 되짚는다: i번째 쓰기의 새 값은 i+1번째 기록의 앞 값).
+  let hid = 0;
+  const srcBefore = [];
+  const note = (records) => {
+    for (const record of records) {
+      if (record.attributeName === "hidden" && record.oldValue === null) hid += 1;
+      if (record.attributeName === "src") srcBefore.push(record.oldValue);
+    }
+  };
+  const watch = new MutationObserver(note);
+  watch.observe(img, { attributes: true, attributeOldValue: true, attributeFilter: ["hidden", "src"] });
+  // 지금까지 src에 쓴 새 값들 — 아직 전해지지 않은 기록부터 읽는다.
+  const writes = () => {
+    note(watch.takeRecords());
+    return [...srcBefore.slice(1), img.getAttribute("src")].slice(0, srcBefore.length);
+  };
+  const rewrite = async () => {
+    hold = {};
+    rows[0] = { ...rows[0], modified_ms: rows[0].modified_ms + 1, bytes: rows[0].bytes + 1 };
+    for (const handler of window.__LISTENERS__["artifacts:changed"] ?? []) handler({ payload: null });
+    await window.__UNTIL__(() => !artifactAsking && hold.answer !== undefined, "the page drawn again");
+    await window.__PAINTED__();
+  };
+  // 에이전트가 페이지를 다시 쓴다 — 새 그림은 아직 그려지는 중이다.
+  await rewrite();
+  const emptiedWhileDrawing = writes().filter((value) => !value).length;
+  const drawing = { same: artifactCardNodeFor("gal-0") === card, hidden: img.hidden, wearsFirst: img.getAttribute("src") === first,
+    hid, emptied: emptiedWhileDrawing };
+  hold.answer(picture(rows[0]));
+  await window.__UNTIL__(() => img.getAttribute("src") === picture(rows[0]), "the new picture");
+  const emptiedWhenDrawn = writes().filter((value) => !value).length;
+  const drawn = { same: artifactCardNodeFor("gal-0") === card, hidden: img.hidden, hid, emptied: emptiedWhenDrawn };
+  // 다시 쓴 페이지를 그리지 못했다: 그 열쇠의 끝이라 글리프로 물러난다.
+  await rewrite();
+  hold.answer(null);
+  await window.__UNTIL__(() => artifactThumbFailed.has("gal-0") && !artifactThumbBusy, "the failed picture");
+  await window.__PAINTED__();
+  const failed = { same: artifactCardNodeFor("gal-0") === card, hidden: img.hidden, glyph: !card.querySelector(".artifact-card-glyph").hidden };
+  watch.disconnect();
+  window.__ANSWER__.artifacts_list = savedList;
+  window.__ANSWER__.artifact_thumbnail = savedThumb;
+  artifactThumbFailed.delete("gal-0");
+  dropTab("artifacts");
+  return { drawing, drawn, failed };
+});
+ok("a page an agent writes again keeps its card's picture while the new one is drawn — the same card node, its picture neither hidden nor emptied, then the new picture in its place — and a redraw that fails falls back to the glyph",
+  redrawn.drawing.same && redrawn.drawing.hidden === false && redrawn.drawing.wearsFirst && redrawn.drawing.hid === 0 && redrawn.drawing.emptied === 0 &&
+    redrawn.drawn.same && redrawn.drawn.hidden === false && redrawn.drawn.hid === 0 && redrawn.drawn.emptied === 0 &&
+    redrawn.failed.same && redrawn.failed.hidden === true && redrawn.failed.glyph,
+  JSON.stringify(redrawn));
+
 }
 
 export async function testArtifactPages(page, ok) {
