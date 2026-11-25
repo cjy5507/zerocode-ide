@@ -6048,6 +6048,9 @@ function collapseStageGroup(group) {
     }
     // The strip watcher holds its strip the same way (t-78107).
     tabStripWatch.unobserve(held.strip);
+    // A knowledge view's universe and painter hold GL contexts and document
+    // listeners; the tab, if it survives, builds a fresh view next door.
+    if (held.knowledgeView) dropKnowledgeView(held.knowledgeView);
     // 하나뿐인 판(작업)이 접히는 판 안에 있으면 함께 문서에서 떨어진다 — 그러면
     // id로 칸을 찾던 손이 모두 길을 잃는다. 남는 판(0)으로 먼저 옮긴다.
     for (const kind of DOC_KINDS) {

@@ -7957,6 +7957,15 @@ function paintKnowledgeEmpty(view, model) {
 
 /* ---- 손 매기 ---- */
 
+/* 검색 칸 밖을 누르면 서 있는 화면들의 후보가 닫힌다. 문서의 귀는 하나다 — 화면마다 달면 판이 접혀 떠난 화면을
+ * 문서가 끝까지 붙든다(쪽 4,300의 볼트에서 접힐 때마다 약 2.6 MB, t-129269). */
+document.addEventListener("pointerdown", (e) => {
+  if (e.target.closest(".knowledge-search")) return;
+  for (const view of document.querySelectorAll(".knowledge-view")) {
+    if (wiredKnowledgeViews.has(view)) setKnowledgeSuggesting(view, false);
+  }
+});
+
 function wireKnowledgeView(view) {
   paintWorkbenchNavigation(view, "knowledge");
   if (wiredKnowledgeViews.has(view)) return;
@@ -8420,9 +8429,6 @@ function wireKnowledgeView(view) {
     };
   }
 
-  document.addEventListener("pointerdown", (e) => {
-    if (!e.target.closest(".knowledge-search")) setKnowledgeSuggesting(view, false);
-  });
   /* 목록의 키보드(S7): 같은 목록 안에서 ↑↓가 줄 사이를 옮기고 Home/End가 끝으로 간다.
    * 줄은 진짜 <button>이라 Tab으로도 닿고, 고르는 것은 그 단추의 클릭 그대로다. */
   view.querySelector(".knowledge-inspector").onkeydown = (event) => {
@@ -9022,6 +9028,17 @@ function releaseKnowledgeView(tab) {
   const view = groups.get(tab.pane)?.knowledgeView;
   if (!view) return;
   if (typeof leaveKnowledgeUniverse === "function") leaveKnowledgeUniverse(view);
+}
+
+/* 판이 접혀 그 판의 지식 화면이 문서를 떠난다(`collapseStageGroup`) — 탭이 남았으면 옆 판에서 제 화면을 새로
+ * 세우므로, 떠나는 화면의 우주와 그리는 손을 여기서 놓는다. 둘은 GL 문맥과 문서의 귀(`visibilitychange` · 테마
+ * 관찰자)를 쥐어서, 놓지 않으면 접힐 때마다 문맥 하나(우주가 서 있었으면 둘)와 그 화면의 배치가 남는다(t-129269). */
+function dropKnowledgeView(view) {
+  const universe = knowledgeUniverses.get(view);
+  knowledgeUniverses.delete(view);
+  universe?.dispose();
+  knowledgePainters.get(view)?.dispose();
+  knowledgePainters.delete(view);
 }
 
 /* 판이 무대에 설 때마다 지나는 문. 그림은 처음 열 때와 `second-brain:changed`가 올
