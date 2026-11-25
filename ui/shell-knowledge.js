@@ -9033,13 +9033,17 @@ function releaseKnowledgeView(tab) {
 
 /* 판이 접혀 그 판의 지식 화면이 문서를 떠난다(`collapseStageGroup`) — 탭이 남았으면 옆 판에서 제 화면을 새로
  * 세우므로, 떠나는 화면의 우주와 그리는 손을 여기서 놓는다. 둘은 GL 문맥과 문서의 귀(`visibilitychange` · 테마
- * 관찰자)를 쥐어서, 놓지 않으면 접힐 때마다 문맥 하나(우주가 서 있었으면 둘)와 그 화면의 배치가 남는다(t-129269). */
+ * 관찰자)를 쥐어서, 놓지 않으면 접힐 때마다 문맥 하나(우주가 서 있었으면 둘)와 그 화면의 배치가 남는다(t-129269).
+ * 크기 관찰도 여기서 푼다 — 관찰자는 창에 하나라(`watchGraphResize`) 풀지 않은 화면과 캔버스를 콜백째 쥔다. 우주의
+ * 자리는 우주가 놓일 때(`dispose`) 스스로 푼다. */
 function dropKnowledgeView(view) {
   const universe = knowledgeUniverses.get(view);
   knowledgeUniverses.delete(view);
   universe?.dispose();
   knowledgePainters.get(view)?.dispose();
   knowledgePainters.delete(view);
+  unwatchGraphResize(view);
+  unwatchGraphResize(view.querySelector(".knowledge-canvas"));
 }
 
 /* 판이 무대에 설 때마다 지나는 문. 그림은 처음 열 때와 `second-brain:changed`가 올

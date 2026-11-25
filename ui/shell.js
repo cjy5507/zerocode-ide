@@ -6922,6 +6922,12 @@ function watchGraphResize(canvas, run) {
   graphResizeObserver.observe(canvas);
 }
 
+/* The other half, for a surface that lets its element go: the one observer
+ * keeps every target it was never told to drop, and the run with it. */
+function unwatchGraphResize(target) {
+  if (graphResizeRuns.delete(target)) graphResizeObserver.unobserve(target);
+}
+
 /* Does any of these words hold the needle? Both sides locale-folded, so a
  * query in 한글 or with an accent matches the way the language says it does.
  * `clean` is the surface's own reading of a value — the ontology strips the

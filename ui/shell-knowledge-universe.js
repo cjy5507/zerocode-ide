@@ -2069,6 +2069,8 @@ function makeKnowledgeUniverse(view) {
         this.invalidate();
       }, { passive: false });
       watchGraphResize(host, () => this.resize());
+      /* 크기 관찰도 귀다 — 창에 하나인 관찰자가 이 자리를 쥐지 않게 놓을 때(`dispose`) 함께 푼다(t-129269). */
+      this.unlisten.push(() => unwatchGraphResize(host));
     },
 
     /* 끄는 손 — 궤도, 또는 Shift·오른쪽 끌기로 옮기기(시안의 손 그대로). */
