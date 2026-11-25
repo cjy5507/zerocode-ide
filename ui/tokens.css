@@ -2505,6 +2505,8 @@
   --artifact-kind-export: var(--knowledge-hue-3);
   --artifact-kind-transcript: var(--knowledge-hue-4);
   --artifact-kind-other: var(--ink-mist);
+  --artifact-kind-page: var(--knowledge-hue-3);
+  --artifact-kind-document: var(--knowledge-hue-2);
   /* The artifact studio expresses the existing material palette. These
    * bindings remain theme-aware and never redefine provider/lane identity. */
   --artifact-studio-accent: var(--knowledge-hue-0);
