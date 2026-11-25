@@ -748,7 +748,7 @@ mod tests {
     use crate::session::Session;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> crate::test_root::TestRoot {
         crate::test_root::TestRoot::new("runtime-session-control")
@@ -1260,7 +1260,25 @@ mod tests {
         assert!(!is_managed_session_file(Path::new(
             "session-1-2.prefs.json"
         )));
+        assert!(!is_managed_session_file(Path::new("session-1-2.atif.json")));
         assert!(!is_managed_session_file(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn atif_expires_with_its_session() {
+        let root = tempfile::tempdir().unwrap();
+        let sessions = root.path().join("workspace").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let transcript = sessions.join("fixture.jsonl");
+        let sidecar = sessions.join("fixture.atif.json");
+        fs::write(&transcript, "fixture").unwrap();
+        fs::write(&sidecar, "{}").unwrap();
+
+        let cutoff = SystemTime::now() + Duration::from_secs(1);
+        let report = super::cleanup_expired_sessions_under(root.path(), cutoff);
+        assert_eq!(report.removed_sessions, 1);
+        assert_eq!(report.removed_sidecars, 1);
+        assert!(!sidecar.exists());
     }
 
     #[test]

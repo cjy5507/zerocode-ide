@@ -2989,6 +2989,29 @@ needle b
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn atif_reasoning_is_withheld_from_read_and_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.atif.json");
+        let body = serde_json::json!({
+            "schema_version": "ATIF-v1.7",
+            "steps": [{"message": "Visible fixture answer.", "reasoning_content": REASONING_SENTINEL}],
+        });
+        std::fs::write(&path, body.to_string()).unwrap();
+
+        let read = read_file(path.to_str().unwrap(), None, None).unwrap().file.content;
+        assert!(read.contains("Visible fixture answer."));
+        assert!(!read.contains(REASONING_SENTINEL));
+        let search = grep_content(&path, "Visible fixture answer.", None).content.unwrap();
+        assert!(!search.contains(REASONING_SENTINEL));
+        assert_eq!(grep_content(&path, REASONING_SENTINEL, None).num_files, 0);
+
+        let unpublished = dir.path().join("fixture.atif.json.tmp-example");
+        std::fs::write(&unpublished, format!(r#"{{"reasoning_content":"{REASONING_SENTINEL}"#)).unwrap();
+        let torn = read_file(unpublished.to_str().unwrap(), None, None).unwrap().file.content;
+        assert!(!torn.contains(REASONING_SENTINEL));
+    }
+
     /// Nothing else about the search changes: a file that is not a session
     /// record, a record line whose keys merely say the word, and a line that
     /// carries no reasoning come back exactly as they are — the mask re-writes

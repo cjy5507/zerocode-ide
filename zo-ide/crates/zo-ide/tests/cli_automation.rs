@@ -16,7 +16,9 @@ use scripted::ScriptedAnthropicService;
 struct Fixture { root: tempfile::TempDir, cwd: PathBuf, home: PathBuf, store: PathBuf }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        Self::with_root(tempfile::tempdir().unwrap())
+    }
+    fn with_root(root: tempfile::TempDir) -> Self {
         let cwd = root.path().join("workspace");
         let home = root.path().join("config");
         let store = root.path().join("store");
@@ -59,6 +61,107 @@ fn success(output: &Output) { assert!(output.status.success(), "{}", diagnostic(
 fn failed(output: &Output, needle: &str) { assert!(!output.status.success(), "{}", diagnostic(output)); assert!(diagnostic(output).contains(needle), "{}", diagnostic(output)); }
 fn events(output: &Output) -> Vec<Value> { String::from_utf8_lossy(&output.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect() }
 const OPTIONS: &[&str] = &["--plain", "--model", "claude-sonnet-4-6", "--permission-mode", "workspace-write"];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atif_records_a_completed_turn_and_its_resume() {
+    const SESSION: &str = "atif-fixture";
+    const OLD_QUESTION: &str = "Previous fixture question.";
+    const THOUGHT: &str = "Previous fixture reasoning.";
+    const SUMMARY: &str = "Saved fixture summary.";
+    const RESULT: &str = "Fixture file body.";
+    // The build-line comparison reuses this exact fixture path across commits.
+    let proof = std::env::var_os("ZO_ATIF_PROOF_DIR").map(PathBuf::from);
+    let f = proof.as_ref().map_or_else(Fixture::new, |dir| {
+        Fixture::with_root(tempfile::Builder::new().prefix("fixture").rand_bytes(0).tempdir_in(dir).unwrap())
+    });
+    fs::write(f.cwd.join("fixture.txt"), RESULT).unwrap();
+    let path = f.seed(SESSION, OLD_QUESTION);
+    {
+        let mut session = Session::load_from_path(&path).unwrap();
+        let prior = ConversationMessage::assistant_with_usage(
+            vec![
+                ContentBlock::Thinking { thinking: THOUGHT.into(), signature: "fixture-signature".into() },
+                ContentBlock::RedactedThinking { data: "opaque-fixture-reasoning".into() },
+                ContentBlock::Text { text: "Previous fixture answer.".into() },
+            ],
+            Some(core_types::usage::TokenUsage {
+                input_tokens: 11,
+                output_tokens: 5,
+                cache_creation_input_tokens: 3,
+                cache_read_input_tokens: 7,
+                output_tokens_details: None,
+            }),
+        );
+        session.push_message(prior).unwrap();
+        assert_eq!(session.seal_evicted_to_vault(&session.messages), Some((0, 1)));
+        let text = runtime::get_compact_continuation_message(SUMMARY, true, false, &[]);
+        let mut continuation = ConversationMessage::user_text(text);
+        continuation.role = MessageRole::System;
+        session.apply_compaction_atomic(std::sync::Arc::new(vec![continuation]), SUMMARY, 2, None);
+    }
+
+    let service = ScriptedAnthropicService::tool_calls(
+        &[("read_file", json!({"path": "fixture.txt"}))],
+        "First fixture answer.",
+    ).await.unwrap();
+    let mut first_args = OPTIONS.to_vec();
+    first_args.extend(["--resume", SESSION, "Read the fixture file."]);
+    success(&f.run(&first_args, "", Some(&service)).await);
+    let sidecar = path.with_extension("atif.json");
+    let first_document = fs::read(&sidecar);
+
+    let resumed = ScriptedAnthropicService::text("Resumed fixture answer.").await.unwrap();
+    let mut resume_args = OPTIONS.to_vec();
+    resume_args.extend(["--resume", SESSION, "Finish the fixture task."]);
+    success(&f.run(&resume_args, "", Some(&resumed)).await);
+
+    let first_requests = service.request_bodies().await;
+    let resumed_requests = resumed.request_bodies().await;
+    assert_eq!((first_requests.len(), resumed_requests.len()), (2, 1));
+    assert!(first_requests[1].contains(RESULT));
+    if let Some(dir) = &proof {
+        let bodies = serde_json::to_vec(&[first_requests, resumed_requests]).unwrap();
+        fs::write(dir.join("requests.json"), bodies).unwrap();
+    }
+
+    let first: Value = serde_json::from_slice(&first_document.expect(
+        "ATIF document missing after the first turn"
+    )).unwrap();
+    let bytes = fs::read(&sidecar).expect("ATIF document after resume");
+    if let Some(dir) = &proof {
+        fs::write(dir.join("trajectory.json"), &bytes).unwrap();
+    }
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["schema_version"], "ATIF-v1.7");
+    assert_eq!(document["session_id"], SESSION);
+    assert_eq!(document["agent"]["name"], "zo");
+    let steps = document["steps"].as_array().unwrap();
+    assert!(steps.starts_with(first["steps"].as_array().unwrap()));
+    assert_eq!(steps[0]["source"], "user");
+    assert_eq!(steps[0]["message"], OLD_QUESTION);
+    assert_eq!(steps[1]["reasoning_content"], THOUGHT);
+    assert_eq!(steps[1]["metrics"]["prompt_tokens"], 21);
+    assert_eq!(steps[1]["metrics"]["cached_tokens"], 7);
+    assert!(steps.iter().any(|step| step["source"] == "system"
+        && step["extra"]["context_management"]["type"] == "compaction"));
+    let call = steps.iter().find(|step| step.get("tool_calls").is_some()).unwrap();
+    let result = &call["observation"]["results"][0];
+    assert_eq!(call["tool_calls"][0]["tool_call_id"], result["source_call_id"]);
+    assert_eq!(call["tool_calls"][0]["arguments"]["path"], "fixture.txt");
+    assert!(result["content"].as_str().unwrap().contains(RESULT));
+    assert_eq!(call["metrics"]["prompt_tokens"], 12);
+    assert_eq!(document["final_metrics"]["total_cached_tokens"], 7);
+    assert_eq!(document["final_metrics"]["total_prompt_tokens"], 57);
+    assert_eq!(steps.last().unwrap()["message"], "Resumed fixture answer.");
+    let serialized = String::from_utf8(bytes).unwrap();
+    assert!(!serialized.contains("fixture-signature"));
+    assert!(!serialized.contains("opaque-fixture-reasoning"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(fs::metadata(sidecar).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn malformed_and_missing_input_fails_before_provider_startup() {
