@@ -6852,25 +6852,11 @@ function scheduleGraphFrame(frames, view, run) {
 /* Two decimal places, inside the surface's own range. Rounded because a zoom
  * is written into the DOM and 0.8200000000000001 is a different string from
  * 0.82 to every write guard in this file. */
-/* The zoom grid: hundredths. A hand's zoom rounds to the nearest step; a fit
- * (`fittedGraphZoom`) takes the step BELOW its ratio, never the one above. */
+/* The zoom grid: hundredths. A hand's zoom rounds to the nearest step. */
 const GRAPH_ZOOM_STEPS = 100;
 
 function clampGraphZoom(next, min, max) {
   return Math.min(max, Math.max(min, Math.round(next * GRAPH_ZOOM_STEPS) / GRAPH_ZOOM_STEPS));
-}
-
-/* A fit never rounds up.
- *
- * The nearest step above the ratio draws the picture up to half a step wider
- * than its frame — measured in the release lane (v1.3.77 gate-root): a ratio of
- * about 0.845 rounded to 0.85 stood a 1074px picture 4px past a frame it had
- * fitted at 0.84 in the run before, and the second pass, dividing by the
- * reflowed width, landed on the same step. The step below fits by
- * construction. The auto-fit floor is applied after this, so the floor itself
- * still rounds to its own step (1/1.55 → 0.65). */
-function fittedGraphZoom(ratio) {
-  return Math.floor(ratio * GRAPH_ZOOM_STEPS + 1e-9) / GRAPH_ZOOM_STEPS;
 }
 
 /* A wheel notch, as a multiplier. */

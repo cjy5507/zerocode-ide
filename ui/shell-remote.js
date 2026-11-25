@@ -5118,16 +5118,6 @@ async function startWorktreeFromProviderItem(item, provider) {
 }
 
 /* Jira and pasted links use the provider-neutral smart field. */
-function startWorktreeFromWorkItem(url) {
-  // 작업은 탭이라 무대를 덮지 않는다 — 만들기 창이 그 위에 서고, 취소하면 작업 탭으로 돌아온다.
-  setWorktreeForm(true);
-  setWorktreeTab("smart");
-  wtSpec.value = url;
-  fitWorktreeSpec();
-  paintWorktreeName();
-  void readWorktreeSeed();
-}
-
 function startWorktreeFromJiraItem(issue) {
   setWorktreeForm(true);
   setWorktreeTab("smart");

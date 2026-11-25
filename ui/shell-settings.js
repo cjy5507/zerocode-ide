@@ -15613,8 +15613,8 @@ function taskGithubRow(item) {
 /* ---- GitHub 항목 다이얼로그(1-g54) ---------------------------------------
  * Orca의 GitHubItemDialog 1단: 행 하나가 상세를 열고, 본문과 대화가 이 창의
  * 마크다운 렌더러(구성상 안전 — 스크립트는 글자로 남는다)로 그려지며,
- * 코멘트와 닫기/다시 열기가 gh의 손으로 나간다. 작업 시작은 목록 행이 쓰던
- * 그 문(startWorktreeFromWorkItem)이다. */
+ * 코멘트와 닫기/다시 열기가 gh의 손으로 나간다. 작업 시작은 만들기 창의
+ * GitHub 탭이 이 항목을 골라 둔 채 연다(`startWorktreeFromProviderItem`). */
 const ghItemScrim = el("gh-item-scrim");
 let ghItem = null;
 let ghItemAsking = null;
@@ -16863,8 +16863,8 @@ function gitlabItemRow(item) {
   const acts = document.createElement("span");
   acts.className = "task-gl-acts";
   acts.append(
-    // 시작은 Jira 행이 쓰는 그 문이다(`startWorktreeFromWorkItem`): URL이
-    // 컴포저의 스마트 칸으로 들어가고, 이름을 짓는 손은 Rust 하나뿐이다.
+    // 시작은 GitHub 항목과 같다(`startWorktreeFromProviderItem`): 만들기 창의
+    // GitLab 탭이 이 항목을 골라 둔 채 열린다.
     gitlabActButton(
       "forward",
       () => t("task.gitlab.startWork", "{{item}}에서 워크스페이스 시작", {

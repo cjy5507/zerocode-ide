@@ -920,20 +920,6 @@ function laneStateLabel(state) {
       return state;
   }
 }
-const GLYPH = {
-  zo: "ZO",
-  claude: "CL",
-  codex: "CX",
-  cursor: "CU",
-  droid: "DR",
-  copilot: "CP",
-  grok: "GK",
-  kimi: "KM",
-  devin: "DV",
-  antigravity: "AG",
-  opencode: "OC",
-  "command-code": "CC",
-};
 
 /* ---- view bookkeeping ---- */
 
