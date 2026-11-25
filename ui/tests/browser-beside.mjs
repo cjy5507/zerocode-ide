@@ -8,7 +8,8 @@
  * What is held here: a browser tab nobody asked to split for stands beside only where there is room — a right-hand
  * seat that is already there, or a group at least that wide to divide — and is otherwise a tab of the group in front;
  * the doors whose own words ask for the side — the palette's 「옆에 분할」, the title bar's 「옆에 작업 보기」 — are
- * the person's hand and divide a narrow group as before.
+ * the person's hand and divide a narrow group as before. So is a split the person chose in the palette, when a door
+ * follows that choice: the Jira card's 「ZeroCode 브라우저에서 열기」.
  *
  * And the room a browser beside gets: while one stands in a side group the file column is folded, so the page has the
  * column's 350px too (960px to 1135px in a 2560px window, measured 2026-11-25). The column comes back when no browser
@@ -267,6 +268,36 @@ export async function testBrowserBeside(browser, origin, ok) {
         folded.groups === before.groups && folded.front === "term" && folded.frontPane === before.terminalPane,
         JSON.stringify({ before, folded }));
       ok("the watched work browser raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  // The Jira card's 「ZeroCode 브라우저에서 열기」 stands its page where the + palette last stood a browser. A split
+  // chosen there is the person's hand here too, so a narrow group is divided for it as the palette divides it; the
+  // room rule had made it a tab of the group in front (Codex review t-130084, 2026-11-25). A chosen single tab is
+  // a tab, as before.
+  for (const chosen of ["split", "single"]) {
+    const { page, faults } = await standWindow(browser, origin, DEFAULT_WINDOW);
+    try {
+      const before = await seen(page);
+      await page.evaluate((chosen) => {
+        rememberBrowserPlacement(chosen);
+        jiraItem = { url: "https://example.com/browse/ACME-1" };
+        document.getElementById("jira-item-open-app").click();
+      }, chosen);
+      await page.waitForFunction(() => tabs.some((one) => one.kind === "browser"));
+      await settled(page);
+      const opened = await seen(page);
+      if (chosen === "split") {
+        ok("the Jira card's browser door honours a split the person chose in the palette: a narrow group is divided for it",
+          before.stage < BESIDE_MIN && opened.browsers === 1 && opened.groups === before.groups + 1
+            && opened.lastPane !== before.terminalPane && opened.lastWidth * 2 <= opened.stage,
+          JSON.stringify({ rule: BESIDE_MIN, before, opened }));
+      } else {
+        ok("and a single tab chosen there is a tab of the group in front, the whole group wide",
+          opened.browsers === 1 && opened.groups === before.groups && opened.lastPane === before.terminalPane
+            && wholeStage(opened.lastWidth, before.stage),
+          JSON.stringify({ before, opened }));
+      }
+      ok(`the Jira card's door (${chosen}) raises no page errors`, faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }
