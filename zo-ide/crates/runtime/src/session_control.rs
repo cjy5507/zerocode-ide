@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::session::{Session, SessionError, TranscriptHead};
+use crate::session::{Session, SessionError, TranscriptHead, ATIF_DOCUMENT_SUFFIX};
 
 pub const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 pub const LEGACY_SESSION_EXTENSION: &str = "json";
@@ -197,9 +197,7 @@ pub struct SessionCleanupReport {
     /// Orphan `<session>.lock` files reclaimed — see
     /// [`core_types::session::try_reclaim_orphan_lock`].
     pub removed_locks: usize,
-    /// `<stem>.cwd` / `<stem>.registry` / `<stem>.tools` sidecars taken with
-    /// their transcript, or left by an earlier sweep
-    /// ([`SESSION_SIDECAR_EXTENSIONS`]).
+    /// Expired session sidecars whose transcript and other session data are gone.
     pub removed_sidecars: usize,
     pub removed_dirs: usize,
     pub reclaimed_bytes: u64,
@@ -265,6 +263,9 @@ pub fn cleanup_expired_sessions_under(
         let prefs_dir = slug_dir.join(SESSION_PREFERENCES_DIR);
         for entry in fs::read_dir(&sessions_dir).into_iter().flatten().flatten() {
             let path = entry.path();
+            if entry.file_name().to_str().is_some_and(|name| name.ends_with(ATIF_DOCUMENT_SUFFIX)) {
+                continue; // handled below with the session-owned sidecars
+            }
             let is_session_file = path.extension().and_then(|ext| ext.to_str()).is_some_and(
                 |ext| ext == PRIMARY_SESSION_EXTENSION || ext == LEGACY_SESSION_EXTENSION,
             );
@@ -394,8 +395,8 @@ fn sweep_ownerless_sidecars(sessions_dir: &Path, cutoff: SystemTime, report: &mu
     }
 }
 
-/// Whether `name` is a session sidecar ([`SESSION_SIDECAR_EXTENSIONS`]) with
-/// nothing else of its session in the same folder: no file of `names` but the
+/// Whether `name` is a session sidecar with nothing else of its session in
+/// the same folder: no file of `names` but the
 /// sidecars themselves starts with its stem and a dot. A session lives on in
 /// any of the shapes zo gives it beside the sidecars — the transcript
 /// (`<stem>.jsonl`, or `.json` from before), its rotated segments
@@ -404,21 +405,21 @@ fn sweep_ownerless_sidecars(sessions_dir: &Path, cutoff: SystemTime, report: &mu
 /// and any one of them keeps the sidecars.
 #[must_use]
 pub fn sidecar_is_ownerless(name: &str, names: &[String]) -> bool {
-    let Some((stem, extension)) = name.rsplit_once('.') else {
+    let Some(stem) = session_sidecar_stem(name) else {
         return false;
     };
-    if stem.is_empty() || !SESSION_SIDECAR_EXTENSIONS.contains(&extension) {
-        return false;
-    }
     let prefix = format!("{stem}.");
     !names.iter().any(|other| {
-        other.starts_with(&prefix)
-            && !other
-                .rsplit_once('.')
-                .is_some_and(|(other_stem, other_ext)| {
-                    other_stem == stem && SESSION_SIDECAR_EXTENSIONS.contains(&other_ext)
-                })
+        other.starts_with(&prefix) && session_sidecar_stem(other) != Some(stem)
     })
+}
+
+fn session_sidecar_stem(name: &str) -> Option<&str> {
+    if let Some(stem) = name.strip_suffix(ATIF_DOCUMENT_SUFFIX) {
+        return (!stem.is_empty()).then_some(stem);
+    }
+    let (stem, extension) = name.rsplit_once('.')?;
+    (!stem.is_empty() && SESSION_SIDECAR_EXTENSIONS.contains(&extension)).then_some(stem)
 }
 
 /// True when a memory store directory holds no state worth keeping: nothing at
@@ -544,7 +545,7 @@ pub fn is_managed_session_file(path: &Path) -> bool {
     // extensions but are NOT resumable transcripts: the append-only Raw Vault
     // (`<id>.vault.jsonl`), rotated transcript fragments
     // (`<id>.rot-<ts>.jsonl`), per-session todo stores (`<id>.todos.json`), and
-    // per-session preference stores (`<id>.prefs.json`). Excluding them keeps
+    // preference stores (`<id>.prefs.json`), and ATIF (`<id>.atif.json`). Excluding them keeps
     // them out of session listings and out of `resume latest` (which picks by
     // mtime — sidecars can be touched after their owning transcript and would
     // otherwise win).
@@ -556,6 +557,7 @@ pub fn is_managed_session_file(path: &Path) -> bool {
         && !name.contains(".rot-")
         && !name.ends_with(".todos.json")
         && !name.ends_with(".prefs.json")
+        && !name.ends_with(ATIF_DOCUMENT_SUFFIX)
 }
 
 pub fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, SessionControlError> {

@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::JsonValue;
 
+mod atif;
 mod compaction;
 mod error;
 mod fork;
@@ -27,6 +28,7 @@ mod mask;
 mod message;
 mod tool_pairing;
 
+pub use atif::ATIF_DOCUMENT_SUFFIX;
 pub use compaction::{AnchorSummary, SessionCompaction};
 pub use tool_pairing::ToolCallPairing;
 pub use error::SessionError;
@@ -253,6 +255,8 @@ struct WriterState {
     /// In-memory transcript edits that did not travel through `push_message`
     /// require one healing full snapshot at the next ordinary-turn persist.
     transcript_dirty: bool,
+    /// The primary transcript version already published as ATIF by this writer.
+    atif_revision: Option<FileFingerprint>,
     /// The held exclusive advisory lock. Acquired lazily on the first
     /// bound write and retained for the lifetime of the shared state so a peer
     /// process cannot interleave. Dropping the retained handle releases the OS
@@ -2574,6 +2578,10 @@ fn read_vault_records(path: &Path) -> Vec<VaultRecord> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Vec::new();
     };
+    parse_vault_records(&contents)
+}
+
+fn parse_vault_records(contents: &str) -> Vec<VaultRecord> {
     let mut by_seq: BTreeMap<u32, ConversationMessage> = BTreeMap::new();
     for raw_line in contents.lines() {
         let line = raw_line.trim();

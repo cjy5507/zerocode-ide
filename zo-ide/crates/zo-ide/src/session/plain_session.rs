@@ -1763,9 +1763,9 @@ impl PlainSession {
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.
     pub fn persist(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime
-            .session()
-            .persist_appended_state_to_path(&self.handle.path)?;
+        let session = self.runtime.session();
+        session.persist_appended_state_to_path(&self.handle.path)?;
+        refresh_atif(session);
         Ok(())
     }
 
@@ -1790,6 +1790,7 @@ impl PlainSession {
         }
         let removed = runtime.rewind_turns(1);
         if removed > 0 {
+            refresh_atif(runtime.session());
             return Ok(RewindTurn::Removed(removed));
         }
         // Zero removed has three causes, told apart by the tail: no turn at
@@ -2965,6 +2966,14 @@ impl CompactReport {
             } => runtime::message_stream::SystemLevel::Warn,
             _ => runtime::message_stream::SystemLevel::Info,
         }
+    }
+}
+
+fn refresh_atif(session: &Session) {
+    // This derived document is for measurement. A problem publishing it must
+    // never change the turn result or decide if the primary transcript saved.
+    if session.persist_atif(env!("CARGO_PKG_VERSION")).is_err() {
+        eprintln!("zo: could not update the ATIF session record");
     }
 }
 

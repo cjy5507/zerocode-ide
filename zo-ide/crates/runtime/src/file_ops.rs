@@ -303,6 +303,36 @@ fn mask_session_record_text(content: String) -> String {
         .join("\n")
 }
 
+fn is_atif_export_file(path: &Path) -> bool {
+    use crate::session::ATIF_DOCUMENT_SUFFIX;
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name.ends_with(ATIF_DOCUMENT_SUFFIX)
+            || name.rsplit_once(".tmp-").is_some_and(|(stem, _)| stem.ends_with(ATIF_DOCUMENT_SUFFIX))
+    })
+}
+
+fn mask_atif_record_text(content: String) -> String {
+    use crate::session::{THINKING_MARKER, WITHHELD_LINE_MARKER};
+    use serde_json::Value;
+
+    // A temporary file could be read before the rename finishes.
+    let Ok(mut document) = serde_json::from_str::<Value>(&content) else {
+        return WITHHELD_LINE_MARKER.to_string();
+    };
+    let Some(steps) = document.get_mut("steps").and_then(Value::as_array_mut) else {
+        return WITHHELD_LINE_MARKER.to_string();
+    };
+    let mut masked = false;
+    for step in steps {
+        if let Some(reasoning) = step.get_mut("reasoning_content") {
+            *reasoning = Value::String(THINKING_MARKER.to_string());
+            masked = true;
+        }
+    }
+    // Tool receipts can themselves contain native JSONL records.
+    mask_session_record_text(if masked { document.to_string() } else { content })
+}
+
 /// Reads a text file and returns a line-windowed payload.
 ///
 /// PDF files (by extension or `%PDF-` magic) and notebooks (`.ipynb`, by
@@ -351,7 +381,9 @@ pub fn read_file(
     }
 
     let content = fs::read_to_string(&absolute_path)?;
-    let content = if is_session_record_file(&absolute_path) {
+    let content = if is_atif_export_file(&absolute_path) {
+        mask_atif_record_text(content)
+    } else if is_session_record_file(&absolute_path) {
         mask_session_record_text(content)
     } else {
         content
@@ -1251,6 +1283,11 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
 
         let Ok(file_contents) = fs::read_to_string(file_path) else {
             return Ok(true);
+        };
+        let file_contents = if is_atif_export_file(file_path) {
+            mask_atif_record_text(file_contents)
+        } else {
+            file_contents
         };
 
         if output_mode == "count" {
