@@ -6857,7 +6857,8 @@ function applyEditorFontZoom() {
 function resolveZoomTarget() {
   const tab = currentTab();
   if (!tab) return "ui";
-  if (tab.kind === "browser" && !browserCovered()) return "browser";
+  // The chord's own question (`browserChordScope`), not the picture's: a menu on its way out holds no keys.
+  if (browserChordScope()) return "browser";
   if (tab.kind === "file" || tab.kind === "diff" || tab.kind === "mdview") return "editor";
   if ((tab.kind === "term" || tab.kind === "lane") && terminalOwnsShortcutContext()) {
     return "terminal";

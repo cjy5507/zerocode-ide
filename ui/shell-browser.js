@@ -345,9 +345,15 @@ function browserZoomPercent(level) {
 
 /* Orca's `scope: "browser"` as a question this window can ask: the front
  * tab is a browser AND nothing stands in front of the page. Both halves
- * matter — a chord aimed at a page nobody can see steers a hidden surface. */
+ * matter — a chord aimed at a page nobody can see steers a hidden surface.
+ *
+ * The keyboard's question, which is not the picture's: a menu on its way out
+ * is drawn for `--motion-fast` more and the page stays hidden under it, but
+ * the person has already left it. A chord pressed in that time was nobody's —
+ * ⌘R did nothing, and the zoom router gave ⌘= to the whole window's scale,
+ * which is written to the settings (Codex review t-130464, 2026-11-25). */
 function browserChordScope() {
-  return currentTab()?.kind === "browser" && !browserCovered();
+  return currentTab()?.kind === "browser" && !browserCovered({ leavingMenu: false });
 }
 
 /* One rung up, one rung down, or back to the configured default — from
@@ -5601,7 +5607,7 @@ async function deliverGrab(button, picked) {
  * views cover the stage without a scrim, so they are named alongside. */
 const browserShades = [...document.querySelectorAll('[id$="-scrim"]')];
 
-function browserCovered() {
+function browserCovered({ leavingMenu = true } = {}) {
   if (!termFloat.hidden) return true;
   // 워크스페이스 보드도 탭이 되어(2026-11-08) 제 판만 차지한다 — 옆 판의 브라우저를 가리지 않는다.
   if (browserShades.some((shade) => !shade.hidden)) return true;
@@ -5615,8 +5621,11 @@ function browserCovered() {
   if (document.querySelector(".note-pop:not([hidden])")) return true;
   // The pane menu is one of these too — it opens right over the body it was
   // asked from (1-g13), and a menu swallowed by the page is a menu whose
-  // rows cannot be clicked.
-  if (!sidebarMenu.hidden) return true;
+  // rows cannot be clicked. A menu that has started to close is still drawn
+  // for `--motion-fast` (`closing` marks it `is-closing`): to the picture it
+  // covers until it is gone, and to the keyboard (`leavingMenu: false`) it
+  // does not — the person has left it.
+  if (!sidebarMenu.hidden && (leavingMenu || !sidebarMenu.classList.contains("is-closing"))) return true;
   // A rail's sheet stands over the stage the same way, and under 480 px it is the only road to a panel (t-84803 r2).
   if (railSideOpen() !== null) return true;
   return stagePagesCover();

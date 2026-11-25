@@ -9907,7 +9907,10 @@ mod tests {
         // full-page views that cover the stage without one.
         // The full-page views are one list since t-11958, because an
         // artifact's maker pane asks the same question of them.
-        let ducking = block_after(window, "function browserCovered() {");
+        let ducking = block_after(
+            window,
+            "function browserCovered({ leavingMenu = true } = {}) {",
+        );
         let pages = block_after(window, "function stagePagesCover() {");
         assert!(
             ducking.contains("termFloat.hidden")
