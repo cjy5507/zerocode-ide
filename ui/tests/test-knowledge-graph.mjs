@@ -6856,10 +6856,14 @@ const foldedViews = await glPage.evaluate(async () => {
        * 캔버스에 `getContext`를 부르면 문맥을 새로 연다. */
       const contexts = [knowledgePainters.get(view)?.gl ?? null, knowledgeUniverses.get(view)?.renderer?.getContext() ?? null]
         .filter((one) => one !== null);
-      return { stood, group, view, contexts };
+      /* 창에 하나인 크기 관찰자(`watchGraphResize`)에 건 셋 — 화면 · 캔버스 · 우주의 자리. 아래 「크기 관찰」이 읽는다. */
+      const watchedTargets = [view, view.querySelector(".knowledge-canvas"), knowledgeUniverses.get(view)?.host ?? null];
+      return { stood, group, view, contexts, watchedTargets };
     };
+    const watchedOf = (targets) => targets.filter((one) => one !== null && graphResizeRuns.has(one)).length;
     const fold = async (how) => {
-      const { stood, group, view, contexts } = await seat();
+      const { stood, group, view, contexts, watchedTargets } = await seat();
+      const watchedBefore = watchedOf(watchedTargets);
       if (how === "move") {
         tabDrag = { id: knowledgeTab().id, target: { group: 0, zone: "center" } };
         endTabDrag();
@@ -6869,7 +6873,8 @@ const foldedViews = await glPage.evaluate(async () => {
       await frame();
       return { ref: new WeakRef(view), row: { how, stood, folded: !stageGroups().includes(group),
         painter: knowledgePainters.has(view), universe: knowledgeUniverses.has(view), contexts: contexts.length,
-        lost: contexts.filter((one) => one?.isContextLost() === true).length } };
+        lost: contexts.filter((one) => one?.isContextLost() === true).length,
+        watched: { before: watchedBefore, after: watchedOf(watchedTargets) } } };
     };
     const rows = [];
     const refs = [];
@@ -6904,6 +6909,125 @@ ok("a split leaf that folds lets its knowledge view go — universe and GL paint
       && row.contexts === 2 && row.lost === 2)
     && foldedViews.kept === 0,
   JSON.stringify(foldedViews));
+/* three.js를 기다리는 동안 접히는 판(t-129269, Codex 확인 t-129558): 창의 첫 지식 탭을 둘째 판에 열고, 첫 그림이
+ * three.js를 기다리는 사이 탭을 닫거나(닫기) 첫 판으로 끌어 옮겨(옮기기) 판을 접는다. three.js가 온 뒤 이어지는 첫
+ * 그림은 떠난 화면에 아무것도 세우지 않는다 — 세우면 그 화면에 2D GL 손(문맥 하나)과 테마 관찰자가 붙어 화면째 남는다.
+ * 옮긴 탭은 첫 판에서 GL 손과 우주로 선다. three.js는 창마다 한 번 읽으므로 새 판을 띄워 그 읽기를 붙든다. */
+const pendingContext = await glBrowser.newContext({ viewport: { width: 1280, height: 860 } });
+const pendingPage = survivable(await pendingContext.newPage());
+const pendingFaults = [];
+pendingPage.on("pageerror", (error) => pendingFaults.push(error?.stack ?? String(error)));
+noteNavigations("GL pending", pendingPage);
+await seedKnowledgeWindow(pendingPage);
+let letThreeGo = () => {};
+const threeHeld = new Promise((done) => {
+  letThreeGo = done;
+});
+const holdThree = async (route) => {
+  await threeHeld;
+  await route.continue();
+};
+await pendingPage.route("**/vendor/three.js", holdThree);
+await step(6134, () => pendingPage.goto(`${origin}/index.html`));
+await step(6135, () => pendingPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0));
+const pendingFolds = await pendingPage.evaluate(async () => {
+  const until = async (wanted, rounds = 900) => {
+    for (let round = 0; round < rounds; round += 1) {
+      if (wanted()) return true;
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+    return false;
+  };
+  /* 새 판의 볼트는 비어 있다(부팅 보고 없음) — 2D 판의 첫 시험처럼 적는다. 전체 지도의 3D로 서는 볼트다. */
+  window.__VAULT__ = { pages: 12, linksPer: 2, ghosts: 0, tags: ["core"] };
+  secondBrainVault = "/vault";
+  noteKnowledgeExploreLines({ "/vault": JSON.stringify({ mode: "global", dimension: "3d" }) });
+  /* 떠난 화면은 약한 참조로만 든다 — 시험이 쥐면 GC의 답이 시험의 것이 된다. */
+  window.pendingFoldRefs = [];
+  const rows = [];
+  for (const how of ["close", "move"]) {
+    focusedPane = 0;
+    openWorkbenchView("tasks");
+    const group = splitStageBeside(0, "horizontal");
+    focusedPane = group;
+    knowledgeAskedAt = 0;
+    openKnowledgeGraph();
+    /* 첫 그림이 배치를 짓고 three.js를 기다리는 자리까지 온다. */
+    const waiting = await until(() => {
+      const view = groups.get(group)?.knowledgeView;
+      return view !== undefined && knowledgeLayouts.has(view);
+    });
+    const view = groups.get(group).knowledgeView;
+    const pending = typeof THREE !== "object" && !knowledgePainters.has(view);
+    const targets = [view, view.querySelector(".knowledge-canvas")];
+    const watchedBefore = targets.filter((one) => one !== null && graphResizeRuns.has(one)).length;
+    if (how === "move") {
+      tabDrag = { id: knowledgeTab().id, target: { group: 0, zone: "center" } };
+      endTabDrag();
+    } else {
+      closeTab(knowledgeTab().id);
+    }
+    window.pendingFoldRefs.push(new WeakRef(view));
+    rows.push({ how, waiting, pending, folded: !stageGroups().includes(group), detached: !view.isConnected,
+      watched: { before: watchedBefore, after: targets.filter((one) => one !== null && graphResizeRuns.has(one)).length } });
+  }
+  return { rows };
+});
+letThreeGo();
+const pendingAfter = await pendingPage.evaluate(async () => {
+  const frame = () => new Promise((done) => requestAnimationFrame(done));
+  const until = async (wanted, rounds = 900) => {
+    for (let round = 0; round < rounds; round += 1) {
+      if (wanted()) return true;
+      await frame();
+    }
+    return false;
+  };
+  const arrived = await until(() => typeof THREE === "object" && typeof THREE.WebGLRenderer === "function");
+  /* 옮긴 탭은 첫 판에서 선다 — 그래프의 답이 오고 우주가 한 장을 그릴 때까지. */
+  const stood = await until(() => {
+    const view = groups.get(knowledgeTab()?.pane)?.knowledgeView;
+    return view !== undefined && knowledgePainters.get(view)?.id === "gl" && (knowledgeUniverses.get(view)?.frames ?? 0) > 0;
+  });
+  for (let round = 0; round < 4; round += 1) await frame();
+  const refs = window.pendingFoldRefs;
+  delete window.pendingFoldRefs;
+  const views = refs.map((ref) => {
+    const view = ref.deref();
+    if (view === undefined) return { gone: true };
+    return { detached: !view.isConnected, painter: knowledgePainters.get(view)?.id ?? null,
+      universe: knowledgeUniverses.has(view), glCanvases: view.querySelectorAll("canvas.knowledge-gl").length };
+  });
+  /* 접힘 시험과 같은 정밀 GC(스택이 빈 작업) — 남으면 어느 경우인지 적는다. */
+  let kept = refs.length;
+  for (let round = 0; round < 10 && kept > 0; round += 1) {
+    await new Promise((done) => setTimeout(done, 300));
+    await gc({ type: "major", execution: "async" });
+    kept = refs.filter((ref) => ref.deref() !== undefined).length;
+  }
+  const keptHow = ["close", "move"].filter((how, at) => refs[at]?.deref() !== undefined);
+  const left = knowledgeTab();
+  if (left) closeTab(left.id);
+  return { arrived, stood, views, kept, keptHow };
+});
+await pendingPage.unroute("**/vendor/three.js", holdThree);
+await pendingContext.close();
+ok("a split leaf that folds while three.js loads lets its knowledge view go — the resumed first paint sets nothing up on the view that left, nothing holds it, and a moved tab stands in the first leaf (close and move)",
+  () => !pendingFolds.thrown && !pendingAfter.thrown && pendingFolds.rows.length === 2
+    && pendingFolds.rows.every((row) => row.waiting && row.pending && row.folded && row.detached)
+    && pendingAfter.arrived && pendingAfter.stood && pendingAfter.views.length === 2
+    && pendingAfter.views.every((one) => one.gone || (one.painter === null && !one.universe))
+    && pendingAfter.kept === 0 && pendingFaults.length === 0,
+  JSON.stringify({ folds: pendingFolds, after: pendingAfter, faults: pendingFaults }));
+/* 크기 관찰(t-129269, 같은 확인의 둘째): 창에 하나인 관찰자는 관찰을 풀지 않은 대상을 그 콜백과 함께 쥔다. 판이 접히면
+ * 그 화면 · 캔버스 · 우주의 자리를 관찰에서 뺀다 — 다 그린 뒤 접히든(위 접힘 시험), three.js를 기다리다 접히든. */
+ok("a split leaf that folds takes its knowledge view, canvas and universe host off the window's one size watch (folded after the first paint, and while three.js loads)",
+  () => !foldedViews.thrown && foldedViews.rows.length === 2
+    && foldedViews.rows.every((row) => row.watched.before === 3 && row.watched.after === 0)
+    && !pendingFolds.thrown && pendingFolds.rows.length === 2
+    && pendingFolds.rows.every((row) => row.watched.before === 2 && row.watched.after === 0),
+  JSON.stringify({ afterPaint: foldedViews.rows?.map((row) => row.watched) ?? foldedViews,
+    whileLoading: pendingFolds.rows?.map((row) => row.watched) ?? pendingFolds }));
 closing = true;
 await glBrowser.close();
 
