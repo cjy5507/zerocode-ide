@@ -12,11 +12,10 @@
 //!   answered to the listing methods before, kept under the window's data
 //!   folder for [`LISTING_STANDS_FOR`] — those methods are answered from it
 //!   and the real server is not started.
-//! - **The first other request starts it.** The client's own `initialize` is
-//!   sent first, under an id of the stand-in's own, then
-//!   `notifications/initialized`, then the request. What the server lists
-//!   then is compared with the listing, and a change is kept for the next
-//!   session.
+//! - **The first other request starts it.** For a session that sent
+//!   `initialize`, the stand-in repeats the handshake and checks the tool
+//!   list. Open subscription requests are sent again as received, before
+//!   the request that started the server.
 //! - **Without a listing** — a server seen for the first time, a listing a day
 //!   old, a client asking another protocol version — the real server starts
 //!   at once and what it answers is kept, once its start and its tools were
@@ -53,9 +52,9 @@ pub const MARKER: &str = "ZEROCODE_MCP_ON_FIRST_CALL";
 /// the real server is handed, as [`MARKER`] is.
 pub const LISTINGS_ENV: &str = "ZEROCODE_MCP_LISTINGS";
 
-/// How long a listing answers for its server. A server something calls is
-/// asked again at that call whatever the listing's age, so this bounds one
-/// thing only: how long a change to a server nothing calls goes unseen.
+/// How long a listing answers for its server. The server's live answers
+/// refresh it. For a session that sent `initialize`, the stand-in also
+/// checks the tool list when it repeats the handshake.
 pub const LISTING_STANDS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long a server started by a call has to answer its `initialize`: an
@@ -77,11 +76,14 @@ pub const NOT_STARTED: i64 = -32000;
 const LISTINGS_FOLDER: &str = "mcp-listings";
 /// The shape of a listing file; one of another shape is no listing.
 const LISTING_VERSION: u32 = 1;
+const DISCOVER: &str = "server/discover";
+const LISTEN: &str = "subscriptions/listen";
+const CANCELLED: &str = "notifications/cancelled";
 /// The methods a listing answers: what a client asks a server as a session
 /// opens. Claude Code 2.1.322 asked `server/discover`, `initialize` and
 /// `tools/list` of a server offering tools (2026-11-12).
 const REMEMBERED: [&str; 6] = [
-    "server/discover",
+    DISCOVER,
     "initialize",
     "tools/list",
     "prompts/list",
@@ -137,12 +139,16 @@ impl Listing {
     /// listed: kept, the error would answer every session for a day with no
     /// tool to call, and so nothing would start the server to ask again.
     fn complete(&self) -> bool {
+        self.complete_for("initialize") || self.complete_for(DISCOVER)
+    }
+
+    fn complete_for(&self, opening: &str) -> bool {
         let answered = |method: &str| {
             self.answers
                 .get(method)
                 .is_some_and(|answer| answer.get("result").is_some())
         };
-        answered("initialize") && answered("tools/list")
+        answered(opening) && answered("tools/list")
     }
 
     /// The answer to `method` under the client's `id`, when one is kept.
@@ -290,6 +296,14 @@ fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
+fn cancellation_id(message: &Value) -> Option<&Value> {
+    if message.get("method").and_then(Value::as_str) == Some(CANCELLED) {
+        message.pointer("/params/requestId")
+    } else {
+        None
+    }
+}
+
 /// The answer a request the server could not be handed gets.
 #[must_use]
 pub fn refusal(id: &Value, server: &str, why: &str) -> Value {
@@ -321,6 +335,7 @@ struct State {
     /// Whether the listing answers the client while the server is not running.
     answering: bool,
     client_initialize: Option<Value>,
+    client_requested_discovery: bool,
     running: Option<Running>,
     /// Which start the running server is; a stopped one's late words are not
     /// passed on.
@@ -329,7 +344,11 @@ struct State {
     learning: HashMap<String, String>,
     /// The client's requests passed to the server and not answered yet.
     pending: HashMap<String, Value>,
-    /// Whether the session asked the server anything but what it offers.
+    /// The client's open subscriptions by id, in the order they were sent.
+    subscriptions: Vec<(String, String)>,
+    /// Keep the server running until the current listen line has been sent.
+    sending_subscription: bool,
+    /// Whether the session used the server beyond listing and subscribing.
     used: bool,
     /// A `logging/setLevel` answered while the server was not running, sent
     /// to it when it starts.
@@ -394,10 +413,13 @@ impl StandIn {
                 listing: recalled.unwrap_or_else(|| Listing::new(name)),
                 answering,
                 client_initialize: None,
+                client_requested_discovery: false,
                 running: None,
                 generation: 0,
                 learning: HashMap::new(),
                 pending: HashMap::new(),
+                subscriptions: Vec::new(),
+                sending_subscription: false,
                 used: false,
                 log_level: None,
                 handshake: None,
@@ -438,20 +460,18 @@ impl StandIn {
     fn from_client(self: &Arc<Self>, line: &str) -> bool {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             // Not a message: the server's to make sense of, while it runs.
-            self.to_server_text(line);
+            self.to_server_text(line, None);
             return true;
         };
         let method = message.get("method").and_then(Value::as_str);
         let id = message.get("id").filter(|id| !id.is_null());
         match (method, id) {
             (Some(method), Some(id)) => self.request(method, id, &message, line),
-            // A notification, or the client's answer to a request of the
-            // server's: passed on while the server runs. One that comes while
-            // it does not concerns nothing it holds — and
-            // `notifications/initialized` is sent by the stand-in itself when
-            // it starts the server.
+            // Notifications and answers to server requests pass through while
+            // it runs. Cancellation can also discard a subscription while
+            // the server is stopped.
             _ => {
-                self.to_server_text(line);
+                self.to_server_text(line, cancellation_id(&message));
                 true
             }
         }
@@ -469,6 +489,8 @@ impl StandIn {
                 state.answering = false;
             }
             state.client_initialize = Some(message.clone());
+        } else if method == DISCOVER {
+            state.client_requested_discovery = true;
         }
         // A later page of a listing is the server's to give: the listing
         // holds the first.
@@ -493,46 +515,69 @@ impl StandIn {
         }
         let start = state.running.is_none();
         let replay = start && method != "initialize" && state.client_initialize.is_some();
-        // The request is out from here, before any start: a server that is
-        // slow to answer its start is not taken for one left unused, and one
-        // that ends meanwhile answers it.
         let key = id_key(id);
-        if REMEMBERED.contains(&method) {
-            if !paged {
-                state.learning.insert(key.clone(), method.to_string());
+        let subscription = method == LISTEN;
+        // Capture the previous subscriptions before adding this request.
+        let subscriptions: Vec<_> = if start {
+            state
+                .subscriptions
+                .iter()
+                .map(|(_, line)| line.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if subscription {
+            state.subscriptions.push((key.clone(), line.to_owned()));
+            state.sending_subscription = true;
+        } else {
+            // A request that expects an answer protects a slow start and is
+            // failed if the server ends before it answers.
+            if REMEMBERED.contains(&method) {
+                if !paged {
+                    state.learning.insert(key.clone(), method.to_string());
+                }
+            } else if method != "ping" {
+                state.used = true;
             }
-        } else if method != "ping" {
-            state.used = true;
+            state.pending.insert(key.clone(), id.clone());
         }
-        state.pending.insert(key.clone(), id.clone());
         drop(state);
-        if start && let Err(why) = self.start(replay) {
+        let failure = if start && let Err(why) = self.start(replay) {
             if let Some(listings) = &self.listings {
                 listings.forget(&self.key);
             }
+            self.lock().answering = false;
+            Some(why)
+        } else {
+            let input = self.lock().input();
+            if input.is_some_and(|input| {
+                subscriptions.iter().all(|line| write_to(&input, line)) && write_to(&input, line)
+            }) {
+                None
+            } else {
+                Some("ended before it was handed the request".to_owned())
+            }
+        };
+        if subscription {
             let mut state = self.lock();
-            state.answering = false;
-            let still_waiting = state.pending.remove(&key).is_some();
-            state.learning.remove(&key);
-            drop(state);
-            // The server's end may have answered it already.
-            return !still_waiting || self.to_client(&refusal(id, &self.name, &why));
-        }
-        let input = self.lock().input();
-        if input.is_some_and(|input| write_to(&input, line)) {
+            state.sending_subscription = false;
+            if let Some(why) = failure {
+                state.forget_subscription(&key);
+                drop(state);
+                return self.to_client(&refusal(id, &self.name, &why));
+            }
             return true;
         }
+        let Some(why) = failure else {
+            return true;
+        };
         let mut state = self.lock();
         let still_waiting = state.pending.remove(&key).is_some();
         state.learning.remove(&key);
         drop(state);
         // The server's end may have answered it already.
-        !still_waiting
-            || self.to_client(&refusal(
-                id,
-                &self.name,
-                "ended before it was handed the request",
-            ))
+        !still_waiting || self.to_client(&refusal(id, &self.name, &why))
     }
 
     /// Start the real server. With `replay` the client was answered from the
@@ -698,11 +743,16 @@ impl StandIn {
                     _ => {}
                 }
                 let key = id_key(id);
+                if message.get("result").is_some() || message.get("error").is_some() {
+                    state.forget_subscription(&key);
+                }
                 state.pending.remove(&key);
                 if let Some(method) = state.learning.remove(&key) {
                     state.learn(&method, &message);
                     learned = true;
                 }
+            } else if let Some(id) = cancellation_id(&message) {
+                state.forget_subscription(&id_key(id));
             }
             drop(state);
             if learned {
@@ -732,9 +782,8 @@ impl StandIn {
     }
 
     /// Stop the server started as `generation` after the idle time, when the
-    /// session has asked it nothing but what it offers — a server it has
-    /// called may hold what a restart would lose (an open page, a login), and
-    /// runs on for the session.
+    /// session has only asked what it offers or subscribed — a server it has
+    /// called may hold what a restart would lose (an open page, a login).
     fn stop_when_unused(self: &Arc<Self>, generation: u64) {
         let stand_in = Arc::clone(self);
         let idle = self.idle_after_learning;
@@ -745,15 +794,13 @@ impl StandIn {
                 if state.generation != generation || state.running.is_none() || state.used {
                     return;
                 }
-                // Not yet when a request is out, the server's start is still
-                // being answered, or the listing is not whole — the session
-                // may still be opening; looked at again later. Looked at and
-                // taken under one lock, so a call that comes meanwhile finds
-                // the server stopped and starts it again.
+                // Wait for writes and opening replies to finish. Check and
+                // take the server under one lock, so a call that arrives
+                // after that starts a new server.
                 if state.pending.is_empty()
+                    && !state.sending_subscription
                     && state.handshake.is_none()
-                    && state.client_initialize.is_some()
-                    && state.listing.complete()
+                    && state.session_listed()
                 {
                     let running = state.take_server();
                     state.answering = true;
@@ -811,8 +858,14 @@ impl StandIn {
         write_line(&mut *out, line)
     }
 
-    fn to_server_text(&self, line: &str) {
-        let input = self.lock().input();
+    fn to_server_text(&self, line: &str, cancelled: Option<&Value>) {
+        let input = {
+            let mut state = self.lock();
+            if let Some(id) = cancelled {
+                state.forget_subscription(&id_key(id));
+            }
+            state.input()
+        };
         if let Some(input) = input {
             write_to(&input, line);
         }
@@ -820,6 +873,19 @@ impl StandIn {
 }
 
 impl State {
+    /// The listing holds the answer to the opening this client asked for.
+    fn session_listed(&self) -> bool {
+        if self.client_initialize.is_some() {
+            self.listing.complete_for("initialize")
+        } else {
+            self.client_requested_discovery && self.listing.complete_for(DISCOVER)
+        }
+    }
+
+    fn forget_subscription(&mut self, id: &str) {
+        self.subscriptions.retain(|(key, _)| key != id);
+    }
+
     /// Take the running server out to be stopped: what it was handed for the
     /// listing is not waited on any more, and its late words are not passed on.
     fn take_server(&mut self) -> Option<Running> {
