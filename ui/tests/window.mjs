@@ -422,6 +422,136 @@ suite("i18n-lazy-catalogs", async ({ browser, origin, ok }) => {
   } finally {
     await harnessed.page.close();
   }
+
+  /* What the menu looks like at a frame: its word, and whether a person could
+   * see it there. Evaluated in the page, so it carries no outside names. */
+  const menuAtTwoFrames = () => new Promise((done) => {
+    const look = () => {
+      const node = document.querySelector('[data-i18n="sidebar.search"]');
+      const box = node.getBoundingClientRect();
+      done({
+        word: node.textContent.trim(),
+        drawn: box.width > 0 && box.height > 0 && getComputedStyle(node).visibility === "visible",
+        lang: document.documentElement.lang,
+      });
+    };
+    requestAnimationFrame(() => requestAnimationFrame(look));
+  });
+
+  /* t-129668 (a): the saved language is English and its catalog is slow. The
+   * file is held on the wire for two frames: the menu must not stand there in
+   * the markup's Korean while the window waits for English, and the paint
+   * that follows the file is English. */
+  let waiting = null;
+  const slow = await openWindowTestPage(browser, origin, {
+    boot: productionBoot,
+    before: async (opened) => {
+      await opened.addInitScript(() => {
+        window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = false;
+      });
+      await opened.route("**/shell-i18n-en.js", async (route) => {
+        waiting = await opened.evaluate(menuAtTwoFrames).catch((error) => ({ error: String(error) }));
+        await route.continue().catch(() => {});
+      });
+    },
+  });
+  try {
+    const settled = await slow.page.evaluate(menuAtTwoFrames);
+    ok(
+      "a slow catalog keeps the Korean menu out of the first paint, and the paint after it is English",
+      waiting !== null && !waiting.error && (!waiting.drawn || waiting.word === "Search") &&
+        settled.lang === "en" && settled.word === "Search" && settled.drawn,
+      JSON.stringify({ waiting, settled }),
+    );
+
+    /* t-129668 (b): the pop-out's case on the same road. A settings document
+     * names Japanese and its catalog is still on the wire when a newer
+     * document goes back to English, the language already on screen. The
+     * Japanese file landing late must not paint over the newer choice. */
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let asked;
+    const requested = new Promise((resolve) => { asked = resolve; });
+    await slow.page.route("**/shell-i18n-ja.js", async (route) => {
+      asked();
+      await held;
+      await route.continue().catch(() => {});
+    });
+    await slow.page.evaluate(() => {
+      applySettingsSnapshot({ revision: settingsRevision + 1, locale: "ja" });
+    });
+    await requested;
+    const reverted = await slow.page.evaluate(() =>
+      applySettingsSnapshot({ revision: settingsRevision + 1, locale: "en" }));
+    release();
+    await slow.page.waitForFunction(() => typeof CATALOG.ja === "object" && CATALOG.ja !== null);
+    const after = await slow.page.evaluate(menuAtTwoFrames);
+    const active = await slow.page.evaluate(() => ({
+      code: activeLocaleCode(),
+      word: t("settings.appearance.language.system", ""),
+    }));
+    ok(
+      "a newer settings document that keeps English outranks an older Japanese choice still loading",
+      reverted === true && after.lang === "en" && after.word === "Search" &&
+        active.code === "en" && active.word === "System setting",
+      JSON.stringify({ reverted, after, active }),
+    );
+  } finally {
+    await slow.page.close();
+  }
+
+  /* t-129668 (a), its bound: a catalog that does not come within the wait.
+   * The window does not stand hidden — it paints Korean, every call site's
+   * own words, says so in the window log, and turns English when the file
+   * lands after all. */
+  let capped = null;
+  const late = await openWindowTestPage(browser, origin, {
+    boot: productionBoot,
+    before: async (opened) => {
+      await opened.addInitScript(() => {
+        window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = false;
+        window.__WINDOW_LOG__ = [];
+        window.__ANSWER__.log_window_error = ({ message }) => {
+          window.__WINDOW_LOG__.push(message);
+          return null;
+        };
+      });
+      await opened.route("**/shell-i18n-en.js", async (route) => {
+        capped = await opened.evaluate(() => new Promise((done) => {
+          const started = performance.now();
+          const look = () => {
+            const node = document.querySelector('[data-i18n="sidebar.search"]');
+            const box = node.getBoundingClientRect();
+            const drawn = box.width > 0 && box.height > 0 && getComputedStyle(node).visibility === "visible";
+            const waitedMs = Math.round(performance.now() - started);
+            if (drawn || waitedMs > 4 * FIRST_PAINT_WAIT_MS) {
+              done({ word: node.textContent.trim(), drawn, waitedMs, bound: FIRST_PAINT_WAIT_MS, logged: [...window.__WINDOW_LOG__] });
+            } else {
+              requestAnimationFrame(look);
+            }
+          };
+          requestAnimationFrame(look);
+        })).catch((error) => ({ error: String(error) }));
+        await route.continue().catch(() => {});
+      });
+    },
+  });
+  try {
+    const healed = await late.page.waitForFunction(() =>
+      document.documentElement.lang === "en" &&
+        document.querySelector('[data-i18n="sidebar.search"]').textContent.trim() === "Search",
+    null, { timeout: 5000 }).then(() => true, () => false);
+    ok(
+      "a catalog later than the wait paints Korean, logs why, and repaints English when it lands",
+      capped !== null && !capped.error && capped.drawn && capped.word === "검색" &&
+        capped.waitedMs >= capped.bound / 2 &&
+        capped.logged.some((line) => line.startsWith("i18n:") && line.includes(`${capped.bound} ms`)) &&
+        healed,
+      JSON.stringify({ capped, healed }),
+    );
+  } finally {
+    await late.page.close();
+  }
 });
 
 suite("explorer", async ({ browser, origin, ok }) => {

@@ -567,9 +567,17 @@ async function testOrbitShape(ok) {
     .map((hit) => ({ where: `fallback ${hit[1]}`, words: hit[2] }));
   const said = [...values, ...marked, ...fallbacks];
   const planetary = said.filter((one) => PLANET_WORDS.some((word) => word.test(one.words)));
+  // Every language the window ships is measured, each with every word Korean
+  // has: Korean in `shell-i18n.js`, the others one file each in its loader's
+  // `I18N_CATALOG_FILES` table (t-129668).
+  const loader = readFileSync(resolve(UI, "shell-i18n.js"), "utf8");
+  const shipped = 1 + [...(loader.match(/const I18N_CATALOG_FILES = Object\.freeze\(\{([^}]*)\}\)/)?.[1] ?? "")
+    .matchAll(/"\.\/[^"]+\.js"/g)].length;
+  const korean = [...loader.matchAll(/"board\.orbit\.\w+":/g)].length;
   ok("the 3D view's words name no planet, star, moon or orbit in any language",
-    values.length >= 30 && marked.length >= 4 && fallbacks.length >= 4 && planetary.length === 0,
-    JSON.stringify({ values: values.length, marked: marked.length, fallbacks: fallbacks.length,
+    values.length >= 30 && values.length === shipped * korean && marked.length >= 4 && fallbacks.length >= 4
+      && planetary.length === 0,
+    JSON.stringify({ values: values.length, shipped, korean, marked: marked.length, fallbacks: fallbacks.length,
       planetary: planetary.map((one) => `${one.where}: ${one.words}`) }));
 
   const named = [...catalog.matchAll(/"board\.orbit\.orbit":\s*"([^"]*)"/g)].map((hit) => hit[1]);
