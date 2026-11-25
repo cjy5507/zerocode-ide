@@ -8853,11 +8853,15 @@ body.is-dragging-pane {
  * its own scroller, its own gutters and its own two columns, so the box that
  * scrolls the rows stops scrolling and hands it the whole surface — two
  * scrollbars over one file is one too many, and the padding the rows sit in
- * would put the gutters off the edge they are measured from. */
+ * would put the gutters off the edge they are measured from. The column has
+ * a ceiling as the row does: without one the longest line widens it, and the
+ * working side slides past the clipped edge — each side scrolls its own
+ * long lines instead. */
 .diff-body--merge {
   overflow: hidden;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   padding: 0;
 }
 
