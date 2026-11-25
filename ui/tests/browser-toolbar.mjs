@@ -10,7 +10,8 @@
  * What is held here: a pane too narrow for one row stands the toolbar in two — the navigation and the address above,
  * the tools below — with every control inside the pane and under the pointer; a pane wide enough keeps the one row it
  * had; the rows follow the pane as it is resized; and the page begins under whatever the toolbar's height is. And
- * the ⚙ button owns the menus it raises: it says it has one, and Escape gives the keyboard back to it.
+ * the ⚙ button owns the menus it raises: it says it has one, and Escape gives the keyboard back to it. A chord
+ * pressed while that menu is on its way out is the page's, not the window's.
  *
  *   node ui/tests/browser-toolbar.mjs
  *   WINDOW_SUITES=browser-toolbar node ui/tests/window.mjs */
@@ -268,6 +269,54 @@ export async function testBrowserToolbar(browser, origin, ok) {
       ok("and from the viewport list that menu opened: the list stands under the same button, and Escape returns there",
         sizes && picking.expanded === "true" && picking.focusInMenu && picked.focusOnGear && picked.expanded === "false",
         JSON.stringify({ sizes, picking, picked }));
+      // A menu the person has left holds no keys. The shared menu stays drawn for `--motion-fast` after it starts to
+      // close, and the page stays hidden under it for that long, but a chord pressed in that time is the page's. It
+      // was read as nobody's: ⌘R did nothing, and ⌘= changed the whole window's scale and wrote that to the settings
+      // (Codex review t-130464, 2026-11-25). Both roads out of the menu are walked: Escape, and a row — the
+      // developer tools, which were a toolbar button with no menu to leave.
+      const leaving = await page.evaluate(async () => {
+        const menu = document.getElementById("sidebar-menu");
+        const tab = tabs.find((one) => one.label === "browser-930");
+        const button = groupOf(tab.pane).browserView.querySelector(".browser-menu");
+        const said = [];
+        const held = { zoom: window.__ANSWER__.browser_zoom };
+        window.__ANSWER__.browser_zoom = () => (said.push("zoom"), null);
+        window.__ANSWER__.browser_reload = () => (said.push("reload"), null);
+        window.__ANSWER__.browser_devtools = () => null;
+        const until = async (test) => {
+          for (let turn = 0; turn < 200 && !test(); turn += 1) await new Promise((done) => setTimeout(done, 10));
+          return test();
+        };
+        const chord = (key) => window.dispatchEvent(
+          new KeyboardEvent("keydown", { key, ...window.__TEST_PRIMARY_EVENT__, cancelable: true }));
+        const pressWhileLeaving = async (leave) => {
+          button.click();
+          await until(() => !menu.hidden && !menu.classList.contains("is-closing"));
+          const scale = uiZoomLevel;
+          said.length = 0;
+          leave();
+          // Read in the same task as the leaving: the menu is still drawn, and is on its way out.
+          const drawn = !menu.hidden && menu.classList.contains("is-closing");
+          chord("r");
+          chord("=");
+          const seen = { drawn, said: said.join(), windowScaleKept: uiZoomLevel === scale };
+          if (uiZoomLevel !== scale) await setUiZoomLevel(scale);
+          await until(() => menu.hidden);
+          browserZoomStep(tab, 0);
+          return seen;
+        };
+        const byEscape = await pressWhileLeaving(() => window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+        const byRow = await pressWhileLeaving(() => [...menu.querySelectorAll(".sidebar-menu-item")]
+          .find((one) => one.textContent === t("browser.devtools", "개발자 도구"))?.click());
+        window.__ANSWER__.browser_zoom = held.zoom;
+        delete window.__ANSWER__.browser_reload;
+        delete window.__ANSWER__.browser_devtools;
+        return { byEscape, byRow };
+      });
+      ok("a chord pressed while the ⚙ menu is on its way out is the page's — ⌘R reloads it and ⌘= zooms it, the window's scale untouched — after Escape and after a row",
+        [leaving.byEscape, leaving.byRow].every((one) => one.drawn && one.said === "reload,zoom" && one.windowScaleKept),
+        JSON.stringify(leaving));
       ok("the ⚙ menu raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
