@@ -6845,12 +6845,6 @@ mod windows_shim_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ComputerErrorBody<'a> {
-    pub code: &'a str,
-    pub message: &'a str,
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

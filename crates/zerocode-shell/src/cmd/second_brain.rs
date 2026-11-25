@@ -1607,19 +1607,6 @@ pub(crate) async fn set_second_brain_scenes(
     )
 }
 
-#[tauri::command]
-pub(crate) async fn get_second_brain_scenes(
-    state: State<'_, AppState>,
-    vault: String,
-) -> Result<String, String> {
-    let document = load_settings_resilient(state.settings()).document;
-    Ok(document
-        .second_brain_scenes
-        .get(&vault)
-        .cloned()
-        .unwrap_or_default())
-}
-
 /// Persist the knowledge graph's last exploration per vault path — mode,
 /// centre, depth as one JSON line beside the scenes (t-4140 S2). An empty
 /// line forgets the vault; the document never carries an empty table.

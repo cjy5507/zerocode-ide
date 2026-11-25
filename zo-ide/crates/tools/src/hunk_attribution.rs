@@ -262,25 +262,6 @@ impl HunkAttributionLedger {
         }
     }
 
-    pub fn accept(&mut self, index: usize) -> Result<(), ReviewHunkError> {
-        let hunk = self
-            .hunks
-            .get_mut(index)
-            .ok_or(ReviewHunkError::NotFound(index))?;
-        if hunk.status == AttributionStatus::Pending {
-            hunk.status = AttributionStatus::Accepted;
-        }
-        Ok(())
-    }
-
-    pub fn accept_file(&mut self, path: &Path) {
-        for hunk in &mut self.hunks {
-            if hunk.path == path && hunk.status == AttributionStatus::Pending {
-                hunk.status = AttributionStatus::Accepted;
-            }
-        }
-    }
-
     pub fn reject(&mut self, index: usize) -> Result<(), ReviewHunkError> {
         let hunk = self
             .hunks

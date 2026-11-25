@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 
 pub const RAW_DIR: &str = "raw";
 pub const WIKI_DIR: &str = "wiki";
-pub const ARCHIVE_DIR: &str = "archive";
 pub const RAW_README_FILE: &str = "raw/README.md";
 pub const WIKI_INDEX_FILE: &str = "wiki/index.md";
 pub const WIKI_LOG_FILE: &str = "wiki/log.md";

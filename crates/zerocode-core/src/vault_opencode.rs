@@ -43,7 +43,6 @@
 //!   providers, so the prefix is information rather than noise.
 
 use crate::civil::iso_utc_of;
-use crate::transcript::clamp;
 use crate::vault::{PREVIEW_LINES, Parsed, PreviewMessage, VaultSession};
 
 /// The slug these cards wear — Orca's spelling (`AI_VAULT_AGENTS`), which is
@@ -98,18 +97,12 @@ pub const fn touched_ms(row: &SessionRow) -> i64 {
 /// that nothing draws — and these blobs run to tens of kilobytes.
 pub const PREVIEW_PARTS: usize = PREVIEW_LINES;
 
-/// The text a `part.data` blob holds, or `None` when the part is not one.
+/// The text a `part.data` blob holds, whole, or `None` when the part is not
+/// one: a worker's prompt says what its task is far past where a line ends.
 ///
 /// The reader has already filtered to `$.type = 'text'` in SQL, so this is the
 /// second half of the same question rather than a check of its own: a part of
 /// that type whose `text` is missing or blank is a part with nothing to show.
-#[must_use]
-pub fn part_text(data: &str) -> Option<String> {
-    part_words(data).map(|words| clamp(&words))
-}
-
-/// [`part_text`] whole, before a card's line is cut from it: a worker's
-/// prompt says what its task is far past where a line ends.
 fn part_words(data: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
     let text = value.get("text")?.as_str()?;

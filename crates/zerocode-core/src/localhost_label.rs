@@ -72,12 +72,6 @@ const LOOPBACK_V4: &str = "127.0.0.1";
 const WILDCARD_V6: &str = "::";
 const LOOPBACK_V6: &str = "::1";
 
-/// How a listener spells "every interface" when it is naming a bind rather
-/// than an address (`advertised-url-watcher.ts:186-189`). Not a URL host — but
-/// dev servers print it as one, and it belongs in this file because this file
-/// is where the loopback vocabulary lives.
-const WILDCARD_ANY: &str = "*";
-
 /// The bare label occupies the first slot, so the first collision is `-2`
 /// and the search stops before `-1000` (`proxy.ts:101-111`).
 const FIRST_COLLISION_SUFFIX: usize = 2;
@@ -367,19 +361,6 @@ pub fn normalize_loopback_hostname(hostname: &str) -> String {
 pub fn is_loopback_hostname(hostname: &str) -> bool {
     let bare = normalize_loopback_hostname(hostname);
     LOOPBACK_HOSTS.contains(&bare.as_str())
-}
-
-/// Whether a hostname names every interface rather than one
-/// (`advertised-url-watcher.ts:186-189`).
-///
-/// Such a host is inside [`is_loopback_hostname`] — it is a legitimate thing
-/// for a *listener* to be bound to — and outside anything a browser can open.
-/// Callers that need an address rather than a bind ask this first.
-pub fn is_unspecified_host(hostname: &str) -> bool {
-    matches!(
-        normalize_loopback_hostname(hostname).as_str(),
-        WILDCARD_V4 | WILDCARD_V6 | WILDCARD_ANY
-    )
 }
 
 /// A loopback URL with an explicit port, or nothing (`:12-26`).
