@@ -9096,6 +9096,10 @@ async function paintKnowledgeView(tab = knowledgeTab()) {
     } catch {
       knowledgeGlAble = false;
     }
+    /* 기다리는 사이 판이 접혀 이 화면이 놓이고 문서를 떠났으면(`collapseStageGroup` → `dropKnowledgeView`) 아무것도
+     * 세우지 않는다. 세우면 떠난 화면에 GL 손(문맥 하나)과 테마 관찰자가 붙어 화면째 남는다(t-129269). 옮긴 탭은 옮겨
+     * 간 판의 그림이 그 판의 화면에 따로 그린다. */
+    if (!view.isConnected) return;
   }
   const canvas = view.querySelector(".knowledge-canvas");
   layout.viewport = { wide: canvas.clientWidth, tall: canvas.clientHeight, fresh: true };
