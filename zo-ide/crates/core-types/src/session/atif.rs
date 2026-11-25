@@ -25,6 +25,14 @@ impl Session {
     /// stale clone or a transient request message cannot enter the document.
     /// `ZO_DISABLE_ATIF` disables publication for this process.
     pub fn persist_atif(&self, agent_version: &str) -> Result<(), SessionError> {
+        self.persist_atif_with_setting(agent_version, None)
+    }
+
+    pub(super) fn persist_atif_with_setting(
+        &self,
+        agent_version: &str,
+        _setting: Option<&str>,
+    ) -> Result<(), SessionError> {
         let Some(persistence) = self.persistence.as_ref() else { return Ok(()); };
         if std::env::var_os("ZO_DISABLE_ATIF").is_some() {
             return Ok(());
@@ -40,6 +48,8 @@ impl Session {
             return Ok(());
         }
 
+        #[cfg(test)]
+        super::FULL_FILE_READS.with(|count| count.set(count.get() + 1));
         let contents = read_secure_regular_file(path)?;
         if FileFingerprint::of_bytes(contents.as_bytes()) != expected {
             return Err(SessionError::Conflict("session changed before ATIF publication".to_string()));

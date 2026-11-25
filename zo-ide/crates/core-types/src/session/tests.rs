@@ -3093,7 +3093,6 @@ fn expected_fingerprint(session: &Session) -> Option<super::FileFingerprint> {
     state.expected.clone()
 }
 
-#[cfg(unix)]
 fn full_file_reads() -> u64 {
     super::FULL_FILE_READS.with(std::cell::Cell::get)
 }
@@ -3101,6 +3100,29 @@ fn full_file_reads() -> u64 {
 fn cleanup_session_file(path: &Path) {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(super::lock_sibling_path(path));
+}
+
+#[test]
+fn turn_end_without_atif_opt_in_skips_the_whole_transcript_read() {
+    let path = temp_session_path("atif-disabled");
+    let mut session = Session::new().with_secure_persistence_path(path.to_path_buf());
+    session.push_user_text("Fixture question.").unwrap();
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Fixture answer.".into(),
+        }]))
+        .unwrap();
+    session.persist_appended_state_to_path(&path).unwrap();
+
+    let before = full_file_reads();
+    session.persist_atif_with_setting("test", None).unwrap();
+    let reads = full_file_reads() - before;
+    let published = path.with_extension("atif.json").exists();
+
+    assert_eq!(
+        (reads, published), (0, false),
+        "turn end must skip ATIF by default (whole-file reads, sidecar exists)"
+    );
 }
 
 /// Every `push_message` used to read and digest the ENTIRE transcript twice —

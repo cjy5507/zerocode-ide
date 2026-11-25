@@ -119,7 +119,7 @@ impl FileFingerprint {
 
 #[cfg(test)]
 thread_local! {
-    /// Whole-file fingerprint reads performed on THIS thread, so a test can
+    /// Whole-transcript reads for fingerprints and ATIF on THIS thread, so a test can
     /// count its own appends without other tests' writes racing the tally.
     /// Lets tests pin that the steady-state append path stays O(appended bytes)
     /// instead of O(transcript).

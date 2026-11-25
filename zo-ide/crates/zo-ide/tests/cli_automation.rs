@@ -45,7 +45,9 @@ impl Fixture {
         command
     }
     async fn run(&self, args: &[&str], stdin: &str, service: Option<&ScriptedAnthropicService>) -> Output {
-        let mut command = self.command(args, service);
+        Self::run_command(self.command(args, service), stdin).await
+    }
+    async fn run_command(mut command: Command, stdin: &str) -> Output {
         let mut child = command.spawn().unwrap();
         child.stdin.take().unwrap().write_all(stdin.as_bytes()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(90), child.wait_with_output()).await.expect("CLI timed out").unwrap()
@@ -61,6 +63,19 @@ fn success(output: &Output) { assert!(output.status.success(), "{}", diagnostic(
 fn failed(output: &Output, needle: &str) { assert!(!output.status.success(), "{}", diagnostic(output)); assert!(diagnostic(output).contains(needle), "{}", diagnostic(output)); }
 fn events(output: &Output) -> Vec<Value> { String::from_utf8_lossy(&output.stdout).lines().map(|line| serde_json::from_str(line).unwrap()).collect() }
 const OPTIONS: &[&str] = &["--plain", "--model", "claude-sonnet-4-6", "--permission-mode", "workspace-write"];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atif_is_off_by_default_after_a_completed_turn() {
+    const SESSION: &str = "atif-off-fixture";
+    let fixture = Fixture::new();
+    let path = fixture.seed(SESSION, "Previous fixture question.");
+    let service = ScriptedAnthropicService::text("Fixture answer.").await.unwrap();
+    let mut args = OPTIONS.to_vec();
+    args.extend(["--resume", SESSION, "Finish the fixture task."]);
+    success(&fixture.run(&args, "", Some(&service)).await);
+    assert!(fs::read_to_string(&path).unwrap().contains("Fixture answer."));
+    assert!(!path.with_extension("atif.json").exists(), "a default turn must not publish an ATIF document");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn atif_records_a_completed_turn_and_its_resume() {
@@ -106,14 +121,18 @@ async fn atif_records_a_completed_turn_and_its_resume() {
     ).await.unwrap();
     let mut first_args = OPTIONS.to_vec();
     first_args.extend(["--resume", SESSION, "Read the fixture file."]);
-    success(&f.run(&first_args, "", Some(&service)).await);
+    let mut first_command = f.command(&first_args, Some(&service));
+    first_command.env("ZO_ENABLE_ATIF", "1");
+    success(&Fixture::run_command(first_command, "").await);
     let sidecar = path.with_extension("atif.json");
     let first_document = fs::read(&sidecar);
 
     let resumed = ScriptedAnthropicService::text("Resumed fixture answer.").await.unwrap();
     let mut resume_args = OPTIONS.to_vec();
     resume_args.extend(["--resume", SESSION, "Finish the fixture task."]);
-    success(&f.run(&resume_args, "", Some(&resumed)).await);
+    let mut resume_command = f.command(&resume_args, Some(&resumed));
+    resume_command.env("ZO_ENABLE_ATIF", "1");
+    success(&Fixture::run_command(resume_command, "").await);
 
     let first_requests = service.request_bodies().await;
     let resumed_requests = resumed.request_bodies().await;
