@@ -482,6 +482,102 @@ ok("a rewritten page's card wears its previous picture no longer than the table'
     deadline.drawn.same && deadline.drawn.shown && deadline.drawn.busy === null,
   JSON.stringify(deadline));
 
+/* 고침 3(t-129552 — Codex 재확인 t-129729의 곱 6 틈). 다시 쓴 페이지의 카드가 검색으로 판에서 빠진 사이 그 페이지의 더 새
+ * 그림이 판 밖에서 왔다(캐시에만 든다): ㉮ 첫 그림의 시한이 지난 뒤 숨은 판이 그려 왔거나, ㉯ 숨은 판은 그리지 못하고 그
+ * 페이지를 연 판이 찍어 왔다. 그 뒤 페이지를 또 쓰고 검색을 지우면 같은 노드가 목록을 다시 읽지 않고 돌아온다 — 그 카드는
+ * 새 시한 안이면 더 새 그림을 입고(`aria-busy`), 아니면 글리프다. 시한이 지났거나 그리지 못한 첫 그림은 다시 서지 않는다
+ * (전에는 노드가 들고 있던 첫 그림이 새 시한에 다시 섰다). 돌아온 카드의 다음 그림은 같은 노드가 입는다. */
+const offGrid = await page.evaluate(async () => {
+  const search = (query) => {
+    artifactFilter.query = query;
+    changeArtifactFilter(artifactsView());
+  };
+  // 검색을 지운 뒤의 얼굴을 읽고, 돌아온 카드가 청한 그림을 주어 줄을 비운다. `rewroteAt`은 둘째 다시 쓰기 앞의 시각이다 —
+  // 새 시한은 그 뒤에 서므로, 그 시각에서 표의 시한 안에 읽은 얼굴은 반드시 새 시한 안이다.
+  const comeBack = async (g, { id, card, first, newer, rewroteAt, timeout }) => {
+    const asked = g.asked[id];
+    // 검색을 지우는 동안 목록을 다시 읽었는가 — 다시 읽으면 행이 새 객체로 와서 다른 길이 된다.
+    const list = window.__ANSWER__.artifacts_list;
+    let lists = 0;
+    window.__ANSWER__.artifacts_list = (args) => ((lists += 1), list(args));
+    search("");
+    await window.__PAINTED__();
+    const back = g.face(id);
+    const inTime = performance.now() < rewroteAt + timeout;
+    window.__ANSWER__.artifacts_list = list;
+    const listed = lists !== 0;
+    await window.__UNTIL__(() => g.asked[id] !== asked, "the returned card's turn");
+    g.asked[id].give();
+    const newest = g.picture(g.rows[0]);
+    await window.__UNTIL__(() => g.face(id).src === newest && !artifactThumbBusy, "the returned card's newest picture");
+    const drawn = g.face(id);
+    return { same: back.card === card, listed, shown: back.shown, first: back.src === first, newer: back.src === newer,
+      glyph: !back.shown && back.src === "", busy: back.busy, inTime, drawn: { same: drawn.card === card, busy: drawn.busy } };
+  };
+  const seen = {};
+  {
+    // ㉮ 첫 그림의 시한이 지난 뒤 숨은 판의 새 그림이 판 밖에서 왔다.
+    const timeout = 1_000;
+    const g = await window.__HELD_GALLERY__("late", timeout);
+    const id = g.rows[0].id;
+    const card = g.face(id).card;
+    const first = g.face(id).src;
+    g.holding = true;
+    await g.rewrite(0);
+    // 첫 시한은 목록을 다시 읽을 때 섰다 — 이 시각보다 늦지 않다.
+    const firstHeld = performance.now();
+    await window.__UNTIL__(() => g.asked[id] !== undefined, "the page drawn again");
+    search("no-such-late-page");
+    const detached = !card.isConnected;
+    await new Promise((done) => setTimeout(done, Math.max(0, firstHeld + timeout + 50 - performance.now())));
+    g.asked[id].give();
+    const newer = g.picture(g.rows[0]);
+    await window.__UNTIL__(() => artifactThumbs.get(id) === newer && !artifactThumbBusy, "the newer picture off the grid");
+    const rewroteAt = performance.now();
+    await g.rewrite(0);
+    seen.late = { detached, newerArrived: newer !== first,
+      ...await comeBack(g, { id, card, first, newer, rewroteAt, timeout }) };
+    g.close();
+  }
+  {
+    // ㉯ 숨은 판은 그리지 못했고, 그 페이지를 연 판이 지금 파일을 찍어 왔다.
+    const timeout = 8_000;
+    const g = await window.__HELD_GALLERY__("shot", timeout);
+    const id = g.rows[0].id;
+    const card = g.face(id).card;
+    const first = g.face(id).src;
+    g.holding = true;
+    await g.rewrite(0);
+    await window.__UNTIL__(() => g.asked[id] !== undefined, "the page drawn again");
+    search("no-such-shot-page");
+    const detached = !card.isConnected;
+    const failing = g.asked[id];
+    failing.fail(new Error("fixture: the hidden pane gave up on the page"));
+    await window.__UNTIL__(() => artifactThumbFailed.has(id) && !artifactThumbBusy, "the failed picture");
+    const row = g.rows[0];
+    const shot = snapArtifactSeen({ tab: { label: "shot-open-page", url: pathAsFileUrl(row.path), artifact: { id, path: row.path, row } } });
+    await window.__UNTIL__(() => g.asked[id] !== failing, "the open page's picture asked");
+    g.asked[id].give();
+    await shot;
+    const newer = g.picture(row);
+    const newerArrived = newer !== first && artifactThumbs.get(id) === newer;
+    const rewroteAt = performance.now();
+    await g.rewrite(0);
+    seen.shot = { detached, newerArrived, ...await comeBack(g, { id, card, first, newer, rewroteAt, timeout }) };
+    g.close();
+  }
+  return seen;
+});
+// 돌아온 얼굴: 새 시한 안에서 읽었으면 더 새 그림(갱신 중), 그 밖이면 더 새 그림이나 글리프 — 첫 그림은 어느 쪽도 아니다.
+const offGridFace = (one) => one.detached && one.newerArrived && one.same && one.listed === false && one.first === false
+  && (one.inTime ? one.shown && one.newer && one.busy === "true"
+    : (one.shown && one.newer && one.busy === "true") || (one.glyph && one.busy === null))
+  && one.drawn.same && one.drawn.busy === null;
+ok("a rewritten page's card that comes back from a search after a newer picture arrived off the grid past the first picture's timeout, and after another rewrite, wears that newer picture within the new timeout or the glyph — never the expired first picture",
+  offGridFace(offGrid.late), JSON.stringify(offGrid.late));
+ok("a rewritten page's card that comes back from a search after its redraw failed and the open page shot it off the grid, and after another rewrite, wears that newer picture within the new timeout or the glyph — never the failed first picture",
+  offGridFace(offGrid.shot), JSON.stringify(offGrid.shot));
+
 }
 
 export async function testArtifactPages(page, ok) {
