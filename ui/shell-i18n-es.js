@@ -7489,7 +7489,6 @@ registerI18nCatalog("es", {
     "browser.workspace.openError": "No se pudo confirmar el navegador de tareas solicitado.",
     "browser.workspace.placementError": "No se pudo confirmar la visualización de la página. Consulta el estado de nuevo.",
     "browser.workspace.frame": "Página actual del navegador de tareas",
-    "browser.workspace.watching": "Solo puedes mirar. Elige «Tomar el control» para interactuar con la página.",
     "browser.workspace.watchShield": "El agente trabaja · solo ver",
     "browser.workspace.folded": "El navegador de tareas sigue abierto al plegarlo. Elige «Ver ahora» para ver su página.",
     "browser.annotate": "Anotar un elemento",

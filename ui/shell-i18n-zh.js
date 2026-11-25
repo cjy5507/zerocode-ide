@@ -7489,7 +7489,6 @@ registerI18nCatalog("zh", {
     "browser.workspace.openError": "无法确认所请求的任务浏览器。",
     "browser.workspace.placementError": "无法确认页面显示。请重新确认状态。",
     "browser.workspace.frame": "任务浏览器的当前画面",
-    "browser.workspace.watching": "仅可查看。要操作页面，请选择“由我操作”。",
     "browser.workspace.watchShield": "代理正在操作 · 仅可查看",
     "browser.workspace.folded": "收起后任务浏览器仍会保留。选择“立即查看”以查看页面。",
     "browser.annotate": "给元素添加批注",

@@ -7500,7 +7500,6 @@ registerI18nCatalog("en", {
     "browser.workspace.openError": "The requested task browser could not be confirmed.",
     "browser.workspace.placementError": "The page display could not be confirmed. Check the state again.",
     "browser.workspace.frame": "Current task browser page",
-    "browser.workspace.watching": "Viewing only. Choose ‘Take control’ to interact with the page.",
     "browser.workspace.watchShield": "Agent at work · view only",
     "browser.workspace.folded": "The task browser stays open when folded. Choose ‘Watch now’ to see its page.",
     "browser.annotate": "Annotate an element",

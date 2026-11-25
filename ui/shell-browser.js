@@ -1152,7 +1152,7 @@ function browserWorkspaceWords(tab) {
   if (tab.workspace.mode === "paused") return tab.workspace.resume === "observe"
     ? t("browser.workspace.pausedObserve", "작업 일시정지 · 에이전트가 새로 본 뒤 이어 갑니다")
     : t("browser.workspace.paused", "작업 일시정지");
-  if (tab.workspace.mode === "human") return t("browser.workspace.human", "직접 제어 · 에이전트 입력 차단");
+  if (tab.workspace.mode === "human") return t("browser.workspace.human", "내가 조작 중 · 에이전트 입력 차단");
   return tab.workspace.needsObservation
     ? t("browser.workspace.observation", "에이전트 제어 · 새 화면 확인 후 입력 가능")
     : t("browser.workspace.agent", "에이전트 제어");
@@ -1162,8 +1162,9 @@ function buildBrowserWorkspaceBar() {
   const bar = document.createElement("section");
   bar.className = "browser-workspace-bar";
   bar.hidden = true;
-  const heading = document.createElement("strong");
-  heading.className = "browser-workspace-label";
+  // 막대의 이름은 읽는 기계에게만 말한다 — 눈에는 탭의 「작업」 배지가 이미 말했다(2026-11-25).
+  bar.dataset.i18nAria = "browser.workspace.title";
+  bar.setAttribute("aria-label", t("browser.workspace.title", "전용 작업 브라우저"));
   const status = document.createElement("span");
   status.className = "browser-workspace-status";
   status.setAttribute("role", "status");
@@ -1215,7 +1216,7 @@ function buildBrowserWorkspaceBar() {
   retry.type = "button";
   retry.className = "btn browser-workspace-retry";
   actions.appendChild(retry);
-  bar.append(heading, status, stopNote, regrant, owner, previewNote, actions);
+  bar.append(status, stopNote, regrant, owner, previewNote, actions);
   return bar;
 }
 
@@ -1323,7 +1324,6 @@ function paintBrowserWorkspace(host, tab) {
     surface.querySelector("img").removeAttribute("src");
     return;
   }
-  writeTextContent(host.querySelector(".browser-workspace-label"), t("browser.workspace.title", "전용 작업 브라우저"));
   writeTextContent(host.querySelector(".browser-workspace-status"), browserWorkspaceWords(tab));
   host.querySelector(".browser-workspace-bar").setAttribute("aria-busy", String(!!tab.workspacePending));
   host.querySelector(".browser-workspace-watch").hidden = tab.workspaceViewing === true;
@@ -1349,15 +1349,17 @@ function paintBrowserWorkspace(host, tab) {
   previewNote.hidden = control || (!unsupported && !tab.workspaceCaptureError);
   writeTextContent(previewNote, unsupported
     ? t("browser.workspace.unsupported", "이 환경에서는 관전 화면을 지원하지 않습니다. ‘내가 조작’으로 직접 사용할 수 있습니다.")
-    : t("browser.workspace.captureError", "화면을 가져오지 못했습니다. 화면 보기를 다시 시도하거나 직접 조작할 수 있습니다."));
+    : t("browser.workspace.captureError", "화면을 가져오지 못했습니다. ‘화면 다시 보기’를 누르거나 ‘내가 조작’으로 직접 사용할 수 있습니다."));
   const retry = host.querySelector(".browser-workspace-retry");
   retry.hidden = control || unsupported || !tab.workspaceCaptureError;
   retry.disabled = !!tab.workspacePending || !tab.workspace || !!tab.workspaceError;
   writeTextContent(retry, t("browser.workspace.retry", "화면 다시 보기"));
   surface.querySelector("img").alt = t("browser.workspace.frame", "작업 브라우저의 현재 화면");
-  writeTextContent(surface.querySelector(".browser-workspace-caption"), tab.workspaceViewing
-    ? t("browser.workspace.watching", "보기만 가능합니다. 페이지를 조작하려면 ‘내가 조작’을 누르세요.")
-    : t("browser.workspace.folded", "화면을 접어도 작업 브라우저는 유지됩니다. ‘지금 보기’로 화면을 확인하세요."));
+  // 접은 화면만 제 사정을 말한다. 지켜보는 화면 밑의 「보기만 가능합니다…」는 막대의 단추와 방패의 꼬리표가
+  // 이미 하는 말이었다(2026-11-25).
+  const caption = surface.querySelector(".browser-workspace-caption");
+  caption.hidden = tab.workspaceViewing === true;
+  writeTextContent(caption, t("browser.workspace.folded", "화면을 접어도 작업 브라우저는 유지됩니다. ‘지금 보기’로 화면을 확인하세요."));
   host.querySelector(".browser-failure").hidden = !control || !tab.navFailure;
 }
 
@@ -7410,7 +7412,7 @@ async function paintTabCreate() {
   const workspaceRow = {
     glyph: "globe",
     label: t("browser.workspace.new", "새 전용 작업 브라우저"),
-    hint: t("browser.workspace.newHint", "관전 · 일시정지 · 직접 조작"),
+    hint: t("browser.workspace.newHint", "관전 · 일시정지 · 내가 조작"),
     words: ["browser", "workspace", "agent", "watch",
       "브라우저", "작업", "관전", t("browser.workspace.new", "새 전용 작업 브라우저")],
     run: () => void openBrowserTab(undefined, { agentWorkspace: true, beside: true }),

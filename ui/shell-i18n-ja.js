@@ -7489,7 +7489,6 @@ registerI18nCatalog("ja", {
     "browser.workspace.openError": "要求した作業ブラウザを確認できませんでした。",
     "browser.workspace.placementError": "ページの表示を確認できませんでした。状態を再確認してください。",
     "browser.workspace.frame": "作業ブラウザの現在の画面",
-    "browser.workspace.watching": "閲覧のみです。ページを操作するには「自分で操作」を選んでください。",
     "browser.workspace.watchShield": "エージェントが操作中 · 閲覧のみ",
     "browser.workspace.folded": "表示を閉じても作業ブラウザは維持されます。「今すぐ見る」で画面を確認できます。",
     "browser.annotate": "要素に注釈を付ける",
