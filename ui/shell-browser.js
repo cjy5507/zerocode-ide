@@ -1843,6 +1843,42 @@ function openBrowserDevtools(tab) {
   }
 }
 
+/* ⚙ 메뉴의 뷰포트 줄이 하는 말: 기본 자리면 이름만, 상자를 입었으면 그 상자까지. 줄 끝의 ›는 북마크 폴더
+ * 줄과 같은 표시다 — 누르면 그 자리에 고르는 메뉴가 선다. */
+function browserViewportWords(tab) {
+  const name = t("browser.viewport", "뷰포트 크기");
+  const worn = BROWSER_VIEWPORT_PRESETS.find((one) => one.id === tab.viewport)?.label
+    ?? (customViewportOf(tab.viewport) ? tab.viewport : null);
+  return worn === null ? `${name} ›` : `${name} · ${worn} ›`;
+}
+
+/* 뷰포트 크기를 고르는 메뉴(1-g19): 기본 자리와 Orca의 일곱 프리셋. ⚙ 메뉴의 한 줄이 연다 — 아홉 줄이 ⚙ 메뉴에
+ * 늘 펼쳐져 있어 그 메뉴가 열여섯 줄이었다(2026-11-25). 에이전트가 건 맞춤 상자(`WxH`)는 줄이 없으므로 어느
+ * 줄에도 표시가 서지 않는다. */
+function openBrowserViewportMenu(tab, box) {
+  const wear = (viewport) => {
+    if (!browserWorkspaceLive(tab) || !browserWorkspaceCanControl(tab)) return;
+    tab.viewport = viewport;
+    syncBrowserPanes();
+    rememberBrowserOpenTabs();
+  };
+  openSidebarMenu(box.left, box.bottom + 4, [
+    { caption: t("browser.viewport", "뷰포트 크기") },
+    {
+      label: t("browser.viewportDefault", "기본"),
+      choice: true,
+      checked: !tab.viewport,
+      run: () => wear(null),
+    },
+    ...BROWSER_VIEWPORT_PRESETS.map((preset) => ({
+      label: preset.label,
+      choice: true,
+      checked: tab.viewport === preset.id,
+      run: () => wear(preset.id),
+    })),
+  ]);
+}
+
 /* Give a host its hands, once per NODE — the clone a second leaf gets arrives
  * with dead buttons, and this is what brings them to life. The handlers read
  * `host._browserTab`, which every paint refreshes: a listener holding the tab
@@ -1979,60 +2015,42 @@ function wireBrowserHost(host) {
   });
   // Orca의 ⚙ 메뉴: 프로필(1-g26 — 판은 자기 쿠키 단지에서 다시 선다),
   // 뷰포트 크기(1-g19), 쿠키 가져오기(지시서 C3 — 심기 문이 섰다:
-  // `import_browser_cookies`), 설정 문.
+  // `import_browser_cookies`), 설정 문. 세 묶음이다: 어느 단지인가(고르는
+  // 줄), 이 페이지에 하는 일, 단지와 설정을 다루는 일.
   host.querySelector(".browser-menu").addEventListener("click", async (event) => {
     const tab = held();
     if (!browserWorkspaceCanControl(tab)) return;
     const revision = tab.workspace?.revision;
     const active = activeTabId;
     const box = event.currentTarget.getBoundingClientRect();
-    const check = (chosen, label) => (chosen ? "✓ " + label : label);
     // 목록은 문을 열 때마다 새로 읽는다 — 다른 창이 만든 프로필도 이 메뉴의
     // 것이다.
     await refreshBrowserProfiles();
     if (!browserWorkspaceLive(tab) || held() !== tab || !browserWorkspaceCanControl(tab)
       || activeTabId !== active || tab.workspace?.revision !== revision) return;
     const items = [
-      { label: t("browser.profile", "프로필"), disabled: true, run: () => {} },
+      { caption: t("browser.profile", "프로필") },
       {
-        label: check(!tab.profile, t("browser.profileDefault", "기본")),
+        label: t("browser.profileDefault", "기본"),
+        choice: true,
+        checked: !tab.profile,
         run: () => {
           if (tab.profile) void reopenBrowserPane(tab, { profile: null });
         },
       },
       ...browserProfiles.map((profile) => ({
-        label: check(tab.profile === profile.id, profile.name),
+        label: profile.name,
+        choice: true,
+        checked: tab.profile === profile.id,
         run: () => {
           if (tab.profile !== profile.id) void reopenBrowserPane(tab, { profile: profile.id });
         },
       })),
-      {
-        label: t("browser.newProfile", "새 프로필…"),
-        run: () => askNewBrowserProfile(box, tab),
-      },
-      {
-        label: t("browser.importCookies", "브라우저에서 가져오기…"),
-        run: () => void askCookieImport(box, tab.profile ?? null),
-      },
       { separator: true },
-      { label: t("browser.viewport", "뷰포트 크기"), disabled: true, run: () => {} },
       {
-        label: check(!tab.viewport, t("browser.viewportDefault", "기본")),
-        run: () => {
-          tab.viewport = null;
-          syncBrowserPanes();
-          rememberBrowserOpenTabs();
-        },
+        label: browserViewportWords(tab),
+        run: () => openBrowserViewportMenu(tab, box),
       },
-      ...BROWSER_VIEWPORT_PRESETS.map((preset) => ({
-        label: check(tab.viewport === preset.id, preset.label),
-        run: () => {
-          tab.viewport = preset.id;
-          syncBrowserPanes();
-          rememberBrowserOpenTabs();
-        },
-      })),
-      { separator: true },
       {
         label: t("browser.devtools", "개발자 도구"),
         run: () => openBrowserDevtools(tab),
@@ -2047,6 +2065,14 @@ function wireBrowserHost(host) {
         },
       },
       { separator: true },
+      {
+        label: t("browser.newProfile", "새 프로필…"),
+        run: () => askNewBrowserProfile(box, tab),
+      },
+      {
+        label: t("browser.importCookies", "브라우저에서 가져오기…"),
+        run: () => void askCookieImport(box, tab.profile ?? null),
+      },
       {
         label: t("browser.openSettings", "브라우저 설정…"),
         run: () => {

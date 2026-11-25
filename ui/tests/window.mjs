@@ -12879,42 +12879,59 @@ const gearMenu = await page.evaluate(async () => {
   gear.click();
   await new Promise((done) => setTimeout(done, 60));
   const menu = document.getElementById("sidebar-menu");
-  const rows = [...menu.querySelectorAll(".sidebar-menu-item .sidebar-menu-label")].map(
+  const labels = () => [...menu.querySelectorAll(".sidebar-menu-item .sidebar-menu-label")].map(
     (one) => one.textContent,
   );
-  // 1-g26부터 메뉴는 프로필 절이 앞장서고, 뷰포트 절이 그 아래 선다 — 같은
-  // 낱말 "기본"이 두 절에 있으니 뷰포트의 것은 헤더 '다음 행'으로 집는다.
-  const viewportAt = rows.indexOf(t("browser.viewport", "뷰포트 크기"));
+  const captions = () => [...menu.querySelectorAll(".sidebar-menu-caption")].map((one) => one.textContent);
+  const press = (words) => [...menu.querySelectorAll(".sidebar-menu-item")]
+    .find((one) => one.querySelector(".sidebar-menu-label")?.textContent === words)
+    ?.click();
+  const checked = () => [...menu.querySelectorAll('.sidebar-menu-item[aria-checked="true"] .sidebar-menu-label')]
+    .map((one) => one.textContent);
+  // 메뉴는 세 묶음이다(2026-11-25): 프로필을 고르는 줄, 이 페이지에 하는 일 — 뷰포트 크기는 한 줄이고
+  // 누르면 그 자리에 고르는 메뉴가 선다 —, 단지와 설정을 다루는 일. 절의 이름은 줄이 아니라 캡션이다.
+  const rows = labels();
+  const viewportRow = t("browser.viewport", "뷰포트 크기") + " ›";
   seen.menuShape =
     !menu.hidden &&
-    rows[0] === t("browser.profile", "프로필") &&
-    viewportAt > 0 &&
-    rows[viewportAt + 1] === "✓ " + t("browser.viewportDefault", "기본") &&
-    rows.some((one) => one === "Mobile M — 375 × 667") &&
+    JSON.stringify(captions()) === JSON.stringify([t("browser.profile", "프로필")]) &&
+    rows[0] === t("browser.profileDefault", "기본") &&
+    JSON.stringify(checked()) === JSON.stringify([t("browser.profileDefault", "기본")]) &&
+    rows.includes(viewportRow) &&
+    !rows.some((one) => one === "Mobile M — 375 × 667") &&
+    rows.includes(t("browser.devtools", "개발자 도구")) &&
+    rows.includes(t("browser.menu.openPageOut", "기본 브라우저에서 페이지 열기")) &&
     rows.at(-1) === t("browser.openSettings", "브라우저 설정…");
+  // 뷰포트 줄이 고르는 메뉴를 연다: 기본에 표시가 서고 프리셋 일곱이 선다.
+  press(viewportRow);
+  await new Promise((done) => setTimeout(done, 120));
+  seen.viewportMenu =
+    !menu.hidden &&
+    JSON.stringify(captions()) === JSON.stringify([t("browser.viewport", "뷰포트 크기")]) &&
+    labels().length === 8 &&
+    JSON.stringify(checked()) === JSON.stringify([t("browser.viewportDefault", "기본")]) &&
+    labels().includes("Mobile M — 375 × 667");
   // 프리셋을 고르면 다음 배치가 그 상자로 클램프된다 — 가로 중앙.
   const bodyRect = host.querySelector(".browser-body").getBoundingClientRect();
   placed.length = 0;
-  [...menu.querySelectorAll(".sidebar-menu-item")]
-    .find((one) => one.textContent.includes("Mobile M"))
-    ?.click();
+  press("Mobile M — 375 × 667");
   await new Promise((done) => setTimeout(done, 260));
   const last = placed.at(-1);
   seen.clamped =
     tab.viewport === "mobile-m" &&
     last?.width === 375 &&
     Math.abs(last.x - (bodyRect.x + (bodyRect.width - 375) / 2)) <= 1;
-  // 기본으로 돌아오면 몸 전체를 다시 쓴다.
+  // 입은 상자는 ⚙ 메뉴의 그 줄이 말하고, 고르는 메뉴에서는 그 줄에 표시가 선다.
   gear.click();
   await new Promise((done) => setTimeout(done, 120));
+  const wornRow = `${t("browser.viewport", "뷰포트 크기")} · Mobile M — 375 × 667 ›`;
+  seen.rowSaysTheBox = labels().includes(wornRow);
+  press(wornRow);
+  await new Promise((done) => setTimeout(done, 120));
+  seen.boxIsChecked = JSON.stringify(checked()) === JSON.stringify(["Mobile M — 375 × 667"]);
+  // 기본으로 돌아오면 몸 전체를 다시 쓴다.
   placed.length = 0;
-  {
-    const held = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
-    const header = held.findIndex((one) =>
-      one.textContent.includes(t("browser.viewport", "뷰포트 크기")),
-    );
-    held[header + 1]?.click();
-  }
+  press(t("browser.viewportDefault", "기본"));
   await new Promise((done) => setTimeout(done, 260));
   seen.restored =
     tab.viewport === null && Math.round(placed.at(-1)?.width ?? 0) === Math.round(bodyRect.width);
@@ -13062,9 +13079,9 @@ ok(
 );
 
 ok(
-  "the gear menu clamps the pane to Orca's viewport presets and opens the browser settings",
-  gearMenu.hasGear && gearMenu.menuShape && gearMenu.clamped &&
-    gearMenu.restored && gearMenu.settingsDoor,
+  "the gear menu's viewport row opens Orca's presets, the pane is clamped to the one chosen, and the menu opens the browser settings",
+  gearMenu.hasGear && gearMenu.menuShape && gearMenu.viewportMenu && gearMenu.clamped &&
+    gearMenu.rowSaysTheBox && gearMenu.boxIsChecked && gearMenu.restored && gearMenu.settingsDoor,
   JSON.stringify(gearMenu),
 );
 
@@ -44291,11 +44308,14 @@ const profiles = await page.evaluate(async () => {
   const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item .sidebar-menu-label")].map(
     (one) => one.textContent,
   );
+  // 절의 이름은 캡션이고, 단지는 고르는 줄이다 — 지금 입은 단지에 표시가 선다(2026-11-25).
   seen.menuLeadsWithJars =
-    rows[0] === t("browser.profile", "프로필") &&
-    rows[1] === "✓ " + t("browser.profileDefault", "기본") &&
-    rows[2] === "일터" &&
-    rows[3] === t("browser.newProfile", "새 프로필…");
+    document.querySelector("#sidebar-menu .sidebar-menu-caption")?.textContent === t("browser.profile", "프로필") &&
+    rows[0] === t("browser.profileDefault", "기본") &&
+    rows[1] === "일터" &&
+    [...document.querySelectorAll('#sidebar-menu .sidebar-menu-item[role="menuitemradio"]')]
+      .map((one) => one.getAttribute("aria-checked")).join(",") === "true,false" &&
+    rows.includes(t("browser.newProfile", "새 프로필…"));
   // 단지를 고른다: 새 판이 그 프로필로 서고, 옛 판은 닫히고, 이름표가 옮는다.
   const before = groupRecents.get(tab.pane) ? [...groupRecents.get(tab.pane)] : null;
   [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")]
