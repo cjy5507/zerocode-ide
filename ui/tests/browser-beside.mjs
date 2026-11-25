@@ -10,6 +10,10 @@
  * the doors whose own words ask for the side — the palette's 「옆에 분할」, the title bar's 「옆에 작업 보기」 — are
  * the person's hand and divide a narrow group as before.
  *
+ * And the room a browser beside gets: while one stands in a side group the file column is folded, so the page has the
+ * column's 350px too (960px to 1135px in a 2560px window, measured 2026-11-25). The column comes back when no browser
+ * shows beside any more; the person's own press of its toggle, either way, is theirs and is left as they made it.
+ *
  *   node ui/tests/browser-beside.mjs
  *   WINDOW_SUITES=browser-beside node ui/tests/window.mjs */
 import { pathToFileURL } from "node:url";
@@ -50,6 +54,9 @@ async function standWindow(browser, origin, viewport) {
         lastPane: last?.pane ?? null,
         lastWidth: last ? Math.round(groupOf(last.pane)?.el?.getBoundingClientRect().width ?? 0) : null,
         terminalPane: tabs.find((one) => one.kind === "term")?.pane ?? null,
+        // The file column: folded by its own state, and how wide it stands on screen.
+        asideFolded: folded.aside,
+        aside: Math.round(document.querySelector("aside.files")?.getBoundingClientRect().width ?? 0),
       };
     };
   });
@@ -95,6 +102,8 @@ export async function testBrowserBeside(browser, origin, ok) {
         linked.groups === before.groups && linked.browsers === 1
           && linked.lastPane === before.terminalPane && linked.front === "browser" && wholeStage(linked.lastWidth, before.stage),
         JSON.stringify({ before, linked }));
+      ok("a browser that is a tab of the group in front leaves the file column as it stood",
+        linked.asideFolded === before.asideFolded && linked.aside === before.aside, JSON.stringify({ before, linked }));
       ok("a narrow window's link raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
@@ -124,8 +133,38 @@ export async function testBrowserBeside(browser, origin, ok) {
       await openByLink(page, "https://example.com/roomy");
       const linked = await seen(page);
       ok("a link opened beside a group with room divides it, as before",
-        linked.groups === before.groups + 1 && linked.lastPane !== before.terminalPane && linked.lastWidth * 2 <= before.stage,
+        linked.groups === before.groups + 1 && linked.lastPane !== before.terminalPane && linked.lastWidth * 2 <= linked.stage,
         JSON.stringify({ before, linked }));
+      ok("while a browser stands beside, the file column is folded and the page has its width too",
+        before.asideFolded === false && before.aside > 0 && linked.asideFolded === true && linked.aside === 0
+          && linked.stage >= before.stage + before.aside - 2 && linked.lastWidth > before.stage / 2 + before.aside / 2 - 8,
+        JSON.stringify({ before, linked }));
+      await page.evaluate(() => closeTab(tabs.find((one) => one.kind === "browser").id));
+      await settled(page);
+      const closed = await seen(page);
+      ok("and comes back when the browser beside is closed",
+        closed.browsers === 0 && closed.asideFolded === false && closed.aside === before.aside && closed.stage === before.stage,
+        JSON.stringify({ before, closed }));
+      // The person opens the column again while a browser stands beside: it stays as they left it, both ways.
+      await openByLink(page, "https://example.com/roomy-two");
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
+      const reopened = await seen(page);
+      await page.evaluate(() => closeTab(tabs.find((one) => one.kind === "browser").id));
+      await settled(page);
+      const kept = await seen(page);
+      ok("a file column the person opened again beside a browser stays open, then and after the browser closes",
+        reopened.asideFolded === false && reopened.aside === before.aside && kept.asideFolded === false,
+        JSON.stringify({ reopened, kept }));
+      // And one the person folded themselves is theirs: a browser beside neither opens it nor, closing, unfolds it.
+      await page.evaluate(() => document.getElementById("toggle-aside").click());
+      await settled(page);
+      await openByLink(page, "https://example.com/roomy-three");
+      await page.evaluate(() => closeTab(tabs.find((one) => one.kind === "browser").id));
+      await settled(page);
+      const own = await seen(page);
+      ok("a file column the person folded themselves stays folded after a browser beside comes and goes",
+        own.browsers === 0 && own.asideFolded === true, JSON.stringify(own));
       ok("the rule's width, read from the window's own source, lies between the two stages measured here",
         Number.isInteger(BESIDE_MIN) && narrowStage < BESIDE_MIN && BESIDE_MIN <= before.stage,
         JSON.stringify({ rule: BESIDE_MIN, narrowStage, roomyStage: before.stage }));
