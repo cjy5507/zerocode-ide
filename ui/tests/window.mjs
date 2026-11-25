@@ -552,6 +552,88 @@ suite("i18n-lazy-catalogs", async ({ browser, origin, ok }) => {
   } finally {
     await late.page.close();
   }
+
+  /* t-129668, the second review's counterexample (t-129744,
+   * reports/lazy-i18n-177/review-177-2/review-window.mjs): the person's
+   * choice is the language's last intent. An English window has asked for its
+   * settings document (revision 2) when the person picks Spanish, whose file
+   * is held on the wire. The document — asked BEFORE the choice — then lands
+   * naming English, the language on screen, or Japanese, another one. It may
+   * not cancel the choice: when the Spanish file arrives `setLocale` answers
+   * true, the menu reads Spanish and Spanish is saved once. Every language
+   * the window painted on the way is kept too: the older document's is not
+   * one of them. */
+  for (const [incoming, named] of [["en", "English, the language on screen"], ["ja", "Japanese, another language"]]) {
+    const chosen = await openWindowTestPage(browser, origin, {
+      boot: { ...productionBoot, revision: 1 },
+      before: async (opened) => opened.addInitScript(() => {
+        window.__ZEROCODE_I18N_SYNC_FOR_TESTS__ = false;
+      }),
+    });
+    let releaseSpanish = () => {};
+    const spanishHeld = new Promise((resolve) => { releaseSpanish = resolve; });
+    try {
+      let spanishAsked;
+      const spanishRequested = new Promise((resolve) => { spanishAsked = resolve; });
+      await chosen.page.route("**/shell-i18n-es.js", async (route) => {
+        spanishAsked();
+        await spanishHeld;
+        await route.continue().catch(() => {});
+      });
+      await chosen.page.evaluate((incoming) => {
+        let land;
+        const reply = new Promise((resolve) => { land = resolve; });
+        window.__OLDER_DOCUMENT__ = { asked: false, land: () => land({ locale: incoming, revision: 2 }) };
+        window.__LOCALE_WRITES__ = [];
+        window.__LANGS_PAINTED__ = [];
+        new MutationObserver(() => window.__LANGS_PAINTED__.push(document.documentElement.lang))
+          .observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+        window.__ANSWER__.set_locale = ({ code }) => {
+          window.__LOCALE_WRITES__.push(code);
+          return { locale: code, revision: 3 };
+        };
+        window.__ANSWER__.settings_snapshot = () => {
+          window.__OLDER_DOCUMENT__.asked = true;
+          return reply;
+        };
+        for (const receive of window.__LISTENERS__["settings:changed"] ?? []) {
+          receive({ payload: { revision: 2, keys: ["locale"] } });
+        }
+      }, incoming);
+      await chosen.page.waitForFunction(() => window.__OLDER_DOCUMENT__.asked, null, { timeout: 5000 });
+      await chosen.page.evaluate(() => { window.__PICKED__ = setLocale("es"); });
+      let notAsked;
+      await Promise.race([spanishRequested, new Promise((_, reject) => {
+        notAsked = setTimeout(() => reject(new Error("the Spanish catalog was not asked for within 5 s")), 5000);
+      })]).finally(() => clearTimeout(notAsked));
+      await chosen.page.evaluate(() => window.__OLDER_DOCUMENT__.land());
+      await chosen.page.waitForFunction(() => settingsRevision === 2, null, { timeout: 5000 });
+      releaseSpanish();
+      const settled = await chosen.page.evaluate(async () => {
+        const choice = await window.__PICKED__;
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        return {
+          choice,
+          writes: [...window.__LOCALE_WRITES__],
+          painted: [...window.__LANGS_PAINTED__],
+          lang: document.documentElement.lang,
+          active: activeLocaleCode(),
+          word: document.querySelector('[data-i18n="sidebar.search"]').textContent.trim(),
+          revision: settingsRevision,
+        };
+      });
+      ok(
+        `an older settings document naming ${named} lands while the person's Spanish loads, and Spanish still paints and is saved once`,
+        settled.choice === true && settled.writes.join() === "es" && settled.active === "es" &&
+          settled.lang === "es" && settled.word === "Buscar" &&
+          settled.painted.length > 0 && settled.painted.every((lang) => lang === "es"),
+        JSON.stringify({ incoming, ...settled }),
+      );
+    } finally {
+      releaseSpanish();
+      await chosen.page.close();
+    }
+  }
 });
 
 suite("explorer", async ({ browser, origin, ok }) => {
