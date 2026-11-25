@@ -516,7 +516,6 @@
    * 22px where `backdrop-blur-2xl` is **40**. Under 40px the room behind the
    * glass stops being legible shapes and becomes colour, which is the whole
    * difference between a translucent panel and a frosted one. */
-  --glass-veil-raised: rgb(10 10 10 / 97%);
   /* No `saturate()`. It was doing real work under a 22px blur, and it is the
    * one part of this material Orca does not have — the utility is not in the
    * bundle at all. At 40px there is little chroma left to rescue, and keeping
@@ -893,7 +892,6 @@
   --sidebar-width: 280px;
   --sidebar-width-folded: 240px;
   --aside-width: 350px;
-  --aside-width-folded: 180px;
   --statusbar-height: 24px;
   --panel-folded-height: 26vh;
 
@@ -1052,7 +1050,6 @@
   --agent-graph-agent-width: 172px;
   --agent-graph-inspector-width: 300px;
   --agent-graph-search-width: 320px;
-  --agent-graph-inspector-stack-min-height: 220px;
   /* 172 is the width Orca hands a node that carries a title and one line under
    * it — the orbit's name tags read it (`--agent-orbit-label-*`). The card
    * picture no longer has lanes (direction E2, t-68475): its columns are the
@@ -1098,7 +1095,6 @@
   --agent-graph-drawer-width: 320px;
   --agent-graph-sheet-height: 52%;
   --agent-graph-sheet-min-height: 240px;
-  --agent-graph-search-icon: 28px;
   /* ---- 보드 고유의 리듬 (t-2374) ----
    *
    * `--space-*`가 맞는 자리는 그것을 쓴다. 아래는 그 사다리에 없는, 이 표면만의
@@ -1110,7 +1106,6 @@
   --agent-graph-gap: 6px;
   --agent-graph-gap-tight: 2px;
   --agent-graph-chip-inset: 1px 6px;
-  --agent-graph-grid: 24px;
   --agent-graph-text-floor-title: 10px;
   --agent-graph-text-floor-line: 9px;
   --agent-graph-text-floor-fine: 8px;
@@ -1197,7 +1192,6 @@
    * (≤416px), `14px 16px` of padding, 13px type, and a 2.5rem lift off the
    * bottom edge so it clears the status bar rather than sitting on it. */
   --toast-width: min(26rem, calc(100vw - 2rem));
-  --toast-inset: 14px 16px;
   --toast-lift: 2.5rem;
 
   /* The 이름/내용 switch above the file search. One row of the file panel's
@@ -2164,14 +2158,6 @@
   --knowledge-hue-5: var(--signal-ready);
   --knowledge-hue-6: var(--signal-halt);
   --knowledge-hue-7: color-mix(in srgb, var(--knowledge-hue-3) 50%, var(--knowledge-hue-4));
-  --knowledge-hue-0-center: color-mix(in srgb, var(--knowledge-hue-0) 62%, var(--knowledge-highlight));
-  --knowledge-hue-1-center: color-mix(in srgb, var(--knowledge-hue-1) 62%, var(--knowledge-highlight));
-  --knowledge-hue-2-center: color-mix(in srgb, var(--knowledge-hue-2) 62%, var(--knowledge-highlight));
-  --knowledge-hue-3-center: color-mix(in srgb, var(--knowledge-hue-3) 62%, var(--knowledge-highlight));
-  --knowledge-hue-4-center: color-mix(in srgb, var(--knowledge-hue-4) 62%, var(--knowledge-highlight));
-  --knowledge-hue-5-center: color-mix(in srgb, var(--knowledge-hue-5) 62%, var(--knowledge-highlight));
-  --knowledge-hue-6-center: color-mix(in srgb, var(--knowledge-hue-6) 62%, var(--knowledge-highlight));
-  --knowledge-hue-7-center: color-mix(in srgb, var(--knowledge-hue-7) 62%, var(--knowledge-highlight));
   --knowledge-typed-related: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-3));
   --knowledge-typed-implements: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-0));
   --knowledge-typed-depends-on: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-4));
@@ -2519,8 +2505,6 @@
   --artifact-kind-export: var(--knowledge-hue-3);
   --artifact-kind-transcript: var(--knowledge-hue-4);
   --artifact-kind-other: var(--ink-mist);
-  --artifact-kind-page: var(--knowledge-hue-3);
-  --artifact-kind-document: var(--knowledge-hue-2);
   /* The artifact studio expresses the existing material palette. These
    * bindings remain theme-aware and never redefine provider/lane identity. */
   --artifact-studio-accent: var(--knowledge-hue-0);
@@ -2530,7 +2514,6 @@
   --artifact-gallery-min-share: 20%;
   --artifact-studio-radius: 12px;
   --artifact-studio-focus-width: calc(var(--rule-width) * 2);
-  --artifact-studio-weight: 650;
   --artifact-studio-copy-leading: 1.55;
   --artifact-studio-glyph-side: 30px;
   --artifact-studio-brief-min: 72px;
@@ -2538,7 +2521,6 @@
      걷고 판의 면과 1px 링으로 선다. 이 보기의 색(`--artifact-studio-accent`)은 고른 것에만 남는다. */
   --artifact-studio-edge: var(--edge-rule);
   --artifact-studio-background: var(--surface-deck);
-  --artifact-studio-shadow: 0 8px 24px color-mix(in srgb, var(--surface-abyss) 24%, transparent);
   --artifact-studio-face-background: var(--artifact-face-bg);
   /* ---- the connected workbench (t-3818) ----
    *
@@ -3085,13 +3067,6 @@
   --chat-font-ui: var(--font-ui-choice, -apple-system), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     "Apple SD Gothic Neo", sans-serif;
 
-  /* A tool turn is two rows — what was called, and what it answered — and
-   * they belong to each other, so the gap between them is tighter than the
-   * gap between turns. It was written as a bare `2px` in the rule, which is
-   * the one thing `the_helper_page_speaks_from_its_catalogs_and_paints_from
-   * _its_tokens` exists to catch, and it had been red on `main` for it. */
-  --chat-tool-gap: 2px;
-
   /* What a row folds (t-6323 A1), read off the extension's webview
    * (2.1.280): a tool body's row stops at 60px and its last 10px fade out
    * (`toolBodyRowContent`: max-height 60px, mask 50px → 60px); a diff's box
@@ -3324,9 +3299,6 @@
    * and the translucent panel are the same colour — turning the blur off
    * changes the depth, never the palette. */
   --glass-veil: rgb(255 255 255 / 62%);
-  /* Orca's `bg-background/96` — the light half of the same declaration whose
-   * dark half is `rgba(23,23,23,0.96)`. */
-  --glass-veil-raised: rgb(255 255 255 / 96%);
   --glass-blur: blur(40px);
   /* `border-black/14`. Ink rather than white here for the obvious reason: on
    * a white floor the boundary of a floating surface can only be drawn by
