@@ -6214,12 +6214,11 @@ async function refreshSkills(force = false) {
       if (!answer) return;
       skillsReport = answer; skillsNeedsRescan = false;
       for (const tab of tabs.filter((tab) => tab.kind === "skills")) paintSkillsView(docHost(tab.pane, "skills"));
-      paintSkillsSummary(); paintRequiredSkillBadges();
+      paintRequiredSkillBadges();
     } catch (error) {
       for (const view of document.querySelectorAll(".skills-view")) {
         const note = view.querySelector(".skills-error"); note.hidden = false; note.textContent = skillsError(error);
       }
-      const summary = el("skills-summary"); if (summary) summary.textContent = skillsError(error);
     } finally { skillsPending = null; }
   })();
   return skillsPending;
@@ -6238,10 +6237,6 @@ async function refreshLibrary(force = false) {
   }
 }
 
-function paintSkillsSummary() {
-  const node = el("skills-summary");
-  if (node) node.textContent = skillsReport ? skillText("summary", { count: skillsReport.families.length, roots: skillsReport.sources.length }) : skillText("loading");
-}
 function paintRequiredSkillBadges() {
   const missing = (skillsReport?.required ?? []).filter((r) => r.missing_agents.length);
   for (const node of document.querySelectorAll("[data-required-skills]")) {

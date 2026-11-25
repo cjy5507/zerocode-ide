@@ -309,9 +309,7 @@ const CATALOG = {
 
 
     "skills.library": "에이전트 라이브러리",
-    "skills.open": "스킬·MCP 열기",
     "skills.loading": "스킬을 읽는 중…",
-    "skills.summary": "{{count}}개 스킬 · {{roots}}개 검색 위치",
     "skills.bundle": "번들 설치",
     "skills.root_all": "모든 위치",
     "skills.root_home": "전역",
@@ -975,9 +973,7 @@ function laterCatalogs() {
     "skills.plan_failed":"Check the install command error.",
 
     "skills.library": "AGENT LIBRARY",
-    "skills.open": "Open Skills & MCP",
     "skills.loading": "Reading skills…",
-    "skills.summary": "{{count}} skills · {{roots}} discovery roots",
     "skills.bundle": "Install a bundle",
     "skills.root_all": "All sources",
     "skills.root_home": "Global",
@@ -9534,9 +9530,7 @@ function laterCatalogs() {
     "skills.plan_failed":"インストールコマンドのエラーを確認してください。",
 
     "skills.library": "エージェントライブラリ",
-    "skills.open": "スキル・MCP を開く",
     "skills.loading": "スキルを読み込み中…",
-    "skills.summary": "{{count}} スキル · {{roots}} 検索場所",
     "skills.bundle": "バンドルをインストール",
     "skills.root_all": "すべての場所",
     "skills.root_home": "グローバル",
@@ -18092,9 +18086,7 @@ function laterCatalogs() {
     "skills.plan_failed":"请检查安装命令错误。",
 
     "skills.library": "智能体库",
-    "skills.open": "打开技能·MCP",
     "skills.loading": "正在读取技能…",
-    "skills.summary": "{{count}} 个技能 · {{roots}} 个搜索位置",
     "skills.bundle": "安装技能包",
     "skills.root_all": "全部来源",
     "skills.root_home": "全局",
@@ -26649,9 +26641,7 @@ function laterCatalogs() {
     "skills.plan_failed":"Revisa el error del comando de instalación.",
 
     "skills.library": "BIBLIOTECA DE AGENTES",
-    "skills.open": "Abrir Skills y MCP",
     "skills.loading": "Leyendo habilidades…",
-    "skills.summary": "{{count}} habilidades · {{roots}} ubicaciones",
     "skills.bundle": "Instalar un paquete",
     "skills.root_all": "Todos los orígenes",
     "skills.root_home": "Global",

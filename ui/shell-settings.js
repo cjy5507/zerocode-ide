@@ -5067,9 +5067,6 @@ el("flow-open-doc").addEventListener("click", () => {
   if (flow?.file) void openFile(flow.file, { preview: true });
 });
 
-/* Skills is a document view; Settings keeps a summary and its entry point. */
-el("skills-open")?.addEventListener("click", openSkillsView);
-
 function paintHooks() {
   el("hooks-enabled").checked = hooksReport.enabled !== false;
   // Only worth saying when hooks are ON: a bridge that never bound matters
