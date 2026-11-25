@@ -4399,6 +4399,13 @@
         </div>
         <div class="agent-list" id="agent-available"></div>
         </div>
+        <!-- The bridge an agent reports its own lifecycle to.
+             Orca's own settings switch is `agentStatusHooksEnabled` (default
+             on) plus a per-agent status list; what this section is FOR is that
+             installing a hook means writing into a file the user owns
+             (~/.claude/settings.json and nine more), so the row says which file
+             and what state it is in — a product that edits somebody's settings
+             silently has no business doing it. -->
         <div class="settings-card">
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="hooks.title">에이전트 훅</h3>
@@ -7005,17 +7012,6 @@
         </div>
         </section>
 
-        <!-- The bridge an agent reports its own lifecycle to.
-             Orca's own settings switch is `agentStatusHooksEnabled` (default
-             on) plus a per-agent status list; what this section is FOR is that
-             installing a hook means writing into a file the user owns
-             (~/.claude/settings.json and nine more), so the row says which file
-             and what state it is in — a product that edits somebody's settings
-             silently has no business doing it. -->
-        <!-- What the agents on this machine already know how to do. Orca's
-             `SkillsPage`: a list with filters, and one action per row — reveal
-             the file. Read-only: these are files the user and their agents own,
-             in eleven directories this product does not manage. -->
         <!-- Orca's OrchestrationPane: one setup card for the orchestration
              skill. The card's state is one Rust read (`orchestration_report`);
              the install button opens a real terminal with the command TYPED,
@@ -7509,7 +7505,7 @@
           </div>
         </div>
 
-        <!-- Flow는 자동화 화면의 「Flow」 쪽에 있다(2026-11-11에 옮김). 설정에는 스킬처럼
+        <!-- Flow는 자동화 화면의 「Flow」 쪽에 있다(2026-11-11에 옮김). 설정에는
              요약과 들어가는 단추만 남는다 — 요약은 `paintFlowSummary`가 칠한다. -->
         <div class="settings-card flow-summary-card">
           <div class="flow-summary-words">
