@@ -7144,8 +7144,6 @@ listen("browser:workspace", (event) => {
   paintBrowserWorkspaceTab(tab);
 });
 
-document.addEventListener("visibilitychange", syncBrowserPanes);
-
 listen("browser:agent-close", (event) => {
   if (isPopout) return;
   return closeAgentBrowserTab(event.payload);
