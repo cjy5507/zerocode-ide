@@ -571,6 +571,8 @@ function closeRailSheetsOutside(event) {
 
 /* The title bar's toggle and ⌘B or ⌘L. Under the last fold there is no rail to take away: it opens the sheet. */
 function pressPanelToggle(side) {
+  // The file column a browser beside had folded is the person's from this press on (shell-browser.js).
+  if (side === "aside") forgetBrowserAsideFold();
   if (railSheet[side]) closeRailSheet(side);
   else if (rails.away) openRailSheet(side);
   else setPanelFolded(side, !folded[side]);

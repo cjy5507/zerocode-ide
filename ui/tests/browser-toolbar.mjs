@@ -17,11 +17,12 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 
-/* The window's default size (crates/zerocode-shell/tauri.conf.json): its stage is 649px, a split leaves 320px. */
+/* The window's default size (crates/zerocode-shell/tauri.conf.json). A browser beside folds the file column
+ * (browser-beside.mjs), so its split leaves about 495px. */
 const DEFAULT_WINDOW = { width: 1280, height: 800 };
-/* A window a little under the default: its split leaves 280px, less than one row needs. */
-const NARROW_WINDOW = { width: 1200, height: 800 };
-/* A window whose split leaves a pane one row fits in with room to spare (380px). */
+/* A window near its smallest: a split leaves about 260px, less than one row needs. */
+const NARROW_WINDOW = { width: 800, height: 800 };
+/* A window whose split leaves a pane one row fits in with room to spare. */
 const ROOMY_WINDOW = { width: 1400, height: 800 };
 /* The toolbar's own controls: three to navigate, the address, four tools and the menu. */
 const CONTROLS = 9;
@@ -46,10 +47,15 @@ async function standBrowser(browser, origin, viewport, { beside }) {
   return opened;
 }
 
-/* The pane's observers have answered and the frame after them is painted. */
-const settled = (page) => page.evaluate(() => new Promise((done) => {
-  requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 60)));
-}));
+/* The pane's observers have answered, the file column has finished easing, and the frame after is painted. */
+const settled = async (page) => {
+  const frames = () => page.evaluate(() => new Promise((done) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 60)));
+  }));
+  await frames();
+  await page.waitForFunction(() => !document.getElementById("workbench").classList.contains("is-folding"));
+  await frames();
+};
 
 /* The toolbar as the person meets it: the pane's width, every shown control's box inside the pane, whether the pointer
  * at its centre lands on it, and where the page begins. */
@@ -132,8 +138,8 @@ export async function testBrowserToolbar(browser, origin, ok) {
     const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: true });
     try {
       const split = await toolbar(page);
-      ok("the default window's split (320px) fits the toolbar in one row, the menu inside the pane",
-        split.pane >= 300 && split.pane < 360 && split.rows.length === 1 && split.controls.length === CONTROLS
+      ok("the default window's split fits the toolbar in one row, the menu inside the pane",
+        split.pane >= 300 && split.rows.length === 1 && split.controls.length === CONTROLS
           && outside(split).length === 0 && split.controls.at(-1).name === "browser-menu",
         JSON.stringify({ pane: split.pane, rows: split.rows, outside: outside(split), last: split.controls.at(-1) }));
       ok("the default split's toolbar raises no page errors", faults.length === 0, faults.join("\n"));
@@ -143,7 +149,7 @@ export async function testBrowserToolbar(browser, origin, ok) {
     // The strips under the toolbar keep their hands inside a narrow pane too. The form-fill strip's own rule says
     // its acts fold under its words at a narrow pane; they stood in one line instead, and at 320px the second
     // address and 「닫기」 were outside the pane (measured 2026-11-25).
-    const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: true });
+    const { page, faults } = await standBrowser(browser, origin, NARROW_WINDOW, { beside: true });
     try {
       const acts = await page.evaluate(() => {
         const tab = tabs.find((one) => one.label === "browser-930");
@@ -166,7 +172,7 @@ export async function testBrowserToolbar(browser, origin, ok) {
         };
       });
       const lost = acts.acts.filter((one) => one.left < 0 || one.right > acts.pane || !one.reachable).map((one) => one.words);
-      ok("the form-fill strip folds its acts inside a 320px pane: both addresses, the entry and 「닫기」 can be pressed",
+      ok("the form-fill strip folds its acts inside a narrow pane: both addresses, the entry and 「닫기」 can be pressed",
         acts.pane < 360 && acts.acts.length === 4 && lost.length === 0, JSON.stringify({ lost, ...acts }));
       ok("the folded form-fill strip raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }

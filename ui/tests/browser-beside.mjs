@@ -63,9 +63,15 @@ async function standWindow(browser, origin, viewport) {
   return opened;
 }
 
-const settled = (page) => page.evaluate(() => new Promise((done) => {
-  requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 80)));
-}));
+/* The panes are placed and the file column, if it was folded or opened, has finished easing. */
+const settled = async (page) => {
+  const frames = () => page.evaluate(() => new Promise((done) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 80)));
+  }));
+  await frames();
+  await page.waitForFunction(() => !document.getElementById("workbench").classList.contains("is-folding"));
+  await frames();
+};
 const seen = (page) => page.evaluate(() => window.__besideSeen());
 /* A group that was not divided is the stage's width, less the pixel its own edge takes. */
 const wholeStage = (group, stage) => stage - group >= 0 && stage - group <= 2;
@@ -114,7 +120,7 @@ export async function testBrowserBeside(browser, origin, ok) {
       await openByPaletteSplit(page);
       const split = await seen(page);
       ok("the palette's 「옆에 분할」 divides a narrow group all the same: the person chose it by hand",
-        split.groups === before.groups + 1 && split.lastPane !== before.terminalPane && split.lastWidth * 2 <= before.stage,
+        split.groups === before.groups + 1 && split.lastPane !== before.terminalPane && split.lastWidth * 2 <= split.stage,
         JSON.stringify({ before, split }));
       // A seat that already stands to the right is reused whatever its width: nothing new is divided.
       await page.evaluate(() => setActiveTab(tabs.find((one) => one.kind === "term").id));
@@ -200,7 +206,7 @@ export async function testBrowserBeside(browser, origin, ok) {
       const watched = await seen(page);
       ok("「옆에 작업 보기」 divides a narrow group all the same: its own words ask for the side",
         before.front === "term" && watched.groups === before.groups + 1 && watched.front === "browser"
-          && watched.frontPane !== before.terminalPane && watched.lastWidth * 2 <= before.stage,
+          && watched.frontPane !== before.terminalPane && watched.lastWidth * 2 <= watched.stage,
         JSON.stringify({ before, watched }));
       await page.evaluate(() => document.querySelector("#browser-workspace-launcher").click());
       await settled(page);

@@ -1104,6 +1104,7 @@ function watchBrowserWorkspace(tab, { beside = false } = {}) {
       dropRecentTab(tab.pane, tab.id);
       tab.pane = nextPane;
     }
+    if (nextPane !== null) foldAsideForBrowserBeside();
   }
   tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
   tab.workspaceViewing = true;
@@ -6511,6 +6512,7 @@ function syncBrowserPanes() {
   }
   syncBrowserWorkspaceCapture();
   paintBrowserWorkspaceChrome();
+  releaseAsideWithoutBrowserBeside();
 }
 
 /* A rough seat for the pane's first frame — the leaf's rect, minus a toolbar
@@ -6589,6 +6591,35 @@ function standBesideWithRoom(group) {
   if (stageRightOf(stageTree(), group).seat === null
     && (groupOf(group)?.el?.getBoundingClientRect().width ?? 0) < STAGE_BESIDE_MIN_PX) return null;
   return standBeside(group);
+}
+
+/* 옆에 선 브라우저와 오른쪽 파일 열(2026-11-25). 브라우저가 옆 그룹에 서면 무대의 반을 쓴다 — 2560px 창에서
+ * 960px, 그 곁의 파일 열이 350px이었다. 브라우저가 옆에 설 때 파일 열을 접어 그 폭까지 페이지에 준다(1135px).
+ * 접는 것은 브라우저가 옆에 「도착할 때」 한 번이고, 어느 브라우저도 옆에 보이지 않게 되면 되돌린다. 사람이
+ * 그 사이 열의 단추를 눌렀으면 그 뒤로는 사람의 것이다 — 다시 열었으면 연 채로, 접었으면 접은 채로 둔다.
+ * 사람이 미리 접어 둔 열, 레일로 선 열(좁은 창)은 건드리지 않는다. */
+let browserFoldedAside = false;
+
+function foldAsideForBrowserBeside() {
+  if (browserFoldedAside || folded.aside || rails.aside) return;
+  browserFoldedAside = true;
+  setPanelFolded("aside", true);
+}
+
+/* 사람이 파일 열의 단추를 눌렀다: 열은 이제 사람이 둔 대로다. */
+function forgetBrowserAsideFold() {
+  browserFoldedAside = false;
+}
+
+/* 옆에 보이는 브라우저가 더는 없으면 접었던 열을 되돌린다. 메뉴나 대화 상자가 판을 잠깐 가린 것은 「보이지
+ * 않음」이 아니다 — 그 그룹의 앞 탭이 브라우저인 동안은 서 있는 것이다. */
+function releaseAsideWithoutBrowserBeside() {
+  if (!browserFoldedAside) return;
+  const beside = stageGroups().length > 1 && tabs.some((tab) => tab.kind === "browser"
+    && tab.worktree === activeWorktreePath && activeTabIn(tab.pane)?.id === tab.id);
+  if (beside) return;
+  browserFoldedAside = false;
+  if (folded.aside) setPanelFolded("aside", false);
 }
 
 const RICH_STAGE_WEIGHT = 1.7;
@@ -6766,7 +6797,10 @@ async function openBrowserTab(
   const stood = makerSeat !== null
     ? (splitSeat ?? makerSeat.group)
     : beside && !away ? (splitNarrow ? standBesideFocused() : standBesideWithRoom(focusedPane)) : null;
-  if (stood !== null && (makerSeat === null || splitSeat !== null)) optimizeRichStageGroup(stood);
+  if (stood !== null && (makerSeat === null || splitSeat !== null)) {
+    optimizeRichStageGroup(stood);
+    foldAsideForBrowserBeside();
+  }
   openTab({
     id: "browser:" + label,
     kind: "browser",
