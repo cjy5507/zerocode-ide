@@ -478,9 +478,11 @@ function browserWorkspaceWatchesLive(tab) {
 }
 
 /* The shield's dress (t-66513): its tag's words in the person's language, and
- * the agent's working colour and the ground's as the bytes the window paints
- * for those tokens — the native view keeps no colour of its own. The colours
- * are read again only when the theme or the words change. */
+ * the bytes the window paints for four tokens — the agent's working colour for
+ * the border and the tag, the ground's for the tag's words, and the agent's
+ * pointer with the white of its rim for the dart where the agent last pressed
+ * — so the native view keeps no colour of its own. The colours are read again
+ * only when the theme or the words change. */
 let browserWorkspaceDress = null;
 function browserWorkspaceShieldDress() {
   const says = t("browser.workspace.watchShield", "에이전트 조작 중 · 보기만");
@@ -489,9 +491,11 @@ function browserWorkspaceShieldDress() {
     const style = getComputedStyle(document.documentElement);
     browserWorkspaceDress = {
       says, theme, tint: browserTokenRgb(style, "--signal-ready"), ink: browserTokenRgb(style, "--surface-abyss"),
+      pointer: browserTokenRgb(style, "--agent-pointer"), rim: browserTokenRgb(style, "--ink-on-solid"),
     };
   }
-  return { says, tint: browserWorkspaceDress.tint, ink: browserWorkspaceDress.ink };
+  const { tint, ink, pointer, rim } = browserWorkspaceDress;
+  return { says, tint, ink, pointer, rim };
 }
 
 /* A colour token's three bytes, painted on one pixel of a canvas the page keeps. */

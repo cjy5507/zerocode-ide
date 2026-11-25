@@ -344,6 +344,15 @@
    * as words, 6.74:1 on --background-100. */
   --signal-halt: var(--red-900);
 
+  /* The agent's pointer over a page it works in (the dart the work browser's
+   * shield draws where its agent last pressed, 2026-11-25). It is not a state,
+   * so it wears none of the five above: the one stretch of the wheel they
+   * leave free lies between the person's blue and the destructive red. It
+   * stands on pages this window does not draw, so it is one colour in both
+   * treatments, 4.7:1 off a white page and 4.4:1 off a black one, inside a
+   * rim of --ink-on-solid. */
+  --agent-pointer: #9d4bd8;
+
   /* 심각도의 램프(SCA의 CVSS 등급, 지식 그래프 P4) — 신호색과 다른 뜻이라 제 이름으로 선다. 값은 재서
    * 고른 것이다(09-17): 바탕 #0d1418에서 심각 5.4 · 높음 4.9 · 보통 8.7 · 낮음 14.9:1, 그리고 제2색맹·
    * 제1색맹 모의에서 안개 회색(등급 없음)까지 다섯 짝의 CIELAB 거리가 30.9 이상. 정지 신호(#ff746f)를
