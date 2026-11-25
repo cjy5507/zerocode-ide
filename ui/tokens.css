@@ -3784,7 +3784,6 @@
   --jev-plot-bar-min: 64px;
   --jev-plot-dot: 3px;
   --jev-plot-now: 4.5px;
-  --jev-plot-gap: 2px;
   --jev-stale-opacity: 0.55;
   /* The strip over the table (t-6243 D1): the figure large and its label
      small above it (t-6277 D10). */

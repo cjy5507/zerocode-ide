@@ -4438,15 +4438,6 @@ svg.wt-agent-dot {
   font-weight: 400;
 }
 
-/* A label and the control that belongs to the label rather than to the field —
- * Orca puts "Open agent settings" here. */
-.wt-label-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
 .wt-gear {
   display: flex;
   align-items: center;
@@ -4521,27 +4512,6 @@ svg.wt-agent-dot {
   font: inherit;
   font-size: var(--text-xs);
   cursor: pointer;
-}
-
-/* The value of a row nobody can change yet — same size and colour as the
- * `<select>` beside it, so the two rows read as one kind of control. */
-.wt-combo-name {
-  flex: none;
-  font-size: var(--text-xs);
-}
-
-/* Where that machine's checkouts live. Quiet and clipped: it is context for
- * the name, not a second value. */
-.wt-combo-where {
-  flex: 1;
-  min-width: 0;
-  color: var(--ink-mist);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
 }
 
 /* 프로젝트 행의 오른쪽 — 어느 저장소인지.
@@ -4621,11 +4591,6 @@ svg.wt-agent-dot {
   border-color: var(--edge-mark);
   outline: var(--focus-ring);
   outline-offset: calc(var(--focus-ring-offset) * -1);
-}
-
-.wt-smart-ico {
-  flex: none;
-  color: var(--ink-mist);
 }
 
 /* The namer, inside the field it reads and writes. Icon only: the footer holds
@@ -6388,14 +6353,6 @@ svg.wt-agent-dot {
   flex: none;
 }
 
-/* 검색이 가라앉은 뒤의 빈 답과, 비우면 어디로 가는지 — 둘 다 행이 아니라
- * 문장이다. */
-.prc-base-note {
-  padding: var(--space-1) var(--space-2);
-  color: var(--ink-mist);
-  font-size: var(--text-2xs);
-}
-
 .prc-base-box {
   position: relative;
   flex: 1;
@@ -6938,20 +6895,6 @@ svg.wt-agent-dot {
   z-index: 31;
 }
 
-/* The repository's own checkout. A word, not a colour — this is a kind, and
- * kinds are spelled out. */
-.wt-tag {
-  margin-left: auto;
-  font-size: var(--text-3xs);
-  color: var(--ink-mist);
-}
-
-.wt-tag:not(:empty) {
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
-  padding: 0 var(--space-2);
-}
-
 /* One grid owns the tracks so every row's columns line up — no per-row
  * min-height or padding fudging. */
 .ledger-grid {
@@ -7072,36 +7015,6 @@ svg.wt-agent-dot {
  * lanes and this is only an offer to become one. */
 .row.is-session .tick {
   background: var(--edge-mark);
-}
-
-/* "Make another one" is the last thing in a list, not the heaviest. Boxed, it
- * outweighed every row it sat under and the eye landed on the one item that
- * is not a destination. A row like the others, quieter than all of them. */
-.ledger-add {
-  display: flex;
-  align-items: center;
-  align-self: stretch;
-  min-height: var(--row-height);
-  margin-top: var(--space-1);
-  padding: 0 var(--space-1);
-  background: none;
-  border: 0;
-  border-radius: var(--radius-edge);
-  color: var(--ink-mist);
-  font: inherit;
-  font-size: var(--text-2xs);
-  line-height: var(--leading-ui);
-  text-align: left;
-  cursor: pointer;
-}
-
-.ledger-add:hover:enabled {
-  color: var(--ink-chalk);
-}
-
-.ledger-add:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 /* The same compact floating surface Orca opens from a repository or workspace
@@ -7400,21 +7313,6 @@ svg.wt-agent-dot {
     var(--nav-inset) - (var(--row-height) - var(--icon-size)) / 2
   );
   border-top: var(--rule-width) solid var(--edge-rule);
-}
-
-.foot-link {
-  border: 0;
-  background: none;
-  padding: 0;
-  color: var(--ink-mist);
-  font: inherit;
-  font-size: var(--text-2xs);
-  cursor: pointer;
-}
-
-.foot-link:hover,
-.foot-link:focus-visible {
-  color: var(--ink-chalk);
 }
 
 .foot-icons {
@@ -14211,8 +14109,7 @@ body.is-dragging-pane {
  * the row's — which is what lets `.tree-row.is-dir` and `.tree-row:hover` say
  * one thing each and have the text and the mark agree without a rule per
  * child. Giving this a colour is what breaks that. */
-.tree-glyph,
-.proj-glyph {
+.tree-glyph {
   display: inline-flex;
   align-items: center;
   flex: none;
@@ -25732,16 +25629,6 @@ button.integration-context-action:hover {
   margin: var(--space-3) 0 0 var(--integration-indent);
 }
 
-.integration-provider--unavailable {
-  background: color-mix(in srgb, var(--surface-well) 25%, transparent);
-}
-
-.integration-provider--unavailable .integration-mark,
-.integration-provider--unavailable .integration-provider-title,
-.integration-provider--unavailable .integration-provider-desc {
-  color: var(--ink-mist);
-}
-
 /* Settings rows that carry a status use the same left inset as ordinary
  * switches and keep the status at the far edge. Unsupported rows remain in
  * the information architecture without presenting a working-looking toggle. */
@@ -25782,20 +25669,6 @@ button.integration-context-action:hover {
 
 .settings-option-row--copy label.settings-check > input {
   margin-top: 2px;
-}
-
-.settings-option-row--disabled {
-  cursor: default;
-}
-
-.settings-option-row--disabled .settings-label {
-  color: var(--ink-mist);
-}
-
-.settings-static-choice {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-1) var(--space-4);
 }
 
 .settings-row-desc {
@@ -28434,19 +28307,6 @@ progress:indeterminate::-webkit-progress-bar {
   align-items: center;
 }
 
-/* 새로 고침은 칩의 얼굴을 입되 글리프 하나만 든다 — 그 말은 화면 밖 한 줄에
- * 있다(`.sr`). */
-.task-gl-refresh {
-  display: inline-flex;
-  align-items: center;
-  margin-left: auto;
-}
-
-.task-gl-refresh .icon {
-  width: 14px;
-  height: 14px;
-}
-
 #gitlab-list {
   display: flex;
   flex-direction: column;
@@ -28619,17 +28479,6 @@ progress:indeterminate::-webkit-progress-bar {
   gap: var(--space-2);
   align-items: center;
   padding: var(--space-3) 0;
-}
-
-.task-jira-new {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.task-jira-new .icon {
-  width: 13px;
-  height: 13px;
 }
 
 /* Bounded the way every `.qo` is, by the scrim's edges (`max-height: 100%`),
@@ -30200,7 +30049,6 @@ progress:indeterminate::-webkit-progress-bar {
   gap: 2px;
 }
 
-.auto-row-status,
 .auto-status {
   justify-self: start;
   padding: 2px var(--space-2);
@@ -30211,7 +30059,6 @@ progress:indeterminate::-webkit-progress-bar {
   white-space: nowrap;
 }
 
-.auto-row-status.is-enabled,
 .auto-status.is-enabled {
   color: var(--signal-done);
   background: color-mix(in srgb, var(--signal-done) 12%, transparent);
@@ -30594,15 +30441,6 @@ progress:indeterminate::-webkit-progress-bar {
   font-size: var(--text-xs);
   font-weight: 600;
   color: var(--ink-mist);
-}
-
-.nav-row--attention {
-  color: var(--lane-3);
-  transition: color var(--ease-standard);
-}
-
-.nav-row--attention:hover {
-  color: var(--ink-chalk);
 }
 
 .nav-badge.is-attention {
@@ -33671,7 +33509,6 @@ select {
 .file-view-mode,
 .file-view-reload,
 .foot-icon,
-.foot-link,
 .history-ref,
 .history-subject,
 .history-file,
@@ -33680,7 +33517,6 @@ select {
 .keys-reset,
 .csv-raw,
 .ipynb-raw,
-.ledger-add,
 .mdview-copy,
 .mdview-note-card,
 .mdview-notes-copy,
@@ -41863,7 +41699,6 @@ details.task-board-section > summary {
 }
 
 .board-desk-reply-actions,
-.board-desk-close-actions,
 .team-close-actions {
   display: flex;
   align-items: center;
@@ -50429,15 +50264,6 @@ button.board-build-failure-part:focus-visible {
   padding: var(--space-1) var(--space-2);
   border-bottom: var(--rule-width) solid var(--edge-rule);
 }
-/* 붙지 못한 이유가 다음 성공까지 서 있는 자리. 토스트와 달리 다시 읽을 수
- * 있고, 기기 화면 위가 아니라 도구모음 아래라 그림을 가리지 않는다. */
-.emulator-alert {
-  padding: var(--space-1) var(--space-2);
-  border-bottom: var(--rule-width) solid var(--edge-rule);
-  background: color-mix(in srgb, var(--signal-halt) 10%, transparent);
-  color: var(--signal-halt);
-  font-size: var(--text-2xs);
-}
 .emulator-name {
   font-size: var(--text-xs);
   font-weight: 500;
@@ -56305,47 +56131,6 @@ h4.knowledge-inspector-head::after {
   font-weight: var(--jev-weight-strong);
 }
 
-/* A feature's week in its row (t-6243 D4, t-9633 (a)(b)): the accuracy
-   picture over the strip of days — one width, so a day's point stands over
-   its day's cell — and beside them each line's latest value, marked the way
-   its line is drawn. */
-.jev-trends {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--ink-mist);
-  font-size: var(--jev-meta-size);
-}
-
-.jev-trend-pictures {
-  display: grid;
-  gap: var(--jev-plot-gap);
-  justify-items: start;
-}
-
-/* Beside the pictures, one line per line of them — the row keeps its height. */
-.jev-trend-legend {
-  display: grid;
-}
-
-.jev-trend-last {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  white-space: nowrap;
-}
-
-.jev-trend-last::before {
-  content: "";
-  width: var(--space-3);
-  border-top: var(--jev-trend-stroke) solid var(--jev-chart-accent);
-}
-
-.jev-trend-baseline::before {
-  border-top-style: dashed;
-  border-top-color: var(--jev-chart-context);
-}
-
 .jev-table [data-jev-cell="status"] {
   min-width: var(--jev-status-width);
   font-size: var(--jev-meta-size);
@@ -61833,8 +61618,6 @@ button.jev-token:hover {
 .artifacts-view.is-tab-flow.is-flow-reading :is(.artifact-flow-who, .artifact-flow-id, .artifact-flow-more) { display: none; }
 
 /* 좁은 판: 줄은 두 단, 상태는 문장 아래 */
-.artifacts-view.is-tier-compact .artifacts-here { display: none; }
-
 .artifacts-view.is-tier-compact .artifact-flow-item {
   grid-template-columns: var(--icon-size) minmax(0, 1fr);
   padding-inline: var(--space-3);
@@ -62329,11 +62112,6 @@ button.jev-token:hover {
   height: var(--nav-icon-size);
 }
 
-.agent-inspector-artifacts {
-  align-self: flex-start;
-  margin-top: var(--space-2);
-}
-
 /* One disclosure across the stage and dock. Folding is immediate, so reduced motion and
  * keyboard folding have the same immediate layout. Colours follow the theme. */
 .vault-row { flex-wrap: wrap; }
@@ -62674,9 +62452,6 @@ button.jev-token:hover {
   }
 }
 
-.wt-directory-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.wt-directory-row .settings-input { flex: 1; min-width: 0; }
-.wt-directory-hint { margin: var(--space-2) 0 0; color: var(--ink-label); font-size: var(--text-xs); }
 /* SFTP file manager: native file work on the same neutral surfaces as the editor. */
 .sftp-manager {
   position: fixed;
