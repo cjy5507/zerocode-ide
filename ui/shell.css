@@ -12395,16 +12395,19 @@ body.is-dragging-pane {
   min-width: 0;
 }
 
+/* 넓어지지는 않되 줄어든다: `flex: none`이면 단추들이 한 줄 폭을 고집해 판 밖으로 나갔다 — 320px 판에서
+ * 둘째 주소와 「닫기」를 누를 수 없었다(2026-11-25). 줄어든 자리 안에서 단추들이 접힌다. */
 .browser-fillbar-acts {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   gap: var(--space-1);
   min-width: 0;
+  max-width: 100%;
 }
 
 .browser-fillbar-act {
-  max-width: 24em;
+  max-width: min(24em, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
