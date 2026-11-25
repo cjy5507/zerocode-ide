@@ -34,9 +34,27 @@ final class WindowPointerAnchorTests: XCTestCase {
     func testTheTipUsesScreenPointsOnEitherSideOfTheMainDisplay() throws {
         let anchor = try XCTUnwrap(WindowPointerAnchor(pid: 1, windowID: 2,
             bounds: CGRect(x: -600, y: -300, width: 400, height: 250), point: CGPoint(x: -420, y: -180)))
-        let frame = try XCTUnwrap(anchor.panelFrame(mainDisplayHeight: 1000, size: CGSize(width: 28, height: 34)))
+        let size = CGSize(width: 28, height: 34)
+        let frame = try XCTUnwrap(anchor.panelFrame(mainDisplayHeight: 1000, size: size, tip: CGPoint(x: 1, y: 1)))
         XCTAssertEqual(frame.minX + 1, -420)
         XCTAssertEqual(1000 - frame.maxY + 1, -180)
-        XCTAssertNil(anchor.panelFrame(mainDisplayHeight: .nan, size: CGSize(width: 28, height: 34)))
+        XCTAssertNil(anchor.panelFrame(mainDisplayHeight: .nan, size: size, tip: CGPoint(x: 1, y: 1)))
+    }
+
+    /// The window is put by the tip its view names, wherever in the view that
+    /// is: the view keeps room round its drawing, and the point stays the point.
+    func testTheWindowIsPutSoThatTheViewsOwnTipLiesOnThePoint() throws {
+        let anchor = try XCTUnwrap(WindowPointerAnchor(pid: 1, windowID: 2,
+            bounds: CGRect(x: 100, y: 100, width: 400, height: 250), point: CGPoint(x: 240, y: 180)))
+        let size = CGSize(width: 87, height: 51)
+        for tip in [CGPoint(x: 1, y: 1), CGPoint(x: 6, y: 6), CGPoint(x: 9.5, y: 3)] {
+            let frame = try XCTUnwrap(anchor.panelFrame(mainDisplayHeight: 1000, size: size, tip: tip))
+            XCTAssertEqual(frame.size, size)
+            // The view is flipped: its tip is `tip.y` below the window's top edge.
+            XCTAssertEqual(frame.minX + tip.x, 240, "x of \(tip)")
+            XCTAssertEqual(1000 - (frame.maxY - tip.y), 180, "y of \(tip)")
+        }
+        XCTAssertNil(anchor.panelFrame(mainDisplayHeight: 1000, size: size, tip: CGPoint(x: CGFloat.nan, y: 1)))
+        XCTAssertNil(anchor.panelFrame(mainDisplayHeight: 1000, size: size, tip: CGPoint(x: 1, y: CGFloat.infinity)))
     }
 }
