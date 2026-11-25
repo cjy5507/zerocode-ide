@@ -12333,12 +12333,12 @@ const browserTab = await page.evaluate(async () => {
     ?.click();
   await new Promise((done) => setTimeout(done, 40));
   seen.devtools = steered.some(([verb, args]) => verb === "browser_devtools" && args.label === "browser-91");
-  // 줄을 누른 메뉴는 `--motion-fast` 동안 닫히는 중이고, 그동안 페이지는 「가려진」 것이다 — 그 사이의
-  // chord는 브라우저의 것이 아니다(`browserChordScope`). 메뉴가 다 걷힌 뒤에 두드린다.
-  for (let waited = 0; waited < 50 && !document.getElementById("sidebar-menu").hidden; waited += 1) {
-    await new Promise((done) => setTimeout(done, 20));
-  }
-  seen.menuGoneBeforeChords = document.getElementById("sidebar-menu").hidden;
+  // 줄을 누른 메뉴는 `--motion-fast` 동안 닫히는 중이고 아직 그려져 있다. 그 사이에 두드린 chord도 페이지의
+  // 것이다 — 떠나는 메뉴는 키를 쥐지 않는다(`browserChordScope`). 아래 chord들은 그 틈에서 눌린다.
+  seen.menuStillLeaving = (() => {
+    const menu = document.getElementById("sidebar-menu");
+    return !menu.hidden && menu.classList.contains("is-closing");
+  })();
   // Orca의 Browser scope chord: 브라우저 탭이 앞일 때 ⌘R은 페이지 새로고침,
   // ⌘=/⌘0은 확대 사다리, ⌘L은 주소창이다.
   window.dispatchEvent(new KeyboardEvent("keydown", {
@@ -12659,7 +12659,7 @@ ok(
     && browserTab.hidOnSwitch && browserTab.hidUnderScrim && browserTab.backAfterScrim
     && browserTab.hidUnderAnyScrim && browserTab.hidUnderPopover && browserTab.backAfterPopover
     && browserTab.earlyReplayed && browserTab.earlyClean
-    && browserTab.devtools && browserTab.menuGoneBeforeChords && browserTab.chordReload && browserTab.zoomStepped
+    && browserTab.devtools && browserTab.menuStillLeaving && browserTab.chordReload && browserTab.zoomStepped
     && browserTab.zoomSaid && browserTab.zoomHushed
     && browserTab.zoomReset && browserTab.chordAddress && browserTab.chordSelects
     && browserTab.suggestStands && browserTab.suggestSearchFirst && browserTab.suggestPrelit
