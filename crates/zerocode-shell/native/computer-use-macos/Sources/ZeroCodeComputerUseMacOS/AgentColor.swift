@@ -6,9 +6,26 @@ import AppKit
 @MainActor
 enum AgentColor {
     /// The colours agents are told apart by: the same agent keeps its colour.
-    static let palette: [NSColor] = [
-        .systemPurple, .systemBlue, .systemTeal, .systemGreen, .systemOrange, .systemPink,
+    ///
+    /// Six hues of one family, each drawn for where it stands. Over a light
+    /// desktop it is a tone white already reads on at `minimumContrast`, so an
+    /// agent's dart, its name and its app's mark are one colour. Over a dark
+    /// one it is a brighter tone, and only the grounds under white are darkened
+    /// from it. Under Increase Contrast it is a deeper and a brighter one still.
+    ///
+    /// The hues stand where the two nearest of the six are as far apart as six
+    /// such tones allow (cyan from green, blue from violet), and they are handed
+    /// out in this order, so the agents that work first are the furthest apart:
+    /// blue and orange, then pink. Green comes last.
+    static let tones: [AgentTone] = [
+        AgentTone(light: 0x1A6DEE, dark: 0x3A81F6, lightContrast: 0x0050C1, darkContrast: 0x4D90FF),  // blue
+        AgentTone(light: 0xBB5600, dark: 0xD56400, lightContrast: 0x8F4000, darkContrast: 0xEA6E00),  // orange
+        AgentTone(light: 0xD42C7B, dark: 0xE14E8C, lightContrast: 0xAB005E, darkContrast: 0xED6199),  // pink
+        AgentTone(light: 0x00808A, dark: 0x00939F, lightContrast: 0x006169, darkContrast: 0x00A1AE),  // cyan
+        AgentTone(light: 0x9D4BD8, dark: 0xAB64E2, lightContrast: 0x8029B7, darkContrast: 0xB775EC),  // violet
+        AgentTone(light: 0x008622, dark: 0x009A28, lightContrast: 0x006617, darkContrast: 0x2EA83E),  // green
     ]
+    static let palette: [NSColor] = tones.map(\.color)
     /// White words and marks on an agent's colour read at least this well
     /// (WCAG AA for ordinary text).
     static let minimumContrast = 4.5
@@ -73,6 +90,38 @@ enum AgentColor {
 
     private static func srgb(_ color: NSColor) -> NSColor {
         color.usingColorSpace(.sRGB) ?? .black
+    }
+}
+
+/// One colour of the palette: its sRGB tone for each appearance it is drawn in.
+struct AgentTone: Sendable, Equatable {
+    let light: Int
+    let dark: Int
+    let lightContrast: Int
+    let darkContrast: Int
+
+    /// The appearances a tone is told apart by.
+    static let appearances: [NSAppearance.Name] = [
+        .aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua,
+    ]
+
+    /// The tone as 0xRRGGBB for one of `appearances`; any other name is light's.
+    func hex(for appearance: NSAppearance.Name) -> Int {
+        switch appearance {
+        case .darkAqua: dark
+        case .accessibilityHighContrastAqua: lightContrast
+        case .accessibilityHighContrastDarkAqua: darkContrast
+        default: light
+        }
+    }
+
+    /// The tone as a colour that follows the appearance drawing it.
+    var color: NSColor {
+        NSColor(name: nil) { appearance in
+            let hex = hex(for: appearance.bestMatch(from: Self.appearances) ?? .aqua)
+            return NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+        }
     }
 }
 

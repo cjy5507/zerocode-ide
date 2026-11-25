@@ -49,10 +49,14 @@ public struct WindowPointerAnchor: Equatable, Sendable {
         return false
     }
 
-    public func panelFrame(mainDisplayHeight: Double, size: CGSize) -> CGRect? {
+    /// Where a pointer's window of `size` goes so that `tip` — a point of its
+    /// view, measured from the view's top left — lies on the anchor's point.
+    /// The view says where its tip is; this knows no tip of its own.
+    public func panelFrame(mainDisplayHeight: Double, size: CGSize, tip: CGPoint) -> CGRect? {
         guard mainDisplayHeight.isFinite, size.width.isFinite, size.height.isFinite,
+              tip.x.isFinite, tip.y.isFinite,
               mainDisplayHeight > 0, size.width > 0, size.height > 0 else { return nil }
-        return CGRect(x: point.x - 1, y: mainDisplayHeight - point.y - size.height + 1,
+        return CGRect(x: point.x - tip.x, y: mainDisplayHeight - point.y - size.height + tip.y,
                       width: size.width, height: size.height)
     }
 }

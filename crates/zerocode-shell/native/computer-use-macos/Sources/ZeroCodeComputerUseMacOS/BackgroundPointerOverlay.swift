@@ -40,7 +40,6 @@ final class BackgroundPointerOverlay {
     private var slots: [PointerKey: Slot] = [:]
     /// Which pointers are in view: an agent keeps its colour while any of its is.
     private var roster = PointerRoster()
-    private static let arrowSize = CGSize(width: 28, height: 34)
     /// How long a pointer stays after its agent's last act: through the model's
     /// turn between one act and the next (8-17 s a round trip), so it moves on
     /// from where it was instead of blinking out and in again.
@@ -199,10 +198,10 @@ final class BackgroundPointerOverlay {
         let agent = key.agent
         let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
         let cocoaPoint = CGPoint(x: anchor.point.x, y: displayHeight - anchor.point.y)
-        let size = PointerView.size(arrow: Self.arrowSize, agent: agent)
+        let size = PointerView.size(agent: agent)
         guard !OperatorGuardHost.isStopped(),
               NSScreen.screens.contains(where: { $0.frame.contains(cocoaPoint) }),
-              let frame = anchor.panelFrame(mainDisplayHeight: displayHeight, size: size)
+              let frame = anchor.panelFrame(mainDisplayHeight: displayHeight, size: size, tip: PointerLook.tip)
         else {
             retire(key)
             return
@@ -449,72 +448,4 @@ final class BackgroundPointerOverlay {
 private final class PointerPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-}
-
-@MainActor
-final class PointerView: NSView {
-    /// The whole name picks the colour, as for its ring and its app's mark;
-    /// only what is written under the arrow is cut short.
-    private let agent: String
-    private var label: String { String(agent.prefix(Self.maxLabelCharacters)) }
-    private static var labelFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
-    private static let labelPadding = CGSize(width: 6, height: 2)
-    private static let labelOrigin = CGPoint(x: 14, y: 20)
-    private static let maxLabelCharacters = 24
-
-    init(frame: CGRect, agent: String) {
-        self.agent = agent
-        super.init(frame: frame)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { nil }
-
-    override var isFlipped: Bool { true }
-
-    /// Room for the arrow, and for the agent's name under it when it has one.
-    static func size(arrow: CGSize, agent: String) -> CGSize {
-        guard !agent.isEmpty else { return arrow }
-        let text = (String(agent.prefix(maxLabelCharacters)) as NSString).size(withAttributes: [.font: labelFont])
-        return CGSize(
-            width: max(arrow.width, labelOrigin.x + text.width + labelPadding.width * 2),
-            height: max(arrow.height, labelOrigin.y + text.height + labelPadding.height * 2)
-        )
-    }
-
-    /// The arrow wears the agent's colour as it is; its name is white on the
-    /// same colour made dark enough to read, as the take-control mark is.
-    static func color(for agent: String) -> NSColor { AgentColor.color(for: agent) }
-    static func nameGround(for agent: String) -> NSColor { AgentColor.ground(for: agent) }
-
-    private var color: NSColor { Self.color(for: agent) }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let arrow = NSBezierPath()
-        arrow.move(to: CGPoint(x: 1, y: 1))
-        for vertex in [CGPoint(x: 23, y: 18), CGPoint(x: 14, y: 20), CGPoint(x: 10, y: 30)] {
-            arrow.line(to: vertex)
-        }
-        arrow.close()
-        color.setFill()
-        arrow.fill()
-        NSColor.white.setStroke()
-        arrow.lineWidth = 1.5
-        arrow.stroke()
-        guard !agent.isEmpty else { return }
-        let attributes: [NSAttributedString.Key: Any] = [.font: Self.labelFont, .foregroundColor: NSColor.white]
-        let text = (label as NSString).size(withAttributes: attributes)
-        let pill = CGRect(
-            x: Self.labelOrigin.x,
-            y: Self.labelOrigin.y,
-            width: text.width + Self.labelPadding.width * 2,
-            height: text.height + Self.labelPadding.height * 2
-        )
-        Self.nameGround(for: agent).setFill()
-        NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
-        (label as NSString).draw(
-            at: CGPoint(x: pill.minX + Self.labelPadding.width, y: pill.minY + Self.labelPadding.height),
-            withAttributes: attributes
-        )
-    }
 }
