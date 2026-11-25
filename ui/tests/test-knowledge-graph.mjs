@@ -6878,16 +6878,19 @@ const foldedViews = await glPage.evaluate(async () => {
       rows.push(row);
       refs.push(ref);
     }
-    /* 떠난 화면은 GC에서 사라진다 — 늦게 놓는 타이머를 기다리며 몇 번 거둔다. */
+    /* 떠난 화면은 GC에서 사라진다 — 늦게 놓는 타이머를 기다리며 몇 번 거둔다. GC는 스택이 빈 작업에서 정밀하게
+     * 돈다(`execution: "async"`): 페이지 안에서 바로 부른 `gc()`는 네이티브 스택을 보수적으로 훑을 수 있어서, 스택에
+     * 남은 옛 값 하나가 떠난 화면을 살려 둘 수 있다. */
     let kept = refs.length;
     for (let round = 0; round < 10 && kept > 0; round += 1) {
       await pause(300);
-      gc();
+      await gc({ type: "major", execution: "async" });
       kept = refs.filter((ref) => ref.deref() !== undefined).length;
     }
+    const keptHow = rows.filter((row, at) => refs[at].deref() !== undefined).map((row) => row.how);
     const left = knowledgeTab();
     if (left) closeTab(left.id);
-    return { rows, kept };
+    return { rows, kept, keptHow };
   } catch (error) {
     return { thrown: String(error?.stack ?? error) };
   } finally {
