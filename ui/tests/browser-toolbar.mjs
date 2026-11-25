@@ -30,7 +30,8 @@ async function standBrowser(browser, origin, viewport, { beside }) {
     window.__ANSWER__.browser_place = () => null;
     window.__ANSWER__.browser_zoom = () => null;
     window.__ANSWER__.open_browser_pane = () => "browser-930";
-    const label = await openBrowserTab("https://example.com/docs/getting-started", { beside });
+    // The palette's own 「옆에 분할」: the person's hand divides a narrow group (browser-beside.mjs).
+    const label = await openBrowserTab("https://example.com/docs/getting-started", beside ? { beside: true, splitNarrow: true } : {});
     for (const hear of window.__LISTENERS__["browser:nav"] ?? []) {
       hear({ payload: { label, url: "https://example.com/docs/getting-started", state: "finished" } });
     }

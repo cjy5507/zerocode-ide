@@ -7,8 +7,8 @@
  *
  * What is held here: a browser tab nobody asked to split for stands beside only where there is room — a right-hand
  * seat that is already there, or a group at least that wide to divide — and is otherwise a tab of the group in front;
- * the palette's own 「옆에 분할」, the person's choice by hand, divides a narrow group as before; and a work browser
- * watched from the title bar follows the same rule and goes back where it was.
+ * the doors whose own words ask for the side — the palette's 「옆에 분할」, the title bar's 「옆에 작업 보기」 — are
+ * the person's hand and divide a narrow group as before.
  *
  *   node ui/tests/browser-beside.mjs
  *   WINDOW_SUITES=browser-beside node ui/tests/window.mjs */
@@ -60,6 +60,8 @@ const settled = (page) => page.evaluate(() => new Promise((done) => {
   requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 80)));
 }));
 const seen = (page) => page.evaluate(() => window.__besideSeen());
+/* A group that was not divided is the stage's width, less the pixel its own edge takes. */
+const wholeStage = (group, stage) => stage - group >= 0 && stage - group <= 2;
 
 /* A link's door: the terminal's and a document's links, the sign-in pages and a found dev server all open this way. */
 const openByLink = async (page, url) => {
@@ -91,7 +93,7 @@ export async function testBrowserBeside(browser, origin, ok) {
       const linked = await seen(page);
       ok("a link opened beside a group too narrow to divide is a tab of that group, the whole group wide",
         linked.groups === before.groups && linked.browsers === 1
-          && linked.lastPane === before.terminalPane && linked.front === "browser" && linked.lastWidth === before.stage,
+          && linked.lastPane === before.terminalPane && linked.front === "browser" && wholeStage(linked.lastWidth, before.stage),
         JSON.stringify({ before, linked }));
       ok("a narrow window's link raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
@@ -157,9 +159,9 @@ export async function testBrowserBeside(browser, origin, ok) {
       await page.evaluate(() => document.querySelector("#browser-workspace-launcher").click());
       await settled(page);
       const watched = await seen(page);
-      ok("「옆에 작업 보기」 in a group too narrow to divide shows the work browser as that group's tab",
-        before.front === "term" && watched.groups === before.groups && watched.front === "browser"
-          && watched.frontPane === before.terminalPane && watched.lastWidth === before.stage,
+      ok("「옆에 작업 보기」 divides a narrow group all the same: its own words ask for the side",
+        before.front === "term" && watched.groups === before.groups + 1 && watched.front === "browser"
+          && watched.frontPane !== before.terminalPane && watched.lastWidth * 2 <= before.stage,
         JSON.stringify({ before, watched }));
       await page.evaluate(() => document.querySelector("#browser-workspace-launcher").click());
       await settled(page);

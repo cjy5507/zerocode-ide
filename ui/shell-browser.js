@@ -6542,6 +6542,22 @@ function standBesideFocused() {
   return standBeside(focusedPane);
 }
 
+/* 이보다 좁은 판은 반으로 나누면 둘 다 못 쓴다: 옆 자리 대신 같은 그룹의 탭. 발행한 아티팩트가 만든 판 옆에
+ * 설 때의 문턱이고(t-11958), 아무도 나눠 달라고 하지 않은 브라우저가 옆에 설 때의 문턱이다. */
+const STAGE_BESIDE_MIN_PX = 720;
+
+/* 아무도 나눠 달라고 하지 않은 서피스의 옆 자리: 오른쪽에 이미 선 자리가 있으면 그 자리, 없으면 나눌 만큼
+ * 넓은 그룹만 나눈다. 좁은 그룹은 null — 새 서피스는 그 그룹의 탭이 된다. 링크, 로그인 페이지, 찾은 dev 서버가
+ * 이 길로 선다. 창의 기본 크기에서 무대(649px)를 320px 둘로 가르던 것이 이 규칙이 없던 탓이다(2026-11-25
+ * 실측). 제 말로 옆을 청하는 문 — 팔레트의 「옆에 분할」, 제목 줄의 「옆에 작업 보기」 — 은 사람의 손이라
+ * `standBesideFocused` 그대로 좁은 그룹도 나눈다. */
+function standBesideWithRoom(group) {
+  if (!activeTabIn(group)) return null;
+  if (stageRightOf(stageTree(), group).seat === null
+    && (groupOf(group)?.el?.getBoundingClientRect().width ?? 0) < STAGE_BESIDE_MIN_PX) return null;
+  return standBeside(group);
+}
+
 const RICH_STAGE_WEIGHT = 1.7;
 
 function preferredStageWeight(node, preferred) {
@@ -6578,6 +6594,7 @@ async function openBrowserTab(
   rawUrl,
   {
     beside = false,
+    splitNarrow = false,
     userAgent = null,
     profile = null,
     expectedWorktree = null,
@@ -6704,8 +6721,10 @@ async function openBrowserTab(
     browserEarly.delete(label);
     return;
   }
-  // `beside` is the + palette's word only: a restored session or a popup
-  // replays MANY opens, and each splitting the stage would shatter it.
+  // `beside` is a door's word, never a restore's: a restored session or a popup
+  // replays MANY opens, and each splitting the stage would shatter it. It stands
+  // beside where there is room (`standBesideWithRoom`); `splitNarrow` is the
+  // palette's own 「옆에 분할」, the person's hand, which divides a narrow group too.
   // `makerSeat` is an artifact's maker pane (t-11958): `split` stands beside that
   // pane's group the way an agent's own open does (a right neighbour is reused,
   // only a rightmost group is divided), and otherwise the page is a tab of that
@@ -6713,7 +6732,7 @@ async function openBrowserTab(
   const splitSeat = makerSeat !== null && makerSeat.split ? standBeside(makerSeat.group) : null;
   const stood = makerSeat !== null
     ? (splitSeat ?? makerSeat.group)
-    : beside && !away ? standBesideFocused() : null;
+    : beside && !away ? (splitNarrow ? standBesideFocused() : standBesideWithRoom(focusedPane)) : null;
   if (stood !== null && (makerSeat === null || splitSeat !== null)) optimizeRichStageGroup(stood);
   openTab({
     id: "browser:" + label,
@@ -7336,7 +7355,7 @@ async function paintTabCreate() {
     ],
     run: () => {
       rememberBrowserPlacement("split");
-      void openBrowserTab(undefined, { beside: true });
+      void openBrowserTab(undefined, { beside: true, splitNarrow: true });
     },
   };
   const browserSingleRow = {

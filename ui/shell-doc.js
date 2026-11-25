@@ -12600,8 +12600,6 @@ const ARTIFACT_UNSEEN_KEY = "zerocode.artifacts.unseen.v1";
 const ARTIFACT_HINT_KEY = "zerocode.artifacts.beside-hint.v1";
 // 저장소가 끝없이 자라지 않게 — 가장 오래된 것부터 잊는다.
 const ARTIFACT_UNSEEN_MAX = 200;
-// 이보다 좁은 판은 반으로 나누면 둘 다 못 쓴다: 옆 자리 대신 같은 그룹의 탭.
-const ARTIFACT_BESIDE_MIN_PX = 720;
 // 표식 위의 수는 두 자리까지 — 그 너머는 「99+」(표식 하나의 폭은 24px다).
 const ARTIFACT_UNSEEN_MARK_MAX = 99;
 // 「새」는 요즘 것의 말이다 — 이보다 오래 열지 않은 발행은 조용히 내려간다(지난 창이 남긴 수가 끝없이 쌓이지 않게).
@@ -12786,7 +12784,7 @@ async function openArtifactBesideOnce(row, maker, { hint = null } = {}) {
   if (tab && (tab.worktree ?? activeWorktreePath) === activeWorktreePath && stageGroups().includes(tab.pane)) {
     const width = termViews.get(maker)?.host?.getBoundingClientRect().width ?? 0;
     const neighbour = stageRightOf(stageTree(), tab.pane).seat !== null;
-    seat = { group: tab.pane, split: neighbour || width >= ARTIFACT_BESIDE_MIN_PX };
+    seat = { group: tab.pane, split: neighbour || width >= STAGE_BESIDE_MIN_PX };
   }
   try {
     return await openArtifactPage(row, { seat, hint });

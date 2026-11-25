@@ -43286,7 +43286,7 @@ const besides = await page.evaluate(async () => {
     tabs.filter((one) => one.kind === "term").at(-1);
   const hostPane = hostTab?.pane ?? focusedPane;
   // 팔레트의 새 브라우저: 보고 있는 터미널 옆에 선다.
-  await openBrowserTab("https://example.com/split", { beside: true });
+  await openBrowserTab("https://example.com/split", { beside: true, splitNarrow: true });
   await new Promise((done) => setTimeout(done, 60));
   const browserTab = tabs.find((one) => one.id === "browser:browser-s1");
   seen.browserBeside =
@@ -43397,7 +43397,7 @@ const bodyFocus = await page.evaluate(async () => {
   const term = await openTermTab();
   await new Promise((done) => setTimeout(done, 60));
   const termPane = tabs.find((one) => one.id === `term:${term}`)?.pane ?? focusedPane;
-  await openBrowserTab("https://example.com/focus", { beside: true });
+  await openBrowserTab("https://example.com/focus", { beside: true, splitNarrow: true });
   await new Promise((done) => setTimeout(done, 60));
   const browserPane = tabs.find((one) => one.id === "browser:browser-f1")?.pane;
   seen.startsOnBrowser = focusedPane === browserPane;
@@ -43501,7 +43501,7 @@ const homecoming = await page.evaluate(async () => {
   const termTab =
     tabs.find((one) => one.id === `term:${term}`) ??
     tabs.filter((one) => one.kind === "term").at(-1);
-  await openBrowserTab("https://example.com/away", { beside: true });
+  await openBrowserTab("https://example.com/away", { beside: true, splitNarrow: true });
   await new Promise((done) => setTimeout(done, 60));
   const awayTab = tabs.find((one) => one.id === "browser:browser-h1");
   // 복원의 형상: 판 0에는 곧 닫힐 탭 하나만 — 창이 태어날 때 깔린 탭들과
