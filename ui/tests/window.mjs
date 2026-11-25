@@ -98,6 +98,7 @@ import { testConversationPin, testConversationResult, testConversationViewMenu }
 import { testConversationBeside } from "./conversation-beside.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
+import { testBrowserToolbar } from "./browser-toolbar.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testBrowserWorkspace } from "./browser-workspace.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
@@ -775,6 +776,7 @@ suite("worktree-evidence", ({ browser, origin, ok }) => testWorktreeEvidence(bro
 suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(browser, origin, ok));
 suite("helper-doors", ({ browser, origin, ok }) => testHelperDoors(browser, origin, ok));
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
+suite("browser-toolbar", ({ browser, origin, ok }) => testBrowserToolbar(browser, origin, ok));
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("browser-workspace", ({ browser, origin, ok }) => testBrowserWorkspace(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
