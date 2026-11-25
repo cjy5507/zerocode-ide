@@ -7960,7 +7960,8 @@ function paintKnowledgeEmpty(view, model) {
 /* 검색 칸 밖을 누르면 서 있는 화면들의 후보가 닫힌다. 문서의 귀는 하나다 — 화면마다 달면 판이 접혀 떠난 화면을
  * 문서가 끝까지 붙든다(쪽 4,300의 볼트에서 접힐 때마다 약 2.6 MB, t-129269). */
 document.addEventListener("pointerdown", (e) => {
-  if (e.target.closest(".knowledge-search")) return;
+  /* 문서 자체를 겨눈 사건(요소가 아님)도 검색 칸 밖이다. */
+  if (e.target instanceof Element && e.target.closest(".knowledge-search")) return;
   for (const view of document.querySelectorAll(".knowledge-view")) {
     if (wiredKnowledgeViews.has(view)) setKnowledgeSuggesting(view, false);
   }
