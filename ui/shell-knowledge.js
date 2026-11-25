@@ -5291,6 +5291,9 @@ function makeKnowledgeSvgPainter() {
 /* 한 프레임 — 카메라를 재고 이 판의 손에게 넘긴다. 창의 모든 길(팬·배율·비행·
  * 선택·훑기)이 여전히 이 한 문으로 그린다. */
 function paintKnowledgeFrame(view, layout, { cameraOnly = false } = {}) {
+  /* 손은 판의 첫 그림(`paintKnowledgeView`)이 three.js를 기다린 뒤에 세운다 — 그 전에 온 프레임(판의 크기 관찰)은
+   * 그릴 위상도 없다. 여기서 세우면 렌더러 없는 GL 손이 서지 못하고 이 창이 닫힐 때까지 SVG를 못 박는다(t-129269). */
+  if (!knowledgePainters.has(view)) return;
   /* 묶음의 셈이 먼저다(t-12029) — 두 손이 선마다 「묶였는가」를 이 셈의 `edgeBetween`에서 읽는다. 줄은 손이
    * 원반을 잰 뒤에 긋는다(`clusterReach`는 그 손의 프레임이 채운다). */
   knowledgeTies(layout);
@@ -8005,9 +8008,11 @@ function wireKnowledgeView(view) {
     const held = event.target.closest(".knowledge-node, .knowledge-gl-label");
     if (held) return held.dataset.graphKey ?? null;
     const layout = knowledgeLayouts.get(view);
-    if (!layout || knowledgePainterFor(view).id === "svg") return null;
+    /* 손은 첫 그림이 세운다(`paintKnowledgeFrame`의 첫 줄) — 포인터가 그보다 먼저 와도 세우지 않는다. */
+    const painter = knowledgePainters.get(view);
+    if (!layout || painter === undefined || painter.id === "svg") return null;
     const box = canvas.getBoundingClientRect();
-    const seat = knowledgePainterFor(view).pick(event.clientX - box.left, event.clientY - box.top);
+    const seat = painter.pick(event.clientX - box.left, event.clientY - box.top);
     return seat < 0 ? null : layout.model.keys[seat];
   };
   canvas.onpointermove = (event) => {
