@@ -8,7 +8,6 @@ target-verify/
 # No trailing slash: a directory rule does not match the node_modules SYMLINK the
 # window shares into every worktree, and `git add -A` there once committed it (249f699).
 node_modules
-ui/node_modules/
 ui/dist/
 .DS_Store
 
@@ -49,4 +48,3 @@ crates/zerocode-shell/bin/
 
 # Design notes and plans stay on this machine; the public repository carries code only (2026-09-21).
 docs/
-zo-ide/docs/
