@@ -27,7 +27,11 @@ final class PointerLookTests: XCTestCase {
         let look = NSAppearance(named: appearance)!
         view.appearance = look
         look.performAsCurrentDrawingAppearance { view.cacheDisplay(in: view.bounds, to: rep) }
-        let (data, row) = (rep.bitmapData!, rep.bytesPerRow)
+        // `bitmapData` points into the bitmap, and nothing holds the bitmap once
+        // this returns: what is read afterwards is a copy of its bytes, taken
+        // while it is held.
+        let row = rep.bytesPerRow
+        let data = withExtendedLifetime(rep) { Array(UnsafeBufferPointer(start: rep.bitmapData!, count: row * high)) }
         func pixel(_ point: CGPoint) -> (r: Int, g: Int, b: Int, a: Int) {
             let x = min(wide - 1, max(0, Int((point.x * CGFloat(scale)).rounded(.down))))
             let y = min(high - 1, max(0, Int((point.y * CGFloat(scale)).rounded(.down))))
