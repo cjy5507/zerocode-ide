@@ -9,7 +9,8 @@
  *
  * What is held here: a pane too narrow for one row stands the toolbar in two — the navigation and the address above,
  * the tools below — with every control inside the pane and under the pointer; a pane wide enough keeps the one row it
- * had; the rows follow the pane as it is resized; and the page begins under whatever the toolbar's height is.
+ * had; the rows follow the pane as it is resized; and the page begins under whatever the toolbar's height is. And
+ * the ⚙ button owns the menus it raises: it says it has one, and Escape gives the keyboard back to it.
  *
  *   node ui/tests/browser-toolbar.mjs
  *   WINDOW_SUITES=browser-toolbar node ui/tests/window.mjs */
@@ -204,6 +205,70 @@ export async function testBrowserToolbar(browser, origin, ok) {
           && marks.rows.every((one) => one === "#i-globe"),
         JSON.stringify(marks));
       ok("the wide toolbar raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  {
+    // The ⚙ menu, and the viewport list one of its rows opens, are raised by the toolbar's own button. The shared
+    // menu hands the keyboard back to whoever raised it and to the worktree list when nobody is named, which is
+    // where Escape left a person who had been in the browser (Codex review t-130084, 2026-11-25). The button also
+    // says it has a menu, so that the menu being up can be read off it.
+    const { page, faults } = await standBrowser(browser, origin, DEFAULT_WINDOW, { beside: false });
+    try {
+      await page.evaluate(() => { window.__ANSWER__.browser_profiles = () => []; });
+      const gear = () => page.evaluate(() => {
+        const host = groupOf(tabs.find((one) => one.label === "browser-930").pane).browserView;
+        const button = host.querySelector(".browser-menu");
+        const focus = document.activeElement;
+        return {
+          popup: button.getAttribute("aria-haspopup"),
+          expanded: button.getAttribute("aria-expanded"),
+          menuUp: !document.getElementById("sidebar-menu").hidden,
+          focusOnGear: focus === button,
+          focusInMenu: !!focus?.closest("#sidebar-menu"),
+          focus: focus?.id || [...(focus?.classList ?? [])].join(".") || focus?.tagName || null,
+          focused: focus?.textContent.trim().slice(0, 24) ?? null,
+        };
+      });
+      const raise = async () => {
+        await page.evaluate(() => {
+          const host = groupOf(tabs.find((one) => one.label === "browser-930").pane).browserView;
+          const button = host.querySelector(".browser-menu");
+          button.focus();
+          button.click();
+        });
+        await page.waitForFunction(() => !document.getElementById("sidebar-menu").hidden);
+      };
+      const escape = async () => {
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.getElementById("sidebar-menu").hidden);
+      };
+      const resting = await gear();
+      await raise();
+      const up = await gear();
+      ok("the ⚙ button says it has a menu, and says so while that menu is up",
+        resting.popup === "menu" && resting.expanded === "false" && up.menuUp && up.expanded === "true" && up.focusInMenu,
+        JSON.stringify({ resting, up }));
+      await escape();
+      const closed = await gear();
+      ok("Escape from the ⚙ menu gives the keyboard back to the ⚙ button",
+        closed.focusOnGear && closed.expanded === "false", JSON.stringify(closed));
+      await raise();
+      const sizes = await page.evaluate(() => {
+        const words = t("browser.viewport", "뷰포트 크기");
+        const row = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")]
+          .find((node) => node.textContent.trim().startsWith(words));
+        row?.click();
+        return !!row;
+      });
+      await page.waitForFunction(() => !document.getElementById("sidebar-menu").hidden
+        && document.querySelectorAll('#sidebar-menu [role="menuitemradio"]').length === 8);
+      const picking = await gear();
+      await escape();
+      const picked = await gear();
+      ok("and from the viewport list that menu opened: the list stands under the same button, and Escape returns there",
+        sizes && picking.expanded === "true" && picking.focusInMenu && picked.focusOnGear && picked.expanded === "false",
+        JSON.stringify({ sizes, picking, picked }));
+      ok("the ⚙ menu raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }
