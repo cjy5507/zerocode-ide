@@ -1488,3 +1488,57 @@ fn the_beat_tells_the_pane_a_restarted_conversation_goes_on_in_and_it_answers_th
     crate::agent_teams::forget_term(CHAIR);
     crate::agent_teams::forget_term(NEW);
 }
+
+/// t-131644 (I-line-notify-1): a window restart mints every team anew, and a
+/// process that started before it keeps the address its pane had then — a
+/// build line job's waiter tells the job's end under it. On 2026-11-25 and 26
+/// three such ends were refused as 「the project of this pane or run-94975 is
+/// not identified」, and the coordinator went looking for a project problem.
+/// A verb from an address no pane of this window holds is still refused and
+/// files nothing; the refusal says what is so: that address is no pane in this
+/// window now.
+#[test]
+fn a_verb_from_an_address_no_pane_holds_is_refused_for_what_it_is() {
+    const A: u32 = 970_860;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(970_870);
+    let team = "team-line-notify-before-a-restart";
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    a_leader(&host, team, A, Some(&disk.a));
+    let run = a_run_from(&host, team, "line-notify");
+    let told = |body: &str| {
+        format!(
+            "send --run {run} --to run:{run} --type status --body {body} --retry-request {body}"
+        )
+    };
+    let sent = from_leader(&host, team, &told("before-the-restart"));
+    assert_eq!(sent.exit_code, 0, "{}", sent.stderr);
+
+    // The restart: the window that minted the team is gone, and the team with it.
+    crate::agent_teams::forget_term(A);
+    let refused = from_leader(&host, team, &told("after-the-restart"));
+    assert_eq!(
+        refused.exit_code, 1,
+        "a verb from an address no pane holds was answered: {}",
+        refused.stdout
+    );
+    assert!(
+        refused.stderr.contains(&format!("{team}/{leader}"))
+            && refused.stderr.contains("is no pane in this window now"),
+        "the refusal does not say the address is no pane here: {}",
+        refused.stderr
+    );
+    assert!(
+        !refused.stderr.contains("not identified"),
+        "the refusal still blames a project: {}",
+        refused.stderr
+    );
+    let filed: Vec<String> = the_rows()
+        .messages
+        .iter()
+        .filter(|row| row.run == run && row.body.as_str() == "after-the-restart")
+        .map(|row| row.id.clone())
+        .collect();
+    assert!(filed.is_empty(), "the refused verb was filed: {filed:?}");
+}

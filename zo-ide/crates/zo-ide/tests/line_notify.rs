@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use zerocode_core::line::{JobState, Line};
+use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
 
 /// The variable that names the line's disk floor in GiB, `0` for none: below
 /// 17 GiB free these tests said `skipped:` and passed in no time (t-119309).
@@ -120,10 +121,19 @@ impl Fixture {
 
     /// `zo line add --notify <address> -- sh -c <script>` from a pane: the job's id.
     fn add(&self, notify: &str, script: &str, seen: &str, refuse: bool) -> String {
+        self.add_under(None, notify, script, seen, refuse)
+    }
+
+    /// [`Self::add`] from a pane of the window whose pid is `window` (`WINDOW_PID_ENV`), or of a
+    /// window the environment does not name.
+    fn add_under(&self, window: Option<u32>, notify: &str, script: &str, seen: &str, refuse: bool) -> String {
         let mut command = self.zo(PANE, seen);
         command.args(["line", "add", "--owner", seen, "--cap", "90s", "--notify", notify, "--", "sh", "-c", script]);
         if refuse {
             command.env("ORC_REFUSE", REFUSAL);
+        }
+        if let Some(window) = window {
+            command.env(WINDOW_PID_ENV, window.to_string());
         }
         let output = command.output().expect("zo line add");
         assert!(output.status.success(), "zo line add: {}", String::from_utf8_lossy(&output.stderr));
@@ -183,6 +193,44 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+
+    /// What job `id`'s record says of a tell that did not go (`notify_failed`), once the line has
+    /// written it; says what did not happen when it is not there in time.
+    fn marked(&self, id: &str) -> serde_json::Value {
+        let until = Instant::now() + PATIENCE;
+        loop {
+            let record = self.record(id);
+            if let Some(failed) = record.get("notify_failed") {
+                return failed.clone();
+            }
+            assert!(
+                Instant::now() < until,
+                "{id}'s record never says its end was not told, in {} s: {record}",
+                PATIENCE.as_secs()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Waits until the process job `id`'s record names — the waiter that ran it — has exited:
+    /// whatever it was going to write is written.
+    fn settled(&self, id: &str) {
+        let pid = self.line.job(id).expect("its record").pid.expect("a process named");
+        let pid = Pid::from_raw(i32::try_from(pid).expect("a pid"));
+        let until = Instant::now() + PATIENCE;
+        while kill(pid, None).is_ok() {
+            assert!(Instant::now() < until, "{pid}, which ran {id}, still stands");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// The pid of a process that has ended and been reaped: a window that is gone.
+fn a_pid_that_ended() -> u32 {
+    let mut child = Command::new("true").spawn().expect("`true` starts");
+    let pid = child.id();
+    child.wait().expect("`true` ends");
+    pid
 }
 
 /// The value after `flag` in `words`.
@@ -238,6 +286,35 @@ fn a_send_that_does_not_go_says_so_in_the_jobs_log() {
     assert!(last.contains("worker:w-7") && last.contains("did not go") && last.contains(REFUSAL), "{last}");
     let text = fs::read_to_string(&log).expect("its log");
     assert!(text.starts_with("built\n"), "the job's own output first: {text:?}");
+}
+
+/// Red → green (t-131644, I-line-notify-1): a tell that does not go is written in the job's
+/// record too, not only as its log's last line — when, why, and whether the window that gave the
+/// pane that put the job in its seat (`WINDOW_PID_ENV`) had ended by then. A window restart mints
+/// every seat anew, and the waiter of a job put in before it tells under a seat the new window
+/// refuses: on 2026-11-25 and 26 three ends were told to nobody, and their workers waited. The
+/// window reads this mark to tell such an end itself. A send that goes leaves none.
+#[test]
+fn a_send_that_does_not_go_is_written_in_the_jobs_record() {
+    let fixture = Fixture::new();
+    let job = fixture.add_under(Some(a_pid_that_ended()), "worker:w-7", "exit 0", "gone", true);
+    let failed = fixture.marked(&job);
+    assert!(failed["why"].as_str().is_some_and(|why| why.contains(REFUSAL)), "{failed}");
+    assert_eq!(failed["window_gone"], true, "the window the putting pane came from had ended: {failed}");
+    let ended = fixture.record(&job)["ended_ms"].as_i64().expect("its end");
+    assert!(failed["at_ms"].as_i64().is_some_and(|at| at >= ended), "told after it ended: {failed}");
+
+    let job = fixture.add_under(Some(std::process::id()), "worker:w-7", "exit 0", "standing", true);
+    assert_eq!(fixture.marked(&job)["window_gone"], false, "the window it names, this test, stands");
+
+    let job = fixture.add("worker:w-7", "exit 0", "unnamed", true);
+    assert_eq!(fixture.marked(&job)["window_gone"], false, "no window named, none said gone");
+
+    let job = fixture.add("worker:w-7", "exit 0", "went", false);
+    fixture.told(&job, "went");
+    fixture.settled(&job);
+    let record = fixture.record(&job);
+    assert!(record.get("notify_failed").is_none(), "a send that went left a mark: {record}");
 }
 
 /// The line tells how a job it ended came to its end, too (t-118403, 11-20):
