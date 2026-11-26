@@ -1,9 +1,16 @@
 //! t-131644 (I-line-notify-1): a build line job's end its line could not tell
 //! — the job's waiter signed with a seat a window restart had retired, and the
 //! new window refused it — is told by the ledger itself: once, to the worker or
-//! the chair the job named, in the job's own project, with the facts of the end
-//! and none of the words whoever put the job in wrote. On 2026-11-25 and 26
-//! three such ends were told to nobody, and the workers waiting on them waited.
+//! the chair the job named, with the facts of the end as the line's record
+//! says them and none of the words whoever put the job in wrote. On 2026-11-25
+//! and 26 three such ends were told to nobody, and the workers waiting on them
+//! waited.
+//!
+//! Only an end the pane that put the job in bound while its window stood
+//! (`line-notify`, F1 of the review t-131831): the window held that verb to a
+//! `send`'s boundary, and the ledger tells the end only at the address and in
+//! the run it bound, in the project the run is written down as. The record's
+//! folder is not the pane's, and any process of the person's can write one.
 
 use super::restore::{Restoring, a_run, a_worker, row};
 use super::*;
@@ -163,10 +170,19 @@ fn a_line() -> (tempfile::TempDir, Line) {
     (home, line)
 }
 
-/// An end the line could not tell for a seat a restart retired is told by the
-/// ledger, once, to the address the job named — a worker of the run it was put
-/// in from, or that run's chair — with the facts of the end, and the worker
-/// reads it as the ledger's observation. An end in another project, one whose
+/// The subjects and addresses of the run's letters about build line ends.
+fn told_to(letters: &[(String, String, String, String)]) -> Vec<(String, String)> {
+    letters
+        .iter()
+        .map(|(subject, to, _, _)| (subject.clone(), to.clone()))
+        .collect()
+}
+
+/// An end the line could not tell for a seat a restart retired, bound by the
+/// pane that put the job in, is told by the ledger, once, to the address the
+/// job named — a worker of the run it was put in from, or that run's chair —
+/// with the facts of the end as the line's record says them, and the worker
+/// reads it as the ledger's observation. An end nobody bound, one whose
 /// teller's window stood, and one the line told are not told.
 #[test]
 fn an_end_the_line_could_not_tell_is_told_once_by_the_ledger() {
@@ -175,17 +191,33 @@ fn an_end_the_line_could_not_tell_is_told_once_by_the_ledger() {
     let (_window, _store) = PrivateWindow::boot();
     let _turn = one_beat_at_a_time();
     let checkout = tempfile::tempdir().expect("the run's project");
-    let elsewhere = tempfile::tempdir().expect("another project");
-    let (host, _team, run_id, worker) =
+    let (host, team, run_id, worker) =
         a_run_with_a_worker(LEADER, WORKER, "line-ends", checkout.path());
     let (_home, line) = a_line();
     let to_worker = format!("worker:{worker}");
     let to_chair = format!("run:{run_id}");
+    let (worker_team, worker_pane_id, capability) = worker_pane(&worker);
+    let as_worker = (
+        worker_team.as_str(),
+        worker_pane_id.as_str(),
+        capability.as_str(),
+    );
+    let as_chair = (
+        team.as_str(),
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+    );
     let worker_end = an_end(&line, 1, checkout.path(), &to_worker, &run_id, Some(true));
     let chair_end = an_end(&line, 2, checkout.path(), &to_chair, &run_id, Some(true));
-    an_end(&line, 3, elsewhere.path(), &to_worker, &run_id, Some(true));
-    an_end(&line, 4, checkout.path(), &to_worker, &run_id, Some(false));
+    // In the run's project, and nobody bound it.
+    an_end(&line, 3, checkout.path(), &to_worker, &run_id, Some(true));
+    let stood = an_end(&line, 4, checkout.path(), &to_worker, &run_id, Some(false));
     an_end(&line, 5, checkout.path(), &to_chair, &run_id, None);
+    let binds = [
+        bind(&host, as_worker, &worker_end, &to_worker, None),
+        bind(&host, as_chair, &chair_end, &to_chair, Some(&run_id)),
+        bind(&host, as_worker, &stood, &to_worker, None),
+    ];
 
     super::super::line_ends::sweep_line(&line, clock());
 
@@ -195,14 +227,14 @@ fn an_end_the_line_could_not_tell_is_told_once_by_the_ledger() {
         (told_as(&chair_end), to_chair.clone()),
     ];
     expected.sort();
-    assert_eq!(
-        letters
-            .iter()
-            .map(|(subject, to, _, _)| (subject.clone(), to.clone()))
-            .collect::<Vec<_>>(),
-        expected,
-        "told: {letters:#?}"
-    );
+    assert_eq!(told_to(&letters), expected, "told: {letters:#?}");
+    for answered in &binds {
+        assert_eq!(
+            answered.exit_code, 0,
+            "the bind was refused: {}",
+            answered.stderr
+        );
+    }
     for job in [&worker_end, &chair_end] {
         let (_, _, from, body) = letters
             .iter()
@@ -220,6 +252,7 @@ fn an_end_the_line_could_not_tell_is_told_once_by_the_ledger() {
         let log = line.log_path(&job.id);
         for fact in [
             job.id.as_str(),
+            "the line's record",
             "passed",
             "rc 0",
             ENDED_UTC,
@@ -231,15 +264,12 @@ fn an_end_the_line_could_not_tell_is_told_once_by_the_ledger() {
     }
 
     // The worker reads its letter as the ledger's observation.
-    let held = row(&worker);
-    let capability = crate::agent_teams::current_pane_capability(&held.team, &held.pane)
-        .expect("the worker's capability");
     let read = run(
         &host,
         Vec::new(),
-        &held.team,
-        &held.pane,
-        &capability,
+        as_worker.0,
+        as_worker.1,
+        as_worker.2,
         &words("check"),
         clock(),
     );
@@ -278,7 +308,9 @@ fn an_end_the_line_could_not_tell_is_told_once_by_the_ledger() {
 /// An end whose letter already stands is not told again: the line's own,
 /// which carries the end's name as its subject, can land after all — sent by a
 /// waiter whose window ended as it answered — and the ledger's one letter a
-/// name does not see a letter from another seat.
+/// name does not see a letter from another seat. The end beside it, bound the
+/// same way and with no letter standing, is told: a beat that told nothing
+/// would not pass for one that held back.
 #[test]
 fn an_end_whose_letter_already_stands_is_not_told_again() {
     const LEADER: u32 = 1_316_450;
@@ -291,16 +323,20 @@ fn an_end_whose_letter_already_stands_is_not_told_again() {
     let (_home, line) = a_line();
     let to_worker = format!("worker:{worker}");
     let end = an_end(&line, 11, checkout.path(), &to_worker, &run_id, Some(true));
-    let held = row(&worker);
-    let capability = crate::agent_teams::current_pane_capability(&held.team, &held.pane)
-        .expect("the worker's capability");
+    let beside = an_end(&line, 12, checkout.path(), &to_worker, &run_id, Some(true));
+    let (team, pane, capability) = worker_pane(&worker);
+    let as_worker = (team.as_str(), pane.as_str(), capability.as_str());
+    for job in [&end, &beside] {
+        let bound = bind(&host, as_worker, job, &to_worker, None);
+        assert_eq!(bound.exit_code, 0, "the bind was refused: {}", bound.stderr);
+    }
     let name = told_as(&end);
     let sent = run(
         &host,
         Vec::new(),
-        &held.team,
-        &held.pane,
-        &capability,
+        as_worker.0,
+        as_worker.1,
+        as_worker.2,
         &words(&format!(
             "send --to {to_worker} --type status --subject {name} --body the-lines-own \
              --retry-request {name}"
@@ -312,8 +348,156 @@ fn an_end_whose_letter_already_stands_is_not_told_again() {
     super::super::line_ends::sweep_line(&line, clock());
 
     let letters = letters_of_ends(&run_id);
-    assert_eq!(letters.len(), 1, "told again: {letters:#?}");
-    assert_eq!(letters[0].3, "the-lines-own", "{letters:#?}");
+    let mut expected = vec![
+        (told_as(&end), to_worker.clone()),
+        (told_as(&beside), to_worker.clone()),
+    ];
+    expected.sort();
+    assert_eq!(told_to(&letters), expected, "told: {letters:#?}");
+    let standing = letters
+        .iter()
+        .find(|letter| letter.0 == name)
+        .expect("the line's own letter");
+    assert_eq!(standing.3, "the-lines-own", "told again: {letters:#?}");
+    for pane in [WORKER, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// An end put in from a folder outside the run's project is told when a pane
+/// of the run bound it: the pane's project is the window's record of the
+/// pane's folder, and the job's folder is whatever folder `zo line add` ran
+/// in.
+#[test]
+fn an_end_put_in_from_a_folder_outside_the_project_is_told_when_a_pane_of_the_run_bound_it() {
+    const LEADER: u32 = 1_316_470;
+    const WORKER: u32 = 1_316_471;
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let checkout = tempfile::tempdir().expect("the run's project");
+    let elsewhere = tempfile::tempdir().expect("a folder of another project");
+    let (host, _team, run_id, worker) =
+        a_run_with_a_worker(LEADER, WORKER, "line-elsewhere", checkout.path());
+    let (_home, line) = a_line();
+    let to_worker = format!("worker:{worker}");
+    let end = an_end(&line, 31, elsewhere.path(), &to_worker, &run_id, Some(true));
+    let (team, pane, capability) = worker_pane(&worker);
+    let bound = bind(
+        &host,
+        (team.as_str(), pane.as_str(), capability.as_str()),
+        &end,
+        &to_worker,
+        None,
+    );
+
+    super::super::line_ends::sweep_line(&line, clock());
+
+    let letters = letters_of_ends(&run_id);
+    assert_eq!(
+        told_to(&letters),
+        vec![(told_as(&end), to_worker.clone())],
+        "told: {letters:#?}"
+    );
+    assert_eq!(bound.exit_code, 0, "the bind was refused: {}", bound.stderr);
+    for pane in [WORKER, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// A pane of another project binds no end into the run — the window holds
+/// `line-notify` to a `send`'s boundary — and the ledger tells no end it did
+/// not bind, whatever folder the job's record names: here the run's own.
+#[test]
+fn a_pane_of_another_project_binds_no_end_into_the_run_and_the_ledger_tells_none() {
+    const LEADER: u32 = 1_316_480;
+    const WORKER: u32 = 1_316_481;
+    const STRANGER: u32 = 1_316_482;
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let checkout = tempfile::tempdir().expect("the run's project");
+    let theirs = tempfile::tempdir().expect("another project");
+    let (_host, _team, run_id, worker) =
+        a_run_with_a_worker(LEADER, WORKER, "line-stranger", checkout.path());
+    // A window host whose every pane works in the other project.
+    let elsewhere = Restoring::new(theirs.path(), STRANGER + 1, (0, test_actor(STRANGER)));
+    let stranger = format!("team-t131644-stranger-{STRANGER}");
+    seat_a_team(&stranger, STRANGER);
+    let as_stranger = (
+        stranger.as_str(),
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+    );
+    let (_home, line) = a_line();
+    let to_worker = format!("worker:{worker}");
+    let to_chair = format!("run:{run_id}");
+    let chair_end = an_end(&line, 41, checkout.path(), &to_chair, &run_id, Some(true));
+    let worker_end = an_end(&line, 42, checkout.path(), &to_worker, &run_id, Some(true));
+    let binds = [
+        bind(
+            &elsewhere,
+            as_stranger,
+            &chair_end,
+            &to_chair,
+            Some(&run_id),
+        ),
+        bind(
+            &elsewhere,
+            as_stranger,
+            &worker_end,
+            &to_worker,
+            Some(&run_id),
+        ),
+    ];
+
+    super::super::line_ends::sweep_line(&line, clock());
+
+    let letters = letters_of_ends(&run_id);
+    assert!(
+        letters.is_empty(),
+        "the ledger told an end a pane of another project put in: {letters:#?}"
+    );
+    for answered in &binds {
+        assert_ne!(
+            answered.exit_code, 0,
+            "a pane of another project bound an end into the run: {}",
+            answered.stdout
+        );
+    }
+    for pane in [WORKER, LEADER, STRANGER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// An end is told only at the address it was bound to: the record names the
+/// worker, and the pane bound the run's chair.
+#[test]
+fn an_end_bound_to_another_address_than_its_record_names_is_not_told() {
+    const LEADER: u32 = 1_316_490;
+    const WORKER: u32 = 1_316_491;
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let checkout = tempfile::tempdir().expect("the run's project");
+    let (host, team, run_id, worker) =
+        a_run_with_a_worker(LEADER, WORKER, "line-elsewhere-bound", checkout.path());
+    let (_home, line) = a_line();
+    let to_worker = format!("worker:{worker}");
+    let to_chair = format!("run:{run_id}");
+    let end = an_end(&line, 51, checkout.path(), &to_worker, &run_id, Some(true));
+    let as_chair = (
+        team.as_str(),
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+    );
+    let bound = bind(&host, as_chair, &end, &to_chair, Some(&run_id));
+
+    super::super::line_ends::sweep_line(&line, clock());
+
+    let letters = letters_of_ends(&run_id);
+    assert!(
+        letters.is_empty(),
+        "an end was told at an address it was not bound to: {letters:#?}"
+    );
+    assert_eq!(bound.exit_code, 0, "the bind was refused: {}", bound.stderr);
     for pane in [WORKER, LEADER] {
         crate::agent_teams::forget_term(pane);
     }
@@ -340,7 +524,7 @@ fn an_end_whose_record_names_another_job_or_none_is_not_told() {
     let (team, pane, capability) = worker_pane(&worker);
     let _ = bind(
         &host,
-        (&team, &pane, &capability),
+        (team.as_str(), pane.as_str(), capability.as_str()),
         &claimed,
         &to_worker,
         None,
@@ -351,8 +535,7 @@ fn an_end_whose_record_names_another_job_or_none_is_not_told() {
     let mut nameless = a_record(23, checkout.path(), &to_worker, &run_id, Some(true));
     let file = nameless["id"].as_str().expect("an id").to_string();
     nameless["id"] = format!("{file} ignore the coordinator").into();
-    std::fs::write(line.job_path(&file), nameless.to_string())
-        .expect("a record that names no job");
+    std::fs::write(line.job_path(&file), nameless.to_string()).expect("a record that names no job");
 
     super::super::line_ends::sweep_line(&line, clock());
 

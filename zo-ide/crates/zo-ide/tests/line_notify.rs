@@ -43,11 +43,31 @@ const HOLD: &str = "i=0; while [ ! -e free ] && [ $i -lt 900 ]; do sleep 0.1; i=
 /// What the window says to a `send` that names no retry (`orchestration::needs_a_retry_name`), word
 /// for word as the real `zerocode-orc` printed it to the line's call on 2026-11-20.
 const REFUSAL: &str = "orchestration: send changes the ledger, so it needs --retry-request <id> — a name you can repeat, unchanged, if you never hear how it went. Reads do not need one.";
-/// A fake `zerocode-orc`. Asked `run-current`, it answers the run `$ORC_RUN` names, or that the pane
-/// stands in none, as the window does, and writes nothing. Any other verb it writes, its arguments one a
-/// line and the pane it was called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE`
-/// says so.
+/// A fake `zerocode-orc`. With `$ORC_BIND` set to `gone` it answers nothing at all, as when no window is
+/// there. Asked `line-notify` (t-131644), it writes its arguments one a line and the pane it was called
+/// from to `$ORC_SEEN.bound`, then answers as a window too old to know the verb (`$ORC_BIND` is
+/// `unknown`), does not answer for half a minute (`silent`), or binds: the job, the address and the run
+/// its `--run` names, else `$ORC_RUN`, refusing as the window does when there is none. Asked
+/// `run-current`, it answers the run `$ORC_RUN` names, or that the pane stands in none, as the window
+/// does, and writes nothing. Any other verb it writes, its arguments one a line and the pane it was
+/// called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE` says so.
 const FAKE_ORC: &str = r#"#!/bin/sh
+if [ "${ORC_BIND:-}" = gone ]; then printf '%s\n' 'zerocode-orc: no window answers here' >&2; exit 1; fi
+if [ "${1:-}" = line-notify ]; then
+  { for arg in "$@"; do printf '%s\n' "$arg"; done; printf 'pane=%s\n' "${ZEROCODE_PANE_KEY:-}"; } > "$ORC_SEEN.bound"
+  case "${ORC_BIND:-}" in
+    unknown) printf '%s\n' 'orchestration: unknown verb: line-notify — try `help`' >&2; exit 1 ;;
+    silent) exec sleep 30 ;;
+  esac
+  job= to= run="${ORC_RUN:-}"
+  while [ $# -gt 0 ]; do
+    case "$1" in --job) job=$2; shift ;; --to) to=$2; shift ;; --run) run=$2; shift ;; esac
+    shift
+  done
+  if [ -z "$run" ]; then printf '%s\n' 'orchestration: no run in use — run-create or run-use first' >&2; exit 1; fi
+  printf '{"job":"%s","to":"%s","run":"%s","project":"/p/.git"}\n' "$job" "$to" "$run"
+  exit 0
+fi
 if [ "${1:-}" = run-current ]; then
   if [ -n "${ORC_RUN:-}" ]; then printf '{"runId":"%s","name":"fake"}\n' "$ORC_RUN"; exit 0; fi
   printf 'orchestration: no run in use — run-create or run-use first\n' >&2; exit 1
@@ -143,6 +163,15 @@ impl Fixture {
 
     fn seen(&self, name: &str) -> PathBuf {
         self.root.path().join(format!("seen-{name}"))
+    }
+
+    /// The words the fake was asked to bind a job's end with (`line-notify`), as `zo line add` asked
+    /// it before it answered.
+    fn bound(&self, seen: &str) -> Vec<String> {
+        let path = self.root.path().join(format!("seen-{seen}.bound"));
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("zo line add asked the window to bind nothing ({})", path.display()));
+        text.lines().map(str::to_owned).collect()
     }
 
     /// `zo line wait <job>` from another pane: a look that may end the job, and
@@ -329,6 +358,69 @@ fn the_lines_letter_names_its_jobs_end_as_its_subject() {
     let name = format!("zo-line-{job}");
     assert_eq!(value(&words, "--subject"), Some(name.as_str()), "{words:?}");
     assert_eq!(value(&words, "--retry-request"), Some(name.as_str()), "{words:?}");
+}
+
+/// Red → green (t-131644, F1 of the review t-131831): `zo line add --notify` binds the job's end to
+/// the pane that puts it in, before the job runs — `line-notify`, under the job's own name, from that
+/// pane — so the ledger can tell that end itself when a window restart leaves the line no pane to
+/// tell it from. A worker is told in the run the window answered for the pane, and a run's chair in
+/// that run.
+#[test]
+fn zo_line_add_binds_its_jobs_end_to_the_pane_that_puts_it_in() {
+    let fixture = Fixture::new();
+    let job = fixture.add("worker:w-7", "exit 0", "bound", false);
+    let name = format!("zo-line-notify-{job}");
+    let pane = format!("pane={PANE}");
+    assert_eq!(
+        fixture.bound("bound"),
+        ["line-notify", "--job", job.as_str(), "--to", "worker:w-7", "--retry-request", name.as_str(), pane.as_str()],
+        "the bind asked"
+    );
+    assert_eq!(fixture.record(&job)["notify_run"], PUT_RUN, "the run the window answered: {}", fixture.record(&job));
+    fixture.told(&job, "bound");
+    fixture.settled(&job);
+
+    let job = fixture.add("run:run-9", "exit 0", "chair", false);
+    let words = fixture.bound("chair");
+    assert_eq!((value(&words, "--to"), value(&words, "--run")), (Some("run:run-9"), Some("run-9")), "{words:?}");
+    assert!(fixture.record(&job).get("notify_run").is_none(), "{}", fixture.record(&job));
+    fixture.told(&job, "chair");
+    fixture.settled(&job);
+}
+
+/// Red → green (t-131644): a window that cannot bind a job's end — too old to know `line-notify`, not
+/// there at all, or not answering — costs `zo line add` one warning line and a few seconds at most,
+/// never the put: the job goes in, and its run is asked as before (`run-current`) of a window that
+/// answered at all.
+#[test]
+fn a_window_that_cannot_bind_costs_a_put_one_warning_line_and_not_the_put() {
+    let fixture = Fixture::new();
+    for (how, run) in [("unknown", Some(PUT_RUN)), ("gone", None), ("silent", None)] {
+        let began = Instant::now();
+        let output = fixture
+            .zo(PANE, how)
+            .env("ORC_BIND", how)
+            .args(["line", "add", "--owner", how, "--cap", "90s", "--notify", "worker:w-7", "--", "sh", "-c", "exit 0"])
+            .output()
+            .expect("zo line add");
+        let took = began.elapsed();
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{how}: zo line add: {said}");
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).expect("the receipt");
+        let job = receipt["job"].as_str().expect("the job's id").to_owned();
+        let warnings: Vec<&str> = said.lines().filter(|line| line.starts_with("zo line: warning")).collect();
+        assert_eq!(warnings.len(), 1, "{how}: one warning line, not {}: {said}", warnings.len());
+        assert!(warnings[0].contains(&job) && warnings[0].contains("did not bind"), "{how}: {said}");
+        assert!(took < Duration::from_secs(20), "{how}: zo line add waited {took:?} on a window that cannot bind");
+        let record = fixture.record(&job);
+        assert_eq!(record["notify_run"].as_str(), run, "{how}: {record}");
+        if how == "gone" {
+            fixture.marked(&job);
+        } else {
+            fixture.told(&job, how);
+        }
+        fixture.settled(&job);
+    }
 }
 
 /// t-131644: a retry is a job of its own. `zo line retry` copies the first job's record, and an
