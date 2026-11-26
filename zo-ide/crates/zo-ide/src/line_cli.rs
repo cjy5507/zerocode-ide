@@ -1259,11 +1259,14 @@ fn untold(line: &Line, id: &str, why: String, window_gone: bool) {
 /// names (`WINDOW_PID_ENV`), whose pane put the job in or looked — has ended:
 /// a restart mints every seat anew, so a seat whose window is gone is one the
 /// window refuses (t-131644). A process no window names says none is gone.
+/// Asked on Windows too (`process_tree::ended`, review t-131848): `alive` has
+/// no signal 0 to ask with there, and every window read as standing, so no
+/// end a restart left untold was ever the window's to tell.
 fn teller_window_gone() -> bool {
     std::env::var(WINDOW_PID_ENV)
         .ok()
         .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .is_some_and(|pid| !alive(pid))
+        .is_some_and(process_tree::ended)
 }
 
 /// The words `notify` gives `zerocode-orc` to tell `to` how `job` ended. The

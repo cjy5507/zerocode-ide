@@ -46,6 +46,12 @@ nix = { version = "0.29", features = ["process", "signal"] }
 # (`skill_install`, macOS `renamex_np` / Linux `renameat2`).
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Whether a process has ended, asked of Win32 by its pid (`process_tree::ended`, t-131644): the two
+# calls the window's own `resource_usage::process_exited` makes. The version both lock files already
+# hold for the orchestrator, the pty crate and zo's own crates — no crate new to either lock.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 # A fake `PATH` holding exactly the executables a test names, so agent presence
 # is measured against a directory this test made rather than against whatever

@@ -15,6 +15,10 @@
 //! each one (AO #5309). Its input and output are nobody's, so a console
 //! program loses nothing by it either. The window's own `taskkill`s go through
 //! its quiet door (`proc.rs`), with the same [`TASKKILL_TREE`] words.
+//!
+//! Whether one process has ended, by its pid, is asked here too ([`ended`]),
+//! on unix and on Windows alike: `zo line` asks it of the window a pane's seat
+//! came from (t-131644).
 
 use std::io::Read as _;
 use std::process::{Child, Command};
@@ -241,6 +245,86 @@ fn taskkill_tree(pid: u32) -> Option<Child> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .ok()
+}
+
+/// Whether process `pid` has ended, as far as this host can tell
+/// (t-131644): on unix no process answers signal 0 by that pid; on Windows no
+/// process opens by it, or the one that opens has exited — the two calls the
+/// window asks it with (`resource_usage::process_exited`). A pid this cannot
+/// ask about, or that the host will not answer for — 0, another user's, a
+/// refusal it cannot read — has not ended: a caller acts only on an end it
+/// saw. A pid a new process has taken since reads as standing, here as
+/// everywhere a pid is asked after.
+#[must_use]
+pub fn ended(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        !crate::settings_file_lock::process_alive(pid)
+    }
+    #[cfg(windows)]
+    {
+        ended_on_windows(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// [`ended`] asked of Win32: `OpenProcess` for no more than waiting on the
+/// process, then a wait that does not wait.
+#[cfg(windows)]
+fn ended_on_windows(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    // SAFETY: a query by pid with no pointer in it; the handle it returns is closed below.
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        // The one refusal that says no process has the pid: denied says one does.
+        return std::io::Error::last_os_error().raw_os_error()
+            == i32::try_from(ERROR_INVALID_PARAMETER).ok();
+    }
+    // SAFETY: the handle opened above, still open; a wait of no time.
+    let read = unsafe { WaitForSingleObject(process, 0) };
+    // SAFETY: closing the handle opened above, once.
+    unsafe {
+        CloseHandle(process);
+    }
+    read == WAIT_OBJECT_0
+}
+
+/// [`ended`] on every host this builds for — the Windows cross-compile builds
+/// it too, where it asks Win32: a child that was collected has ended, this
+/// process has not, and pid 0 says nothing.
+#[cfg(test)]
+mod an_ended_process {
+    #[test]
+    fn is_told_from_one_that_stands() {
+        #[cfg(unix)]
+        let mut command = std::process::Command::new("true");
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "exit"]);
+            command
+        };
+        let pid = {
+            let mut child = command
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .expect("a child");
+            child.wait().expect("it ends");
+            child.id()
+        };
+        assert!(super::ended(pid), "{pid} ended and was collected");
+        assert!(!super::ended(std::process::id()), "this process stands");
+        assert!(!super::ended(0), "pid 0 says nothing");
+    }
 }
 
 /// Unix only: the Windows tree is ended by `taskkill`, which this machine
