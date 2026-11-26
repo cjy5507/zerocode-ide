@@ -3140,6 +3140,39 @@ fn the_clarification_section_asks_one_specific_question_per_decision() {
     assert!(reminders.contains("ask the user, in one AskUserQuestion call, a specific question about which reading is meant"));
 }
 
+#[test]
+fn verification_rule_keeps_default_task_work_bytes() {
+    use sha2::{Digest, Sha256};
+
+    // SHA-256 of the rendered # Task work section in 1.1.178 (d3dac0091).
+    for (finish_rule, expected) in [
+        (api::FinishRule::Off, "3406cefe067d2ccfa9690de1d716c1598af9efa25a32d15873c48dc9f6958ef5"),
+        (api::FinishRule::On, "20d4d802deaa1622d92c257a6d3ff9dca15a0e2ee8a0d5341501a01d2316b6f7"),
+    ] {
+        let section = super::get_simple_doing_tasks_section(finish_rule);
+        let digest = format!("{:x}", Sha256::digest(section.as_bytes()));
+        assert_eq!(digest, expected, "# Task work bytes with finish rule {finish_rule:?}");
+    }
+}
+
+#[test]
+fn verification_rule_places_the_default_bullet_in_core_working_once() {
+    let default = super::get_simple_doing_tasks_section(api::FinishRule::Off);
+    let expected = default
+        .lines()
+        .filter_map(|line| line.strip_prefix(" - "))
+        .find(|item| item.starts_with("Verify with one comprehensive test"))
+        .expect("the default verification bullet");
+    let core = SystemPromptBuilder::new().with_headless_profile(HeadlessProfile::Core).build();
+    let working = core.iter().find(|section| section.starts_with("# Working\n")).expect("the core working section");
+
+    assert_eq!(
+        working.lines().filter(|line| line.strip_prefix("- ") == Some(expected)).count(),
+        1,
+        "the core # Working section must carry the default verification bullet exactly once"
+    );
+}
+
 /// The headless core profile writes its own prompt: the identity line with
 /// the core opening, `# Working`, `# Care` and `# Final message`, the
 /// boundary, one `# Environment` section in `- ` bullets with no model line
