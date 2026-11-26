@@ -72,6 +72,7 @@ Heavy commands (a crate's tests, clippy, a window suite) go through the machine'
   zo line run --task <task> --what "<what it checks>" -- <command>   (waits its turn, exits as the command did)
   zo line add --task <task> -- <command>                             (puts it in and returns; `zo line wait <job>`)
 Required root gate: cargo clippy --all-targets -- -D warnings
+End your turn if the coordinator promised a letter and you can do no more work without it.
 Report command exit codes without pipes, commits, and anything left before worker_done.
 ```
 
