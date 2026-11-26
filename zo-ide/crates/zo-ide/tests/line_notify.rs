@@ -46,11 +46,12 @@ const REFUSAL: &str = "orchestration: send changes the ledger, so it needs --ret
 /// A fake `zerocode-orc`. With `$ORC_BIND` set to `gone` it answers nothing at all, as when no window is
 /// there. Asked `line-notify` (t-131644), it writes its arguments one a line and the pane it was called
 /// from to `$ORC_SEEN.bound`, then answers as a window too old to know the verb (`$ORC_BIND` is
-/// `unknown`), does not answer for half a minute (`silent`), or binds: the job, the address and the run
-/// its `--run` names, else `$ORC_RUN`, refusing as the window does when there is none. Asked
-/// `run-current`, it answers the run `$ORC_RUN` names, or that the pane stands in none, as the window
-/// does, and writes nothing. Any other verb it writes, its arguments one a line and the pane it was
-/// called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE` says so.
+/// `unknown`), does not answer for half a minute (`silent`), or binds — a second later when `$ORC_BIND`
+/// is `slow`: the job, the address and the run its `--run` names, else `$ORC_RUN`, refusing as the
+/// window does when there is none, and writing the second it answered in to `$ORC_SEEN.answered`.
+/// Asked `run-current`, it answers the run `$ORC_RUN` names, or that the pane stands in none, as the
+/// window does, and writes nothing. Any other verb it writes, its arguments one a line and the pane it
+/// was called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE` says so.
 const FAKE_ORC: &str = r#"#!/bin/sh
 if [ "${ORC_BIND:-}" = gone ]; then printf '%s\n' 'zerocode-orc: no window answers here' >&2; exit 1; fi
 if [ "${1:-}" = line-notify ]; then
@@ -58,6 +59,7 @@ if [ "${1:-}" = line-notify ]; then
   case "${ORC_BIND:-}" in
     unknown) printf '%s\n' 'orchestration: unknown verb: line-notify — try `help`' >&2; exit 1 ;;
     silent) exec sleep 30 ;;
+    slow) sleep 1 ;;
   esac
   job= to= run="${ORC_RUN:-}"
   while [ $# -gt 0 ]; do
@@ -65,6 +67,7 @@ if [ "${1:-}" = line-notify ]; then
     shift
   done
   if [ -z "$run" ]; then printf '%s\n' 'orchestration: no run in use — run-create or run-use first' >&2; exit 1; fi
+  date +%s > "$ORC_SEEN.answered"
   printf '{"job":"%s","to":"%s","run":"%s","project":"/p/.git"}\n' "$job" "$to" "$run"
   exit 0
 fi
@@ -172,6 +175,14 @@ impl Fixture {
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|_| panic!("zo line add asked the window to bind nothing ({})", path.display()));
         text.lines().map(str::to_owned).collect()
+    }
+
+    /// The second, since the epoch, the fake answered a binding in.
+    fn answered(&self, seen: &str) -> i64 {
+        let path = self.root.path().join(format!("seen-{seen}.answered"));
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("the window bound no end ({})", path.display()));
+        text.trim().parse().unwrap_or_else(|_| panic!("a second, not {text:?}"))
     }
 
     /// `zo line wait <job>` from another pane: a look that may end the job, and
@@ -385,6 +396,33 @@ fn zo_line_add_binds_its_jobs_end_to_the_pane_that_puts_it_in() {
     assert_eq!((value(&words, "--to"), value(&words, "--run")), (Some("run:run-9"), Some("run-9")), "{words:?}");
     assert!(fixture.record(&job).get("notify_run").is_none(), "{}", fixture.record(&job));
     fixture.told(&job, "chair");
+    fixture.settled(&job);
+}
+
+/// Red → green (t-131644, F1 of the review t-131848): `zo line add` puts its job in after the window
+/// bound its end — the job is queued from the moment the binding came back. The ledger tells only an
+/// end bound no later than its job was put in: a pane reads a job's id off the line once the job is
+/// in it, so a binding filed after that is another pane's. A window that takes a second to bind shows
+/// the order: the job was queued in the second the window answered, or later.
+#[test]
+fn zo_line_add_puts_its_job_in_after_its_end_is_bound() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .zo(PANE, "slow")
+        .env("ORC_BIND", "slow")
+        .args(["line", "add", "--owner", "slow", "--cap", "90s", "--notify", "worker:w-7", "--", "sh", "-c", "exit 0"])
+        .output()
+        .expect("zo line add");
+    assert!(output.status.success(), "zo line add: {}", String::from_utf8_lossy(&output.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).expect("the receipt");
+    let job = receipt["job"].as_str().expect("the job's id").to_owned();
+    let answered = fixture.answered("slow");
+    let queued = fixture.record(&job)["queued_ms"].as_i64().expect("when it was queued");
+    assert!(
+        queued >= answered * 1_000,
+        "{job} was queued at {queued} ms, before the window bound its end in second {answered}"
+    );
+    fixture.told(&job, "slow");
     fixture.settled(&job);
 }
 
