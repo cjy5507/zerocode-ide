@@ -25897,6 +25897,11 @@ mod seat_follows;
 /// person's words held, the live field looked at (`tests/release_sweep.rs`).
 mod release_sweep;
 
+/// t-131644: a build line job's end its line could not tell, for a seat a
+/// window restart retired, is told by the ledger itself — once, in the job's
+/// own project, as facts only (`tests/line_ends.rs`).
+mod line_ends;
+
 /// t-84850 r4: a 「대화」 on a pane the ledger seated a worker or a
 /// coordinator in is refused by the ledger's own seats
 /// (`tests/hand_over_seat.rs`).

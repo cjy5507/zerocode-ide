@@ -34,6 +34,7 @@ mod gate_meter;
 mod gate_snapshot;
 pub(crate) mod hand_in_keep;
 pub(crate) mod inbox;
+mod line_ends;
 mod mail_triage;
 pub(crate) mod peer_room;
 mod project_scope;

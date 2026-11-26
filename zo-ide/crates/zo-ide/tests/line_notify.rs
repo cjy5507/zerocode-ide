@@ -317,6 +317,20 @@ fn a_send_that_does_not_go_is_written_in_the_jobs_record() {
     assert!(record.get("notify_failed").is_none(), "a send that went left a mark: {record}");
 }
 
+/// Red → green (t-131644): the line's letter carries the name its job's end is told under as its
+/// subject — the one the ledger's letter about the same end carries when the line could not tell
+/// it — so the window does not tell an end the line's own letter already told, even one that
+/// landed after the line heard it had not.
+#[test]
+fn the_lines_letter_names_its_jobs_end_as_its_subject() {
+    let fixture = Fixture::new();
+    let job = fixture.add("worker:w-7", "exit 0", "subject", false);
+    let words = fixture.told(&job, "subject");
+    let name = format!("zo-line-{job}");
+    assert_eq!(value(&words, "--subject"), Some(name.as_str()), "{words:?}");
+    assert_eq!(value(&words, "--retry-request"), Some(name.as_str()), "{words:?}");
+}
+
 /// t-131644: a retry is a job of its own. `zo line retry` copies the first job's record, and an
 /// end the first could not tell is the first's: the retry starts with no such mark, or the window
 /// would tell the retry's end once more for it.
