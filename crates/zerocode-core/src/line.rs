@@ -396,6 +396,11 @@ impl Line {
     }
 }
 
+/// The record at `path`, read only as the job its file is named for: one whose
+/// id is no job id, or names another job than its file, is not one zo wrote
+/// (t-131644, F2 of the review t-131831). [`Line::save`] refuses such an id;
+/// any process of the person's can write a file, and the ledger's letter about
+/// an end the line could not tell carries the id read here.
 fn read_job(path: &Path) -> io::Result<Job> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -407,7 +412,15 @@ fn read_job(path: &Path) -> io::Result<Job> {
             "a job record too large",
         ));
     }
-    serde_json::from_slice(&bytes).map_err(io::Error::other)
+    let job: Job = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let named = path.file_stem().and_then(std::ffi::OsStr::to_str);
+    if !is_job_id(&job.id) || named != Some(job.id.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a job record that names no job, or another job than its file",
+        ));
+    }
+    Ok(job)
 }
 
 /// Whether `id` can name a job: what [`new_id`] makes.
