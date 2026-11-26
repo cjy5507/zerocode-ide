@@ -396,19 +396,24 @@ fn put_with_waiter(line: &Line, machine: &MachineRules, mut job: Job) -> Result<
 /// pane (`notify_run`, t-119309): the run the binding answers, else
 /// `run-current`'s. A window that cannot bind costs one warning line on
 /// stderr and the patience at most, never the put; one that does not answer at
-/// all is not asked its run as well. Asked before the line's lock is taken.
+/// all is not asked its run as well. Asked before the line's lock is taken,
+/// and the job is queued from when the asking is over: the ledger tells only
+/// an end bound no later than its job was put in, since another pane can read
+/// the job's id off the line once it is in it (review t-131848).
 fn bound_to_this_pane(mut job: Job) -> Job {
     let Some(to) = job.notify.clone() else {
         return job;
     };
     let in_a_run = to.starts_with(RUN_ADDRESS);
+    // Whether this pane's run is still to be asked: an address another run cannot find, no run yet.
+    let mut ask_run = !in_a_run && job.notify_run.is_none();
     if in_a_run || to.starts_with(WORKER_ADDRESS_PREFIX) {
         match bind(&job.id, &to, job.notify_run.as_deref()) {
             Ok(run) => {
                 if !in_a_run {
                     job.notify_run = Some(run);
                 }
-                return job;
+                ask_run = false;
             }
             Err(unbound) => {
                 eprintln!(
@@ -417,15 +422,14 @@ fn bound_to_this_pane(mut job: Job) -> Job {
                     job.id,
                     unbound.why
                 );
-                if !unbound.answered {
-                    return job;
-                }
+                ask_run &= unbound.answered;
             }
         }
     }
-    if !in_a_run && job.notify_run.is_none() {
+    if ask_run {
         job.notify_run = run_of_this_pane();
     }
+    job.queued_ms = now_ms();
     job
 }
 

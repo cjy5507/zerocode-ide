@@ -20,12 +20,15 @@
 //!   window stood (`line-notify`, F1 of the review t-131831): the window held
 //!   that verb to a `send`'s boundary, and the ledger tells the end only at the
 //!   address and in the run it bound, by a pane of the project the run is
-//!   written down as ([`zerocode_core::orchestration::Ledger::line_end_bound`]).
-//!   The record's own word is not enough: any process of the person's can
-//!   write one, and its folder is whatever folder `zo line add` ran in. An end
-//!   nobody bound is not told; the record keeps the failure, and the window
-//!   log says why. A record that names no job, or another job than its file,
-//!   is not read at all (`line::read_job`, F2).
+//!   written down as, with the binding filed before the job was put in
+//!   ([`zerocode_core::orchestration::Ledger::line_end_bound`], review
+//!   t-131848): `zo line add` binds first, and another pane reads a job's id
+//!   off the line only once the job is in it. The record's own word is not
+//!   enough: any process of the person's can write one, and its folder is
+//!   whatever folder `zo line add` ran in. An end nobody bound in time is not
+//!   told; the record keeps the failure, and the window log says why. A record
+//!   that names no job, or another job than its file, is not read at all
+//!   (`line::read_job`, F2).
 //! - **Facts only.** The job, how and when it ended, its code and its log, as
 //!   the line's record says them, and why the ledger tells it — never the
 //!   words whoever put the job in wrote of it: the ledger's voice is not theirs
@@ -157,7 +160,10 @@ fn ask(held: &LiveRuntime, line: &Line, end: &Job, now_ms: i64) -> Asked {
                 .messages()
                 .iter()
                 .any(|mail| mail.subject.as_str() == name);
-            (ledger.line_end_bound(&end.id, &to, &run), stands)
+            (
+                ledger.line_end_bound(&end.id, &to, &run, end.queued_ms),
+                stands,
+            )
         })
     }) else {
         return Asked::Again;
@@ -169,8 +175,9 @@ fn ask(held: &LiveRuntime, line: &Line, end: &Job, now_ms: i64) -> Asked {
     if !bound {
         project_scope::note(&format!(
             "the end of build line job {} was not told to {to} in {run}: no pane of {run}'s \
-             project bound it there (`line-notify`) — put in by a zo or under a window that \
-             does not bind, bound elsewhere, or refused at the project boundary",
+             project bound it there (`line-notify`) before the job was put in — put in by a zo \
+             or under a window that does not bind, bound elsewhere or only once the job was in \
+             the line, or refused at the project boundary",
             end.id
         ));
         return Asked::Settled;

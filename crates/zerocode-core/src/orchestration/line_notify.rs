@@ -17,9 +17,14 @@
 //!
 //! The ledger tells an end only when such an answer stands for that job, at
 //! the address and in the run the line's record names, in the project the run
-//! is written down as then ([`Ledger::line_end_bound`]). A window too old to
-//! know the verb, a `zo` too old to ask it, an answer the retention sweep has
-//! taken: the end is not told, and its record keeps that it was not.
+//! is written down as then, filed no later than the job was put in
+//! ([`Ledger::line_end_bound`]). That last is what binds a job to the pane
+//! that put it in (review t-131848): `zo line add` binds before it puts the
+//! job in and queues it from the answer, and another pane can read the job's
+//! id only off the line, once the job is in it — the format of an id says
+//! nothing of whose it is. A window too old to know the verb, a `zo` too old
+//! to ask it, an answer the retention sweep has taken, a binding filed after
+//! the job went in: the end is not told, and its record keeps that it was not.
 
 use super::{
     Ledger, RETRY_REQUEST, RUN_ADDRESS_PREFIX, ServedAnswer, Team, WORKER_ADDRESS_PREFIX, Words,
@@ -124,13 +129,18 @@ pub(super) fn bind(
 }
 
 impl Ledger {
-    /// Whether build line job `job`'s end is bound to be told at `to` in
-    /// `run`: an answer of `line-notify` stands under the job's own name —
-    /// whichever pane asked it — for that job, that address and that run, by a
-    /// pane of the project `run` is written down as now. A run this ledger
+    /// Whether build line job `job`'s end, the job put in at `put_ms` as the
+    /// line's record says, is bound to be told at `to` in `run`: an answer of
+    /// `line-notify` stands under the job's own name for that job, that
+    /// address and that run, by a pane of the project `run` is written down as
+    /// now, filed no later than `put_ms` (review t-131848). The pane that put
+    /// the job in bound its end before it put the job in; a pane that read the
+    /// id off the line bound it after, and its answer is never told by, though
+    /// it stands. An answer with no filing time cannot say which it was. The
+    /// ledger's clock and the line's are the one machine's. A run this ledger
     /// does not hold, or holds with no project, has none.
     #[must_use]
-    pub fn line_end_bound(&self, job: &str, to: &str, run: &str) -> bool {
+    pub fn line_end_bound(&self, job: &str, to: &str, run: &str, put_ms: i64) -> bool {
         let Some(project) = self.run(run).and_then(|held| held.project.as_ref()) else {
             return false;
         };
@@ -138,7 +148,10 @@ impl Ledger {
         self.served
             .iter()
             .filter(|held| {
-                held.request == name && held.verb.as_deref() == Some(VERB) && !held.is_tombstone()
+                held.request == name
+                    && held.verb.as_deref() == Some(VERB)
+                    && !held.is_tombstone()
+                    && held.filed_ms.is_some_and(|filed| filed <= put_ms)
             })
             .filter_map(|held| match &held.answer {
                 ServedAnswer::Inline(said) => serde_json::from_str::<Bound>(said).ok(),

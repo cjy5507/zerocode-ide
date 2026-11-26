@@ -21314,10 +21314,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         line_notify::VERB,
         "--job <id> --to <worker:…|run:…> [--run <id>] · `zo line add`'s own call: binds a build \
-         line job's end to this pane before the job runs, under --retry-request \
+         line job's end to this pane before it puts the job in, under --retry-request \
          zo-line-notify-<id>, held to a send's project boundary; when a window restart leaves \
          the line no pane to tell the end from, the ledger tells it there itself, and only \
-         then — it writes no letter now",
+         then — it writes no letter now, and tells no end bound after its job went in",
         Doing::Mutation,
     ),
     ("help", "this table", Doing::FreshRead),
