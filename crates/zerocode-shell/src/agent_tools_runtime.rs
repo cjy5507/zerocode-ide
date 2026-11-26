@@ -1453,6 +1453,11 @@ impl agent_teams::Host for TeamWindow {
         );
     }
 
+    /// The line the board draws: `zo`'s home's (t-131644).
+    fn build_line(&self) -> Option<zerocode_core::line::Line> {
+        zerocode_core::line::zo_home().map(|home| zerocode_core::line::Line::at(&home))
+    }
+
     /// The checkout this window put the pane in, read off the same two
     /// records `answer_team_command` already resolves a caller's tree from:
     /// the pane's launch environment first, its reported seat second.

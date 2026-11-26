@@ -1178,14 +1178,19 @@ fn send_args(job: &Job, to: &str, took: Duration) -> Vec<String> {
     let body = format!(
         "zo line {}: {what} — {} (rc {}, {}s)",
         job.id,
-        state_word(job.state),
+        job.state.word(),
         job.rc.unwrap_or(-1),
         took.as_secs()
     );
-    let name = format!("zo-line-{}", job.id);
-    let mut args: Vec<String> = ["send", "--to", to, "--type", "status", "--body", body.as_str(), "--retry-request", name.as_str()]
-        .map(str::to_owned)
-        .into();
+    // The end's name, as its retry name and as its subject: the window finds a letter about this end
+    // by it before it tells the end itself (t-131644).
+    let name = line::told_as(&job.id);
+    let mut args: Vec<String> = [
+        "send", "--to", to, "--type", "status", "--body", body.as_str(), "--retry-request", name.as_str(), "--subject",
+        name.as_str(),
+    ]
+    .map(str::to_owned)
+    .into();
     if let Some(run) = to.strip_prefix(RUN_ADDRESS).or(job.notify_run.as_deref()) {
         args.extend(["--run".to_owned(), run.to_owned()]);
     }
@@ -1231,19 +1236,6 @@ fn first_line(said: &[u8]) -> String {
     let text = String::from_utf8_lossy(said);
     let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("it said nothing");
     first.chars().take(SAID_CHARS).collect()
-}
-
-const fn state_word(state: JobState) -> &'static str {
-    match state {
-        JobState::Waiting => "waiting",
-        JobState::Running => "running",
-        JobState::Passed => "passed",
-        JobState::Failed => "failed",
-        JobState::Capped => "ended past its cap",
-        JobState::Stopped => "stopped",
-        JobState::Withdrawn => "withdrawn",
-        JobState::Lost => "lost",
-    }
 }
 
 /// How many of the jobs that ended a list shows unasked: the last ones, where
@@ -1677,6 +1669,7 @@ mod tests {
             assert_eq!(args[..5], ["send", "--to", to, "--type", "status"], "{args:?}");
             assert_eq!(args[6], format!("zo line {}: 검사 — waiting (rc -1, 3s)", job.id));
             assert_eq!(args[7..9], ["--retry-request".to_owned(), format!("zo-line-{}", job.id)]);
+            assert_eq!(args[9..11], ["--subject".to_owned(), format!("zo-line-{}", job.id)], "t-131644");
         }
     }
 

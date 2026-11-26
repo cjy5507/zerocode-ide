@@ -96,13 +96,13 @@ fn met(key: String) -> u64 {
 /// Whether a crossing earns a line now: the first time, then one time in
 /// fifty — a coordinator polling across a boundary writes a few lines a day,
 /// not one a minute — with how many times it was met.
-fn worth_a_line(key: String) -> Option<u64> {
+pub(super) fn worth_a_line(key: String) -> Option<u64> {
     let count = met(key);
     (count == 1 || count.is_multiple_of(50)).then_some(count)
 }
 
 /// One line in the window's black box.
-fn note(line: &str) {
+pub(super) fn note(line: &str) {
     if let Some(root) = BLACKBOX.get() {
         crate::note_window_event(root, &format!("orchestration: project boundary — {line}"));
     }

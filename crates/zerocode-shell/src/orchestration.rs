@@ -9133,6 +9133,10 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // first rest, here, before the pointer below can start its next turn
     // (t-46882).
     superseded::sweep(host);
+    // A build line job's end its line could not tell for a seat a restart
+    // retired is told by the ledger, before the pointer below names the
+    // letter (t-131644).
+    line_ends::sweep(host, now_ms);
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past

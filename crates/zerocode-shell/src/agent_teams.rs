@@ -1298,6 +1298,14 @@ pub trait Host {
     /// other hosts owe nothing.
     fn follow_account_switch(&self, _now_ms: i64) {}
 
+    /// The machine's build line, whose ends its line could not tell the beat
+    /// has the ledger tell (t-131644): `zo`'s own, for the window's host.
+    /// Other hosts have none, so no test reads the line of the machine it
+    /// runs on.
+    fn build_line(&self) -> Option<zerocode_core::line::Line> {
+        None
+    }
+
     /// Publish a restored worker only after its durable seat has moved, with
     /// the model its launch named when it named one (t-46882). Fake hosts
     /// need no renderer surface and therefore default to doing nothing.

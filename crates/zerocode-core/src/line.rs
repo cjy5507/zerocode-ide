@@ -108,6 +108,32 @@ impl JobState {
     pub const fn ended(self) -> bool {
         !matches!(self, Self::Waiting | Self::Running)
     }
+
+    /// The word a letter about the job says it stands at: the line's own
+    /// (`zo line`) and the ledger's when the line could not tell it
+    /// (t-131644).
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Capped => "ended past its cap",
+            Self::Stopped => "stopped",
+            Self::Withdrawn => "withdrawn",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+/// The name job `id`'s end is told under: the line's own send carries it as
+/// its retry name (t-118403) and as its subject, and the ledger's letter about
+/// an end the line could not tell carries it as its subject (t-131644) — one
+/// name a letter about that end is found by, whoever sent it.
+#[must_use]
+pub fn told_as(id: &str) -> String {
+    format!("zo-line-{id}")
 }
 
 /// How telling a job's end did not go (t-131644), written in its record by
