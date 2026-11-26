@@ -404,11 +404,13 @@ fn bound_to_this_pane(mut job: Job) -> Job {
     let Some(to) = job.notify.clone() else {
         return job;
     };
+    // One deadline for every question the put asks the window, the end of one that runs out included.
+    let until = Instant::now() + ASK_PATIENCE;
     let in_a_run = to.starts_with(RUN_ADDRESS);
     // Whether this pane's run is still to be asked: an address another run cannot find, no run yet.
     let mut ask_run = !in_a_run && job.notify_run.is_none();
     if in_a_run || to.starts_with(WORKER_ADDRESS_PREFIX) {
-        match bind(&job.id, &to, job.notify_run.as_deref()) {
+        match bind(&job.id, &to, job.notify_run.as_deref(), until) {
             Ok(run) => {
                 if !in_a_run {
                     job.notify_run = Some(run);
@@ -427,16 +429,19 @@ fn bound_to_this_pane(mut job: Job) -> Job {
         }
     }
     if ask_run {
-        job.notify_run = run_of_this_pane();
+        job.notify_run = run_of_this_pane(until);
     }
     job.queued_ms = now_ms();
     job
 }
 
-/// How long `zo line add` waits for the window to answer a binding or a
-/// `run-current` (t-131644): a window that hangs would hold every put. On
-/// 2026-11-26 `zerocode-orc run-current` took at most 44 ms in five tries, at
-/// a load average of 8 to 12; a window that is not there answers at once.
+/// How long `zo line add` waits for the window, all told (t-131644): the
+/// binding, the `run-current` it may ask after it, and ending a question that
+/// ran out — on Windows `taskkill`'s own wait — under one deadline, so a
+/// refusal late in it leaves the next question only what is left (review
+/// t-131848). A window that hangs would hold every put. On 2026-11-26
+/// `zerocode-orc run-current` took at most 44 ms in five tries, at a load
+/// average of 8 to 12; a window that is not there answers at once.
 const ASK_PATIENCE: Duration = Duration::from_secs(5);
 
 /// Why the window did not bind a job's end, and whether it answered at all.
@@ -446,11 +451,12 @@ struct Unbound {
 }
 
 /// Asks the window to bind job `id`'s end at `to` to this process's pane, in
-/// `run` when one is named: the run the binding is told in, or why not.
-fn bind(id: &str, to: &str, run: Option<&str>) -> Result<String, Unbound> {
+/// `run` when one is named, by `until`: the run the binding is told in, or
+/// why not.
+fn bind(id: &str, to: &str, run: Option<&str>, until: Instant) -> Result<String, Unbound> {
     let mut asked = ledger_command();
     asked.args(bind_args(id, to, run)).stdout(Stdio::piped()).stderr(Stdio::piped());
-    match process_tree::run_bounded(process_tree::as_a_question(&mut asked), ASK_PATIENCE) {
+    match process_tree::run_bounded_until(process_tree::as_a_question(&mut asked), until) {
         Ran::Ended { code: Some(0), stdout, .. } => stdout
             .as_deref()
             .and_then(|said| serde_json::from_str::<serde_json::Value>(said).ok())
@@ -464,7 +470,10 @@ fn bind(id: &str, to: &str, run: Option<&str>) -> Result<String, Unbound> {
             ),
             answered: true,
         }),
-        Ran::TimedOut => Err(Unbound { why: format!("no answer in {} s", ASK_PATIENCE.as_secs()), answered: false }),
+        Ran::TimedOut => Err(Unbound {
+            why: format!("no answer within the put's {} s", ASK_PATIENCE.as_secs()),
+            answered: false,
+        }),
         Ran::NotStarted(error) => Err(Unbound { why: format!("zerocode-orc did not start — {error}"), answered: true }),
     }
 }
@@ -1305,13 +1314,13 @@ fn ledger_command_on(path: Option<&OsStr>, endpoint: Option<&Path>, windows: boo
 }
 
 /// The run this process's pane stands in, as `zerocode-orc run-current` says:
-/// none when it stands in none, or the ledger cannot be asked in
-/// `ASK_PATIENCE`.
-fn run_of_this_pane() -> Option<String> {
+/// none when it stands in none, or the ledger cannot be asked by `until` —
+/// what is left of the put's `ASK_PATIENCE`.
+fn run_of_this_pane(until: Instant) -> Option<String> {
     let mut asked = ledger_command();
     asked.arg("run-current").stdout(Stdio::piped()).stderr(Stdio::null());
     let Ran::Ended { code: Some(0), stdout: Some(said), .. } =
-        process_tree::run_bounded(process_tree::as_a_question(&mut asked), ASK_PATIENCE)
+        process_tree::run_bounded_until(process_tree::as_a_question(&mut asked), until)
     else {
         return None;
     };

@@ -34,6 +34,16 @@ const TASKKILL_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(windows)]
 const TASKKILL_LOOK_EVERY: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// The most [`end_tree`] holds its caller: on Windows `taskkill`'s wait.
+#[cfg(windows)]
+const END_TREE_MOST: Duration = TASKKILL_WAIT;
+
+/// The most [`end_tree`] holds its caller: on unix nothing to speak of — a
+/// `SIGKILL` to the group, which no process refuses, and the collection of
+/// its head.
+#[cfg(not(windows))]
+const END_TREE_MOST: Duration = Duration::ZERO;
+
 /// `winbase.h`'s `CREATE_NO_WINDOW`: a console child started without a
 /// console window — the flag the window's `proc::quiet_command` sets too.
 #[cfg(windows)]
@@ -77,7 +87,8 @@ pub enum Ran {
         stderr: Option<String>,
     },
     /// It did not end within the limit, and was ended with every process it
-    /// started ([`end_tree`]).
+    /// started ([`end_tree`]) — or a deadline left it no time, and it was
+    /// never started ([`run_bounded_until`]).
     TimedOut,
     /// It could not be started.
     NotStarted(String),
@@ -132,6 +143,22 @@ pub fn run_bounded(command: &mut Command, limit: Duration) -> Ran {
             }
         }
     }
+}
+
+/// [`run_bounded`], over by `until` with the end of a run that runs out in it
+/// (t-131644): the question is given what is left of `until` but the most
+/// [`end_tree`] may hold the caller, so several questions under one deadline
+/// cannot add up past it. A deadline with no time left for a question starts
+/// none, and is [`Ran::TimedOut`].
+#[must_use]
+pub fn run_bounded_until(command: &mut Command, until: Instant) -> Ran {
+    let left = until
+        .saturating_duration_since(Instant::now())
+        .saturating_sub(END_TREE_MOST);
+    if left.is_zero() {
+        return Ran::TimedOut;
+    }
+    run_bounded(command, left)
 }
 
 /// Read one output to its end, or [`OUTPUT_CAP`], on a thread of its own.
@@ -254,5 +281,34 @@ mod tests {
             !crate::settings_file_lock::process_alive(grandchild),
             "the grandchild {grandchild} outlived its tree"
         );
+    }
+
+    /// A deadline is the whole wait (t-131644): a question that outlives it
+    /// is ended by it, and one asked with no time left is never started.
+    #[test]
+    fn a_question_is_over_by_its_deadline_and_one_with_no_time_left_never_starts() {
+        let began = Instant::now();
+        let ran = run_bounded_until(
+            Command::new("sleep").arg("30"),
+            began + Duration::from_millis(300),
+        );
+        assert_eq!(ran, Ran::TimedOut);
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "a 300 ms deadline held the caller {:?}",
+            began.elapsed()
+        );
+
+        let folder = tempfile::tempdir().expect("a folder");
+        let mark = folder.path().join("started");
+        let ran = run_bounded_until(
+            Command::new("/bin/sh")
+                .args(["-c", "touch \"$0\""])
+                .arg(&mark),
+            Instant::now(),
+        );
+        assert_eq!(ran, Ran::TimedOut);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!mark.exists(), "a question with no time left was started");
     }
 }
