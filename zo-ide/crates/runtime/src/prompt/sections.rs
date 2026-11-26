@@ -302,6 +302,8 @@ pub(super) fn get_grounding_in_code_section() -> String {
 /// Heading of the task-work section, which the finish rule closes.
 pub(super) const TASK_WORK_HEADING: &str = "# Task work";
 
+const VERIFY_WITH_ONE_TEST: &str = "Verify with one comprehensive test or script covering several cases instead of many one-off shell or `python -c` probes.";
+
 /// The finish rule (`api::FinishRule::On`): a passed check ends the work. The
 /// two lines the harness experiment registered, word for word, as bullets of
 /// `# Task work`.
@@ -335,7 +337,7 @@ pub(super) fn get_simple_doing_tasks_section(finish_rule: api::FinishRule) -> St
         "For a non-trivial diagnosis or decision, form two or three competing explanations and rule out the wrong ones with simulation or contrary evidence before committing.".to_string(),
         "Avoid introducing security vulnerabilities, including command injection, XSS and SQL injection.".to_string(),
         "For UI/frontend changes, run the app and verify visually in a browser or real TUI render. If impossible here, say so; compilation alone is not visual proof.".to_string(),
-        "Verify with one comprehensive test or script covering several cases instead of many one-off shell or `python -c` probes.".to_string(),
+        VERIFY_WITH_ONE_TEST.to_string(),
         "Report faithfully: include failures, name skipped checks, and state verified success plainly.".to_string(),
     ]);
     if finish_rule == api::FinishRule::On {
@@ -451,7 +453,7 @@ pub(super) fn get_turn_discipline_section(mode: super::PromptMode) -> Option<Str
 pub(super) fn get_headless_core_sections() -> Vec<String> {
     vec![
         format!("{}\n{}", super::CLAUDE_CODE_IDENTITY, api::HEADLESS_CORE_INTRO),
-        HEADLESS_CORE_WORKING.join("\n"),
+        get_headless_core_working_section(),
         HEADLESS_CORE_CARE.join("\n"),
         HEADLESS_CORE_FINAL.join("\n"),
     ]
@@ -461,17 +463,21 @@ pub(super) fn get_headless_core_sections() -> Vec<String> {
 /// before it is changed, the shell for searching and running, one sentence
 /// before the first call, failures understood before a retry, one closing
 /// check, claims from files read in the run, and no stop at a plan.
-const HEADLESS_CORE_WORKING: [&str; 9] = [
-    "# Working",
-    "- Read the task closely and do every item it lists. Match every literal it names exactly — file names, paths, formats, output text, case and punctuation — and follow its own instructions about output. Recheck them before you finish.",
-    "- Read the code you will change before changing it. Make the smallest change that fully does the task, in the style of the code around it; leave unrelated files alone and create a file only when the task needs it.",
-    "- Use Bash to list and search files and to run builds, tests and programs. Put independent reads and checks in one response so they run together.",
-    "- Before your first tool call, say your next action in one sentence; later, mention only findings that change your direction.",
-    "- When something fails, find out why before trying another way. If a tool call is refused, change course instead of repeating it.",
-    "- After your last change, check the result with one test or script that covers the task's cases, including the edge cases it implies, and read its output.",
-    "- Base claims about the code on files you read in this run.",
-    "- Do not stop at a plan or a promise: do the work, including retries and finding what is missing. Stop early only when the task cannot go on without a person; a long run is no reason to stop.",
-];
+fn get_headless_core_working_section() -> String {
+    [
+        "# Working",
+        "- Read the task closely and do every item it lists. Match every literal it names exactly — file names, paths, formats, output text, case and punctuation — and follow its own instructions about output. Recheck them before you finish.",
+        "- Read the code you will change before changing it. Make the smallest change that fully does the task, in the style of the code around it; leave unrelated files alone and create a file only when the task needs it.",
+        "- Use Bash to list and search files and to run builds, tests and programs. Put independent reads and checks in one response so they run together.",
+        "- Before your first tool call, say your next action in one sentence; later, mention only findings that change your direction.",
+        "- When something fails, find out why before trying another way. If a tool call is refused, change course instead of repeating it.",
+        "- After your last change, check the result with one test or script that covers the task's cases, including the edge cases it implies, and read its output.",
+        &format!("- {VERIFY_WITH_ONE_TEST}"),
+        "- Base claims about the code on files you read in this run.",
+        "- Do not stop at a plan or a promise: do the work, including retries and finding what is missing. Stop early only when the task cannot go on without a person; a long run is no reason to stop.",
+    ]
+    .join("\n")
+}
 
 /// What the core run takes care with when nobody can be asked: the task's
 /// words are the only permission (outside the working directory, shared

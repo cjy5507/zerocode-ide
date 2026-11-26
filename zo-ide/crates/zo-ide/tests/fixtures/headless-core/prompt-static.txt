@@ -9,6 +9,7 @@ You work alone on a coding task in the working directory. Nobody watches this ru
 - Before your first tool call, say your next action in one sentence; later, mention only findings that change your direction.
 - When something fails, find out why before trying another way. If a tool call is refused, change course instead of repeating it.
 - After your last change, check the result with one test or script that covers the task's cases, including the edge cases it implies, and read its output.
+- Verify with one comprehensive test or script covering several cases instead of many one-off shell or `python -c` probes.
 - Base claims about the code on files you read in this run.
 - Do not stop at a plan or a promise: do the work, including retries and finding what is missing. Stop early only when the task cannot go on without a person; a long run is no reason to stop.
 
