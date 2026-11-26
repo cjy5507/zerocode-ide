@@ -298,35 +298,6 @@ fn ended_on_windows(pid: u32) -> bool {
     read == WAIT_OBJECT_0
 }
 
-/// [`ended`] on every host this builds for — the Windows cross-compile builds
-/// it too, where it asks Win32: a child that was collected has ended, this
-/// process has not, and pid 0 says nothing.
-#[cfg(test)]
-mod an_ended_process {
-    #[test]
-    fn is_told_from_one_that_stands() {
-        #[cfg(unix)]
-        let mut command = std::process::Command::new("true");
-        #[cfg(windows)]
-        let mut command = {
-            let mut command = std::process::Command::new("cmd");
-            command.args(["/C", "exit"]);
-            command
-        };
-        let pid = {
-            let mut child = command
-                .stdin(std::process::Stdio::null())
-                .spawn()
-                .expect("a child");
-            child.wait().expect("it ends");
-            child.id()
-        };
-        assert!(super::ended(pid), "{pid} ended and was collected");
-        assert!(!super::ended(std::process::id()), "this process stands");
-        assert!(!super::ended(0), "pid 0 says nothing");
-    }
-}
-
 /// Unix only: the Windows tree is ended by `taskkill`, which this machine
 /// cannot run, so there is nothing here for a Windows build to compile.
 #[cfg(all(test, unix))]
@@ -394,5 +365,37 @@ mod tests {
         assert_eq!(ran, Ran::TimedOut);
         std::thread::sleep(Duration::from_millis(200));
         assert!(!mark.exists(), "a question with no time left was started");
+    }
+}
+
+/// [`ended`] on every host this builds for — the Windows cross-compile builds
+/// it too, where it asks Win32: a child that was collected has ended, this
+/// process has not, and pid 0 says nothing. Last in the file, after the unix
+/// tests: the window's source contract reads every child this file starts
+/// before them as shipped code, and holds each to `CREATE_NO_WINDOW`
+/// (`quiet_children`, AO #5309).
+#[cfg(test)]
+mod an_ended_process {
+    #[test]
+    fn is_told_from_one_that_stands() {
+        #[cfg(unix)]
+        let mut command = std::process::Command::new("true");
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "exit"]);
+            command
+        };
+        let pid = {
+            let mut child = command
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .expect("a child");
+            child.wait().expect("it ends");
+            child.id()
+        };
+        assert!(super::ended(pid), "{pid} ended and was collected");
+        assert!(!super::ended(std::process::id()), "this process stands");
+        assert!(!super::ended(0), "pid 0 says nothing");
     }
 }
