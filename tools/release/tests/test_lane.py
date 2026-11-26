@@ -2536,13 +2536,15 @@ class WindowsInstaller(LaneCase):
 
     def test_a_publish_told_to_ship_macos_alone_skips_it_aloud(self):
         self.lane.extra_env["RELEASE_WINDOWS"] = "0"
+        self.lane.extra_env["WIN_BLOCKS_PUBLISH"] = "1"
         self.lane.enqueue(SHA_A)
-        r = self.lane.run(PLUGIN_PUBKEY=self.pub)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=12)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         ph = self.lane.phase("build-win")
         self.assertEqual(ph["rc"], 0)
         self.assertIn("RELEASE_WINDOWS=0", ph["skipped"])
         self.assertFalse([e for e in self.events() if e.startswith("build-win")])
+        self.assertFalse([e for e in self.events() if e.startswith("clean ")])
         self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
         self.assertFalse([a for a in self.publish_assets() if "-setup.exe" in a])
 
@@ -2556,17 +2558,63 @@ class WindowsInstaller(LaneCase):
         self.assertFalse([e for e in self.events() if e.startswith("build-win")])
         self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
 
-    def test_no_room_for_it_skips_it_rather_than_refusing_the_release(self):
+    def test_disk_reclaimed_from_a_finished_target_lets_windows_build(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=15,
+                          DISK_FREE_GB_AFTER_CLEAN_ZO_RELEASE=17)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("skipped", self.lane.phase("build-win"))
+        events = self.events()
+        built = next(i for i, event in enumerate(events) if event.startswith("build-win target="))
+        self.assertLess(events.index("swap-zo"), events.index("clean zo-release"))
+        self.assertLess(events.index("clean zo-release"), built)
+        self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64", "windows-x86_64"])
+        self.assertIn(self.INSTALLER, self.publish_assets())
+
+    def test_no_room_after_reclaim_reports_why_the_windows_installer_is_missing(self):
+        board = self.report_zo()
         self.lane.enqueue(SHA_A)
         r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=12)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.lane.status()["outcome"], "green")
+        status = self.lane.status()
+        self.assertEqual(status["outcome"], "green")
+        self.assertIn("Windows 설치 파일 없이 나감: disk: 12G free", status["reason"])
         ph = self.lane.phase("build-win")
         self.assertEqual(ph["rc"], 0)
         self.assertIn("disk: 12G free", ph["skipped"])
+        self.assertIn("clean zo-release", self.events())
+        self.assertNotIn("clean win-release", self.events())
         self.assertFalse([e for e in self.events() if e.startswith("build-win")])
         self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
-        self.assertTrue(self.publish_assets(), "the macOS release still goes out")
+        self.assertNotIn(self.INSTALLER, self.publish_assets())
+        self.assertIn(f"== green ({status['reason']})", self.lane_log())
+        self.assertEqual(self.reported(board)[-1], ("end", {"--outcome": "passed", "--reason": status["reason"]}))
+
+    def test_no_room_after_reclaim_stops_the_publish_when_told_to(self):
+        self.lane.extra_env["WIN_BLOCKS_PUBLISH"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=12)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        status = self.lane.status()
+        self.assertEqual(status["outcome"], "red")
+        self.assertIn("disk: 12G free", status["reason"])
+        phase = self.lane.phase("build-win")
+        self.assertEqual(phase["rc"], 1)
+        self.assertNotIn("skipped", phase)
+        self.assertNotIn("clean win-release", self.events())
+        self.assertFalse([e for e in self.events() if e.startswith("publish ")])
+
+    def test_reclaim_keeps_targets_used_by_the_signed_bundle_and_legacy_publish(self):
+        self.lane.extra_env["APPLE_SIGNING_IDENTITY"] = "Developer ID Application: Fixture"
+        self.lane.extra_env["RELEASE_LEGACY_MANIFEST"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=12)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("clean root-release", self.events())
+        self.assertNotIn("clean zo-release", self.events())
+        assets = self.publish_assets()
+        self.assertIn("manifest.txt", assets)
+        self.assertIn(f"ZeroCode_{VERSION}_aarch64.dmg", assets)
 
     def test_on_a_tight_disk_its_target_goes_once_the_installer_is_out_of_it(self):
         self.lane.enqueue(SHA_A)
@@ -2589,7 +2637,9 @@ class WindowsInstaller(LaneCase):
         self.lane.enqueue(SHA_A)
         r = self.lane.run(PLUGIN_PUBKEY=self.pub)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn("clean win-release", self.events())
+        self.assertFalse([e for e in self.events() if e.startswith("clean ")])
+        self.assertEqual(self.lane.status()["reason"], "")
+        self.assertIn(self.INSTALLER, self.publish_assets())
 
 
 class GateOwed(LaneCase):
