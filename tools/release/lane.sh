@@ -41,7 +41,7 @@ MAX_SOLO_JUDGED=4           # up to this many UNLISTED red names (root+zo togeth
                             # real regression fails solo too, and every run of the first day died on a
                             # NEW timing wait; more unlisted names at once is a real red. Names listed in
                             # flakes.txt never count: they fail as a cluster under load (1.3.27's six).
-RECLAIM_BELOW_GB=20         # after a gate target's last use in the run it is cleaned when free is under this: the
+RECLAIM_BELOW_GB=20         # after a target's last use in the run it is cleaned when free is under this: the
                             # build phases still need ~8 G above the floor (09-11 17:32: refused at 7 G with a
                             # finished 23 G root-gate on disk). A reclaimed gate starts cold next run (~+8 min).
 CALM_LOAD=12                # a gate starts once the 1-minute load average is at or under this (the lane
@@ -132,8 +132,8 @@ WIN_ARCH=x64                                   # tauri's NSIS name for it: ZeroC
 WIN_LANE=win-release                           # its target under $TARGETS, one of TARGET_LANES
 WIN_UPDATER_PLATFORM=windows-x86_64            # its latest.json platforms key (the updater looks for windows-x86_64-nsis first, then this one)
 WIN_INSTALLER_SH=tools/release/win-installer.sh   # in the sha's tree: a sha from before it builds no installer, said, never red
-WIN_ROOM_GB=6                                  # free above DISK_FLOOR_GB a cold Windows build needs (estimate: root-release 3.9G + zo-release 1.2G, 11-18); less and the phase is skipped aloud, so it never refuses the macOS publish behind it
-WIN_BLOCKS_PUBLISH=${WIN_BLOCKS_PUBLISH:-0}    # 0: a red build-win leaves the release macOS-only (the step stays red; Windows keeps its version); 1: it stops the publish
+WIN_ROOM_GB=6                                  # free above DISK_FLOOR_GB a cold Windows build needs (estimate: root-release 3.9G + zo-release 1.2G, 11-18)
+WIN_BLOCKS_PUBLISH=${WIN_BLOCKS_PUBLISH:-0}    # 0: a failed or disk-skipped build-win allows a macOS-only release, with a reason; 1: it stops the publish
 ZO_BUILD_TARGETS="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu"   # the manifest's rows in install.sh's order; the first is the host
 BUILD_APP_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'   # the local install build makes no updater artifacts (tauri-cli refuses the key without plugins.updater); bundle-updater is the phase that does
 COMPUTER_USE_HELPER='ZeroCode Computer Use.app'   # native UI helper under bundle Resources
@@ -290,13 +290,14 @@ RECEIPT_JUDGED=   # the failures a receipt that stood cleared solo for a gate it
 STALLED=null      # status.json's `stalled` while a gate's recipe writes nothing past its say time (watch_gate), else null
 WIN_INSTALLER=    # this run's Windows installer (build-win): the only one bundle-updater signs, never one an earlier run left
 WIN_SHIPPED=0     # 1 once bundle-updater put that installer, its .sig and its feed row under out/ — publish sends the three or none
-WIN_RED=          # a red build-win that left the release macOS-only, in words: a green run's reason (status.json, the end line, the board)
+WIN_RED=          # why build-win left the release macOS-only (status.json, the end line, the board)
+DRY_DISK_FREE_GB=  # a stubbed reading after a target was cleaned in this phase
 
 measure_disk() {
   if is_dry; then
     local phase_key
     phase_key=$(printf '%s' "${PHASE:-}" | tr '[:lower:]-' '[:upper:]_')
-    DISK_FREE_GB=$(stub "DISK_FREE_GB_$phase_key" "$(stub DISK_FREE_GB 100)")
+    DISK_FREE_GB=${DRY_DISK_FREE_GB:-$(stub "DISK_FREE_GB_$phase_key" "$(stub DISK_FREE_GB 100)")}
   else DISK_FREE_GB=$(df -g / | awk 'NR==2{print $4}'); fi
   DISK_FREE_GB=${DISK_FREE_GB:-0}
 }
@@ -344,7 +345,10 @@ write_status() {
     "$(json_str "$VERSION")" "$(json_str "$UPDATER_PUBKEY")" "$(json_str "$RELEASE_GIT_COMMON_DIR")" "$PLAN_JSON" "$STALLED" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
-phase_begin() { PHASE=$1; PHASE_T0=$(now_s); write_status; report_build step --start "$PHASE"; log "== $PHASE"; }
+phase_begin() {
+  PHASE=$1; PHASE_T0=$(now_s); DRY_DISK_FREE_GB=
+  write_status; report_build step --start "$PHASE"; log "== $PHASE"
+}
 phase_end() { # NAME RC [SECS] — a phase that set SKIP did nothing, and says why; a gate a receipt shaped says what it did (RECEIPT)
   local name=$1 rc=$2 secs=${3:-$(( $(now_s) - PHASE_T0 ))} said=
   if [ -n "$SKIP" ]; then said=",\"skipped\":\"$(json_str "$SKIP")\""
@@ -459,22 +463,47 @@ target_kb() {
 }
 clean_target() { # LANE — empty it, keep the directory
   stub_log "clean $1"
-  if is_dry; then rm -rf "$(target_dir "$1")"
+  if is_dry; then
+    rm -rf "$(target_dir "$1")" || return 1
+    DRY_DISK_FREE_GB=$(stub "DISK_FREE_GB_AFTER_CLEAN_$(upper "$1")" "$DRY_DISK_FREE_GB")
   else CARGO_TARGET_DIR=$(target_dir "$1") cargo clean --manifest-path "$SCRATCH/Cargo.toml" > /dev/null 2>&1 || rm -rf "$(target_dir "$1")"
   fi
   mkdir -p "$(target_dir "$1")"
 }
-# release_gate_target LANE — called once LANE's gate target has had its last use
-# in this run (its gate passed, or the solo judgments are done): on a tight disk
-# it goes now, before the floor judges the phases still to come.
+# release_gate_target LANE [NEEDED_GB] — clean a target after its last use, under
+# the reclaim threshold. A caller that needs less room can stop reclaiming sooner.
 release_gate_target() {
-  local kb
+  local kb below=${2:-$RECLAIM_BELOW_GB}
+  [ "$below" -le "$RECLAIM_BELOW_GB" ] || below=$RECLAIM_BELOW_GB
   measure_disk
-  [ "$DISK_FREE_GB" -lt "$RECLAIM_BELOW_GB" ] || return 0
+  [ "$DISK_FREE_GB" -lt "$below" ] || return 0
   # What goes is said, the folder and its size, before it goes.
   kb=$(target_kb "$1"); kb=${kb:-0}
-  log "released $1 ($(target_dir "$1"), $(( kb / 1024 ))M) — ${DISK_FREE_GB}G free < ${RECLAIM_BELOW_GB}G after its last use in this run"
+  log "released $1 ($(target_dir "$1"), $(( kb / 1024 ))M) — ${DISK_FREE_GB}G free < ${below}G after its last use in this run"
   clean_target "$1"
+}
+reclaim_finished_targets() { # NEEDED_GB — before Windows, only release targets whose last phase is past
+  local needed=$1 lane last_use before=" $PHASES "
+  before=${before%%" $PHASE "*}
+  for lane in $TARGET_LANES; do
+    [ "$DISK_FREE_GB" -lt "$needed" ] || break
+    case $lane in
+      root-gate|zo-gate) last_use=flakes ;;
+      root-release) last_use=bundle-updater ;;  # the sealed app or the distribution build
+      zo-release)
+        last_use=swap-zo
+        if [ "$RELEASE_LEGACY_MANIFEST" = 1 ]; then
+          last_use=publish
+        elif [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ "${ZO_STAGE_TARGET_DIR:-}" = "$(target_dir "$lane")" ]; then
+          last_use=bundle-updater
+        fi ;;
+      "$WIN_LANE") last_use=build-win ;;
+      *) continue ;;
+    esac
+    case " $before " in
+      *" $last_use "*) release_gate_target "$lane" "$needed"; measure_disk ;;
+    esac
+  done
 }
 # drop_incremental LANE — the incremental caches earlier runs left in LANE's target
 # (<profile>/incremental, and <triple>/<profile>/incremental for a cross build such as
@@ -1088,16 +1117,21 @@ win_asset() { printf 'ZeroCode_%s_%s-setup.exe' "$VERSION" "$WIN_ARCH"; }
 build_win_release() { # TARGET LOG SECRET — the sha's own script; the Google client in its environment alone
   with_oauth_secret "$3" env ZO_PROFILE="$ZO_PROFILE" bash "$SCRATCH/$WIN_INSTALLER_SH" "$SCRATCH" "$1" > "$2" 2>&1
 }
-# rc 0 built — WIN_INSTALLER names the copy under out/ — or skipped aloud (SKIP) · 1 red (WHY)
+# rc 0 built (WIN_INSTALLER) or intentionally skipped (SKIP) · 1 red · 2 no room (WHY)
 do_build_win() {
-  local target release built log="$OUT/build-win-$SHA8.log" secret rc in_tree=0
+  local target release built log="$OUT/build-win-$SHA8.log" secret rc in_tree=0 needed=$(( DISK_FLOOR_GB + WIN_ROOM_GB ))
   [ "$RELEASE_PUBLISH" = 1 ] || { SKIP="RELEASE_PUBLISH=0 (only a publish ships the Windows installer)"; return 0; }
   [ "$RELEASE_WINDOWS" = 1 ] || { SKIP="RELEASE_WINDOWS=0 (this publish ships macOS alone)"; return 0; }
   if is_dry; then in_tree=$(stub WIN_INSTALLER_IN_TREE 1); else [ -f "$SCRATCH/$WIN_INSTALLER_SH" ] && in_tree=1; fi
   [ "$in_tree" = 1 ] || { SKIP="$SHA8's tree has no $WIN_INSTALLER_SH (a sha from before the Windows installer)"; return 0; }
   measure_disk
-  [ "$DISK_FREE_GB" -ge $(( DISK_FLOOR_GB + WIN_ROOM_GB )) ] \
-    || { SKIP="disk: ${DISK_FREE_GB}G free < ${DISK_FLOOR_GB}G floor + ${WIN_ROOM_GB}G for the Windows build — the release goes out without it"; return 0; }
+  if [ "$DISK_FREE_GB" -lt "$needed" ]; then
+    reclaim_finished_targets "$needed"
+    if [ "$DISK_FREE_GB" -lt "$needed" ]; then
+      WHY="disk: ${DISK_FREE_GB}G free < ${DISK_FLOOR_GB}G floor + ${WIN_ROOM_GB}G for the Windows build"
+      return 2
+    fi
+  fi
   target=$(target_dir "$WIN_LANE"); release="$target/$WIN_TRIPLE/release"; built="$release/bundle/nsis/$(win_asset)"
   # Read here, for this build alone, as build-app reads it.
   secret=$(oauth_secret)
@@ -1701,14 +1735,20 @@ judge_sha() {
   # before the floor judges the phases still to come.
   phase_begin build-win
   do_build_win; rc=$?
-  [ -n "$SKIP" ] || release_gate_target "$WIN_LANE"
+  if [ "$rc" = 2 ]; then
+    if [ "$WIN_BLOCKS_PUBLISH" = 1 ]; then rc=1
+    else
+      rc=0; SKIP=$WHY
+      WIN_RED="Windows 설치 파일 없이 나감: $WHY"
+    fi
+  elif [ -z "$SKIP" ]; then release_gate_target "$WIN_LANE"; fi
   step_done build-win "$rc" || return $?
   if [ "$rc" != 0 ]; then
     [ "$WIN_BLOCKS_PUBLISH" = 1 ] && { red "build-win: $WHY"; return 1; }
     # Never a quiet macOS-only release: the run ends green with this as its reason.
     WIN_RED="build-win red — the release goes out without the Windows installer: $WHY"
-    log "$WIN_RED"
   fi
+  [ -z "$WIN_RED" ] || log "$WIN_RED"
 
   phase_begin bundle-updater
   do_bundle_updater; rc=$?

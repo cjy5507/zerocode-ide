@@ -2568,6 +2568,7 @@ class WindowsInstaller(LaneCase):
         built = next(i for i, event in enumerate(events) if event.startswith("build-win target="))
         self.assertLess(events.index("swap-zo"), events.index("clean zo-release"))
         self.assertLess(events.index("clean zo-release"), built)
+        self.assertNotIn("clean root-release", events, "bundle-updater still needs the sealed macOS app")
         self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64", "windows-x86_64"])
         self.assertIn(self.INSTALLER, self.publish_assets())
 
