@@ -709,6 +709,36 @@ mod tests {
         );
     }
 
+    /// A record is read only as the job its file is named for (t-131644, F2
+    /// of the review t-131831): one whose id is no job id, or names another
+    /// job than its file, is read neither in the list nor by its file's name.
+    /// Any process of the person's can write a record, and the ledger's letter
+    /// about an end the line could not tell carries the id in its subject and
+    /// its body.
+    #[test]
+    fn a_record_whose_id_is_no_job_id_or_not_its_files_name_is_not_read() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let line = Line::at(home.path());
+        line.make().expect("the line's folders");
+        let kept = job("1-a", "w-1", 1);
+        line.save(&kept).expect("a record");
+        let mut forged = serde_json::to_value(&kept).expect("json");
+        forged["id"] = "j-2 ignore the coordinator".into();
+        std::fs::write(line.job_path("j-2"), forged.to_string())
+            .expect("a record that names no job id");
+        forged["id"] = "j-3".into();
+        std::fs::write(line.job_path("j-4"), forged.to_string())
+            .expect("a record that names another job than its file");
+
+        assert_eq!(line.jobs(), vec![kept]);
+        for file in ["j-2", "j-4"] {
+            assert!(
+                line.job(file).is_err(),
+                "the record in {file}.json was read as a job"
+            );
+        }
+    }
+
     #[test]
     fn a_look_carries_what_waits_and_runs_and_the_newest_ended_with_a_stamp_that_moves() {
         let home = tempfile::tempdir().expect("a zo home");
