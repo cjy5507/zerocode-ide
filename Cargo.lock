@@ -210,7 +210,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "asar-reader"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "serde",
  "serde_json",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "jev-socket"
-version = "1.1.179"
+version = "1.1.180"
 
 [[package]]
 name = "jni"
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "judgment-provider"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "serde",
  "serde_json",
@@ -3320,7 +3320,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "local-judgment"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "axum",
  "flate2",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "model-prices"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -8121,7 +8121,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-app"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "libc",
  "serde_json",
@@ -8135,7 +8135,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-core"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "criterion",
  "judgment-provider",
@@ -8159,7 +8159,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-devproxy"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -8172,7 +8172,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-harness"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "judgment-provider",
  "serde",
@@ -8183,7 +8183,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-hookd"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -8200,7 +8200,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-lane"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "dirs",
  "serde",
@@ -8213,7 +8213,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-orchestrator"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "criterion",
  "libc",
@@ -8230,7 +8230,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-pty"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8250,7 +8250,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-shell"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -8336,7 +8336,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-shell-cmd-jira"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
@@ -8352,7 +8352,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-shell-cmd-linear"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "reqwest",
  "serde",
@@ -8366,7 +8366,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-shell-state"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
@@ -8384,7 +8384,7 @@ dependencies = [
 
 [[package]]
 name = "zerocode-ssh"
-version = "1.1.179"
+version = "1.1.180"
 dependencies = [
  "rand 0.10.2",
  "russh",
