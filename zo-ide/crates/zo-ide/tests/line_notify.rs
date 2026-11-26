@@ -27,6 +27,11 @@ use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
 const FLOOR_ENV: &str = "ZO_LINE_DISK_FLOOR_GIB";
 /// How long a test waits for the line before it says what did not happen.
 const PATIENCE: Duration = Duration::from_secs(60);
+/// The most `zo line add` takes on a window that cannot bind (t-131644): the one deadline it gives
+/// every question it asks the window, 5 s (`ASK_PATIENCE`), and 3 s of its own work on a loaded
+/// machine. A refusal four seconds late, then a `run-current` that does not answer, is 4 s and then
+/// 5 s more when each question has five seconds of its own.
+const PUT_ON_A_SILENT_WINDOW: Duration = Duration::from_secs(8);
 /// The pane the fake sees in the environment of the process that put the job in.
 const PANE: &str = "term-77";
 /// The run `PANE` stands in, as the fake's `run-current` answers it there.
@@ -46,12 +51,14 @@ const REFUSAL: &str = "orchestration: send changes the ledger, so it needs --ret
 /// A fake `zerocode-orc`. With `$ORC_BIND` set to `gone` it answers nothing at all, as when no window is
 /// there. Asked `line-notify` (t-131644), it writes its arguments one a line and the pane it was called
 /// from to `$ORC_SEEN.bound`, then answers as a window too old to know the verb (`$ORC_BIND` is
-/// `unknown`), does not answer for half a minute (`silent`), or binds — a second later when `$ORC_BIND`
-/// is `slow`: the job, the address and the run its `--run` names, else `$ORC_RUN`, refusing as the
-/// window does when there is none, and writing the second it answered in to `$ORC_SEEN.answered`.
-/// Asked `run-current`, it answers the run `$ORC_RUN` names, or that the pane stands in none, as the
-/// window does, and writes nothing. Any other verb it writes, its arguments one a line and the pane it
-/// was called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE` says so.
+/// `unknown`), does not answer for half a minute (`silent`), refuses four seconds later (`late`), or
+/// binds — a second later when `$ORC_BIND` is `slow`: the job, the address and the run its `--run`
+/// names, else `$ORC_RUN`, refusing as the window does when there is none, and writing the second it
+/// answered in to `$ORC_SEEN.answered`. Asked `run-current`, it answers the run `$ORC_RUN` names, or
+/// that the pane stands in none, as the window does, and writes nothing — or, with `$ORC_CURRENT` set
+/// to `silent`, does not answer for half a minute. Any other verb it writes, its arguments one a line
+/// and the pane it was called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE`
+/// says so.
 const FAKE_ORC: &str = r#"#!/bin/sh
 if [ "${ORC_BIND:-}" = gone ]; then printf '%s\n' 'zerocode-orc: no window answers here' >&2; exit 1; fi
 if [ "${1:-}" = line-notify ]; then
@@ -59,6 +66,7 @@ if [ "${1:-}" = line-notify ]; then
   case "${ORC_BIND:-}" in
     unknown) printf '%s\n' 'orchestration: unknown verb: line-notify — try `help`' >&2; exit 1 ;;
     silent) exec sleep 30 ;;
+    late) sleep 4; printf '%s\n' 'orchestration: the ledger is busy — try again' >&2; exit 1 ;;
     slow) sleep 1 ;;
   esac
   job= to= run="${ORC_RUN:-}"
@@ -72,6 +80,7 @@ if [ "${1:-}" = line-notify ]; then
   exit 0
 fi
 if [ "${1:-}" = run-current ]; then
+  if [ "${ORC_CURRENT:-}" = silent ]; then exec sleep 30; fi
   if [ -n "${ORC_RUN:-}" ]; then printf '{"runId":"%s","name":"fake"}\n' "$ORC_RUN"; exit 0; fi
   printf 'orchestration: no run in use — run-create or run-use first\n' >&2; exit 1
 fi
@@ -427,17 +436,24 @@ fn zo_line_add_puts_its_job_in_after_its_end_is_bound() {
 }
 
 /// Red → green (t-131644): a window that cannot bind a job's end — too old to know `line-notify`, not
-/// there at all, or not answering — costs `zo line add` one warning line and a few seconds at most,
-/// never the put: the job goes in, and its run is asked as before (`run-current`) of a window that
-/// answered at all.
+/// there at all, not answering, or refusing late — costs `zo line add` one warning line and one
+/// deadline at most, never the put: the job goes in, and its run is asked as before (`run-current`)
+/// of a window that answered at all, in what is left of that deadline (review t-131848: a refusal
+/// late in it no longer buys the run's question five seconds more).
 #[test]
 fn a_window_that_cannot_bind_costs_a_put_one_warning_line_and_not_the_put() {
     let fixture = Fixture::new();
-    for (how, run) in [("unknown", Some(PUT_RUN)), ("gone", None), ("silent", None)] {
+    // How the window answers the binding, how it answers `run-current`, and the run the job is told in.
+    let cases =
+        [("unknown", None, Some(PUT_RUN)), ("gone", None, None), ("silent", None, None), ("late", Some("silent"), None)];
+    for (how, current, run) in cases {
         let began = Instant::now();
-        let output = fixture
-            .zo(PANE, how)
-            .env("ORC_BIND", how)
+        let mut command = fixture.zo(PANE, how);
+        command.env("ORC_BIND", how);
+        if let Some(current) = current {
+            command.env("ORC_CURRENT", current);
+        }
+        let output = command
             .args(["line", "add", "--owner", how, "--cap", "90s", "--notify", "worker:w-7", "--", "sh", "-c", "exit 0"])
             .output()
             .expect("zo line add");
@@ -449,7 +465,7 @@ fn a_window_that_cannot_bind_costs_a_put_one_warning_line_and_not_the_put() {
         let warnings: Vec<&str> = said.lines().filter(|line| line.starts_with("zo line: warning")).collect();
         assert_eq!(warnings.len(), 1, "{how}: one warning line, not {}: {said}", warnings.len());
         assert!(warnings[0].contains(&job) && warnings[0].contains("did not bind"), "{how}: {said}");
-        assert!(took < Duration::from_secs(20), "{how}: zo line add waited {took:?} on a window that cannot bind");
+        assert!(took < PUT_ON_A_SILENT_WINDOW, "{how}: zo line add waited {took:?} on a window that cannot bind");
         let record = fixture.record(&job);
         assert_eq!(record["notify_run"].as_str(), run, "{how}: {record}");
         if how == "gone" {
