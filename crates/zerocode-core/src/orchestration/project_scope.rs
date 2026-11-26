@@ -543,7 +543,9 @@ pub fn reach(
             .value("--to-message")
             .and_then(|id| run.message(id))
             .map(|message| message.from.clone()),
-        Some("send") => words.value("--to").map(str::to_string),
+        // A build line job's end is bound to the address the line will tell it at
+        // (t-131644): held to the boundary a `send` there is held to.
+        Some("send" | super::line_notify::VERB) => words.value("--to").map(str::to_string),
         Some("ask") if words.value("--resume").is_none() => Some(
             words
                 .value("--to")

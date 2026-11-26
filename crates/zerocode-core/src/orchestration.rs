@@ -46,6 +46,7 @@ pub mod land_batch;
 pub mod land_check;
 pub mod land_record;
 pub mod landing_watch;
+pub mod line_notify;
 pub mod marked;
 pub mod process_sweep;
 mod progress;
@@ -21310,6 +21311,15 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         "[--ack <delivery>] [--types a,b] [--peek | --all] [--format] [--wait [--timeout-ms <n>]] · read the inbox",
         Doing::Inbox,
     ),
+    (
+        line_notify::VERB,
+        "--job <id> --to <worker:…|run:…> [--run <id>] · `zo line add`'s own call: binds a build \
+         line job's end to this pane before the job runs, under --retry-request \
+         zo-line-notify-<id>, held to a send's project boundary; when a window restart leaves \
+         the line no pane to tell the end from, the ledger tells it there itself, and only \
+         then — it writes no letter now",
+        Doing::Mutation,
+    ),
     ("help", "this table", Doing::FreshRead),
 ];
 
@@ -26513,6 +26523,18 @@ fn plan_inner(
                 }
             }
         }
+
+        /* A build line job's end bound to the pane that puts the job in (t-131644): the binding
+         * is the answer, filed under the job's own name by the receipt every named verb files;
+         * nothing else is written. */
+        line_notify::VERB => said(line_notify::bind(
+            ledger,
+            team,
+            pane,
+            &words,
+            (caller.as_str(), seat.as_str()),
+            project,
+        )?),
 
         "send" => {
             let run_id = bound(ledger, &words, &caller, &seat)?;

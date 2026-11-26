@@ -136,6 +136,16 @@ pub fn told_as(id: &str) -> String {
     format!("zo-line-{id}")
 }
 
+/// The name job `id`'s end is bound to the pane that puts the job in under
+/// (t-131644, F1 of the review t-131831): `zo line add` asks the ledger's
+/// `line-notify` with it as its retry name, and the ledger finds the answer it
+/// filed by it before it tells an end the line could not. Not [`told_as`]: a
+/// retry name is one request's, and the same pane tells the end under that one.
+#[must_use]
+pub fn bound_as(id: &str) -> String {
+    format!("zo-line-notify-{id}")
+}
+
 /// How telling a job's end did not go (t-131644), written in its record by
 /// the process that tried.
 ///

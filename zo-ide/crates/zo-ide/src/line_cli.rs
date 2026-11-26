@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use zerocode_core::agent_shims;
 use zerocode_core::line::{self, Class, Hold, Job, JobState, Line, Machine, NotifyFailed, Pause, Until};
+use zerocode_core::orchestration::{line_notify, WORKER_ADDRESS_PREFIX};
+use zerocode_core::process_tree::{self, Ran};
 use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
 
 use crate::build_cli::now_ms;
@@ -268,7 +270,7 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
             run_job(&line, &machine, &job.id, true).map(Ended::Ran)
         }
         Verb::Add(put) => {
-            let job = put_with_waiter(&line, &machine, told_in_this_panes_run(job_of(&put, cwd)))?;
+            let job = put_with_waiter(&line, &machine, bound_to_this_pane(job_of(&put, cwd)))?;
             let places = line::places(&line.jobs(), &|owner| line.last_end(owner), line.turn());
             put_receipt(&line, &job, json!({ "job": job.id, "place": places.get(&job.id) }))
         }
@@ -294,7 +296,8 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
                 notify_failed: None,
                 ..old
             };
-            let again = put_with_waiter(&line, &machine, again)?;
+            // A new job's end, bound by the pane that puts it in again, in the run its first was told in.
+            let again = put_with_waiter(&line, &machine, bound_to_this_pane(again))?;
             // A retry keeps its job's cap: a job that ended past it is told so before it runs into it again.
             put_receipt(&line, &again, json!({ "job": again.id, "retry_of": id }))
         }
@@ -385,12 +388,94 @@ fn put_with_waiter(line: &Line, machine: &MachineRules, mut job: Job) -> Result<
     Ok(job)
 }
 
-/// `job`, told in the run this process's pane stands in when its address is
-/// one another run cannot find — a worker, a pane (`notify_run`, t-119309).
-/// Asked before the line's lock is taken: the ledger may take seconds to answer.
-fn told_in_this_panes_run(mut job: Job) -> Job {
-    job.notify_run = job.notify.as_deref().filter(|to| !to.starts_with(RUN_ADDRESS)).and_then(|_| run_of_this_pane());
+/// `job`, its end bound by the window to this process's pane when the ledger
+/// could tell it at its address — a worker, a run's chair (`line-notify`,
+/// t-131644): a window restart leaves the line no pane to tell an end from, and
+/// the ledger tells only an end its pane bound. Told in the run this pane
+/// stands in when its address is one another run cannot find — a worker, a
+/// pane (`notify_run`, t-119309): the run the binding answers, else
+/// `run-current`'s. A window that cannot bind costs one warning line on
+/// stderr and the patience at most, never the put; one that does not answer at
+/// all is not asked its run as well. Asked before the line's lock is taken.
+fn bound_to_this_pane(mut job: Job) -> Job {
+    let Some(to) = job.notify.clone() else {
+        return job;
+    };
+    let in_a_run = to.starts_with(RUN_ADDRESS);
+    if in_a_run || to.starts_with(WORKER_ADDRESS_PREFIX) {
+        match bind(&job.id, &to, job.notify_run.as_deref()) {
+            Ok(run) => {
+                if !in_a_run {
+                    job.notify_run = Some(run);
+                }
+                return job;
+            }
+            Err(unbound) => {
+                eprintln!(
+                    "zo line: warning — the window did not bind {}'s end to this pane ({}); if it \
+                     restarts before the job ends, the ledger will not tell {to} how it ended",
+                    job.id,
+                    unbound.why
+                );
+                if !unbound.answered {
+                    return job;
+                }
+            }
+        }
+    }
+    if !in_a_run && job.notify_run.is_none() {
+        job.notify_run = run_of_this_pane();
+    }
     job
+}
+
+/// How long `zo line add` waits for the window to answer a binding or a
+/// `run-current` (t-131644): a window that hangs would hold every put. On
+/// 2026-11-26 `zerocode-orc run-current` took at most 44 ms in five tries, at
+/// a load average of 8 to 12; a window that is not there answers at once.
+const ASK_PATIENCE: Duration = Duration::from_secs(5);
+
+/// Why the window did not bind a job's end, and whether it answered at all.
+struct Unbound {
+    why: String,
+    answered: bool,
+}
+
+/// Asks the window to bind job `id`'s end at `to` to this process's pane, in
+/// `run` when one is named: the run the binding is told in, or why not.
+fn bind(id: &str, to: &str, run: Option<&str>) -> Result<String, Unbound> {
+    let mut asked = ledger_command();
+    asked.args(bind_args(id, to, run)).stdout(Stdio::piped()).stderr(Stdio::piped());
+    match process_tree::run_bounded(process_tree::as_a_question(&mut asked), ASK_PATIENCE) {
+        Ran::Ended { code: Some(0), stdout, .. } => stdout
+            .as_deref()
+            .and_then(|said| serde_json::from_str::<serde_json::Value>(said).ok())
+            .and_then(|said| said["run"].as_str().filter(|run| !run.is_empty()).map(str::to_owned))
+            .ok_or_else(|| Unbound { why: "the window answered no run".to_owned(), answered: true }),
+        Ran::Ended { code, stderr, .. } => Err(Unbound {
+            why: format!(
+                "exit {} — {}",
+                code.map_or_else(|| "by a signal".to_owned(), |code| code.to_string()),
+                first_line(stderr.unwrap_or_default().as_bytes())
+            ),
+            answered: true,
+        }),
+        Ran::TimedOut => Err(Unbound { why: format!("no answer in {} s", ASK_PATIENCE.as_secs()), answered: false }),
+        Ran::NotStarted(error) => Err(Unbound { why: format!("zerocode-orc did not start — {error}"), answered: true }),
+    }
+}
+
+/// The words `zo line add` binds job `id`'s end with: the address the line
+/// will tell it at, the run — a chair's own, else the one `run` names — and the
+/// job's own name, which the ledger finds the binding by.
+fn bind_args(id: &str, to: &str, run: Option<&str>) -> Vec<String> {
+    let name = line::bound_as(id);
+    let mut args: Vec<String> =
+        [line_notify::VERB, "--job", id, "--to", to, "--retry-request", name.as_str()].map(str::to_owned).into();
+    if let Some(run) = to.strip_prefix(RUN_ADDRESS).or(run) {
+        args.extend(["--run".to_owned(), run.to_owned()]);
+    }
+    args
 }
 
 /// The job a put makes, waiting from now.
@@ -1216,13 +1301,17 @@ fn ledger_command_on(path: Option<&OsStr>, endpoint: Option<&Path>, windows: boo
 }
 
 /// The run this process's pane stands in, as `zerocode-orc run-current` says:
-/// none when it stands in none, or the ledger cannot be asked.
+/// none when it stands in none, or the ledger cannot be asked in
+/// `ASK_PATIENCE`.
 fn run_of_this_pane() -> Option<String> {
-    let said = ledger_command().arg("run-current").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    if !said.status.success() {
+    let mut asked = ledger_command();
+    asked.arg("run-current").stdout(Stdio::piped()).stderr(Stdio::null());
+    let Ran::Ended { code: Some(0), stdout: Some(said), .. } =
+        process_tree::run_bounded(process_tree::as_a_question(&mut asked), ASK_PATIENCE)
+    else {
         return None;
-    }
-    run_named(&said.stdout)
+    };
+    run_named(said.as_bytes())
 }
 
 /// The run `run-current`'s answer names.

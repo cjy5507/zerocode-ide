@@ -16,14 +16,20 @@
 //! window observation for one seat takes (`seat_observation`, t-67064) — a
 //! worker of the run the job was put in from, or a run's chair.
 //!
-//! - **The wall.** Only when the job's checkout is in the project the run is
-//!   written down as, the run's recorded project the release sweep answers
-//!   for too (t-94842). A run of another project, or a run or a checkout whose
-//!   project is not known, is not told; the record keeps the failure, and the
-//!   window log says why.
-//! - **Facts only.** The job, how and when it ended, its code, its log, and
-//!   why the ledger tells it — never the words whoever put the job in wrote of
-//!   it: the ledger's voice is not theirs to borrow.
+//! - **The wall.** Only an end the pane that put the job in bound while its
+//!   window stood (`line-notify`, F1 of the review t-131831): the window held
+//!   that verb to a `send`'s boundary, and the ledger tells the end only at the
+//!   address and in the run it bound, by a pane of the project the run is
+//!   written down as ([`zerocode_core::orchestration::Ledger::line_end_bound`]).
+//!   The record's own word is not enough: any process of the person's can
+//!   write one, and its folder is whatever folder `zo line add` ran in. An end
+//!   nobody bound is not told; the record keeps the failure, and the window
+//!   log says why. A record that names no job, or another job than its file,
+//!   is not read at all (`line::read_job`, F2).
+//! - **Facts only.** The job, how and when it ended, its code and its log, as
+//!   the line's record says them, and why the ledger tells it — never the
+//!   words whoever put the job in wrote of it: the ledger's voice is not theirs
+//!   to borrow, and the record's facts are not the ledger's to vouch for.
 //! - **Once.** Under the end's name (`line::told_as`), which the line's own
 //!   letter carries as its subject too: not when a letter by that name stands
 //!   in the run, whoever sent it, and the ledger files one of its own a name.
@@ -33,11 +39,10 @@
 //! and the log.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use zerocode_core::line::{self, Job, Line};
-use zerocode_core::orchestration::project_scope::label;
 use zerocode_core::orchestration::{RUN_ADDRESS_PREFIX, WORKER_ADDRESS_PREFIX};
 use zerocode_orchestrator::runtime_actor::RuntimeError;
 
@@ -146,36 +151,27 @@ fn ask(held: &LiveRuntime, line: &Line, end: &Job, now_ms: i64) -> Asked {
         return Asked::Settled;
     };
     let name = line::told_as(&end.id);
-    let checkout = project_scope::folder_root(Path::new(&end.checkout));
     let Some(found) = with_ledger_seats(|ledger, _| {
         ledger.run(&run).map(|row| {
-            let project = row.project.as_ref().map(|project| project.root.clone());
             let stands = row
                 .messages()
                 .iter()
                 .any(|mail| mail.subject.as_str() == name);
-            (project, stands)
+            (ledger.line_end_bound(&end.id, &to, &run), stands)
         })
     }) else {
         return Asked::Again;
     };
     // A run this ledger does not hold, or a letter about the end already there.
-    let Some((project, false)) = found else {
+    let Some((bound, false)) = found else {
         return Asked::Settled;
     };
-    if project.is_none() || project != checkout {
+    if !bound {
         project_scope::note(&format!(
-            "the end of build line job {} was not told to {to} in {run}: the job's checkout {} \
-             is in {}, and {run} is {} — the ledger tells no run the end of a job in another \
-             or an unidentified project",
-            end.id,
-            end.checkout,
-            checkout
-                .as_deref()
-                .map_or_else(|| "an unidentified project".to_string(), label),
-            project
-                .as_deref()
-                .map_or_else(|| "an unidentified project".to_string(), label),
+            "the end of build line job {} was not told to {to} in {run}: no pane of {run}'s \
+             project bound it there (`line-notify`) — put in by a zo or under a window that \
+             does not bind, bound elsewhere, or refused at the project boundary",
+            end.id
         ));
         return Asked::Settled;
     }
@@ -204,7 +200,8 @@ fn ask(held: &LiveRuntime, line: &Line, end: &Job, now_ms: i64) -> Asked {
     }
 }
 
-/// The letter: the facts of the end, and why the ledger tells it.
+/// The letter: the facts of the end as the line's record says them — the
+/// ledger did not see the job run — and why the ledger tells it.
 fn letter(line: &Line, end: &Job) -> String {
     let code = end
         .rc
@@ -214,9 +211,9 @@ fn letter(line: &Line, end: &Job) -> String {
         zerocode_core::civil::iso_utc_of,
     );
     format!(
-        "zo line {}: {} ({code}) at {at}; its log is {}. The line could not tell this end: the \
-         pane that put the job in held a seat of a window that has restarted since, so the \
-         ledger tells it.",
+        "zo line {}: by the line's record, {} ({code}) at {at}; its log is {}. The line could \
+         not tell this end: the pane that put the job in held a seat of a window that has \
+         restarted since, so the ledger tells it at the address that pane bound it to.",
         end.id,
         end.state.word(),
         line.log_path(&end.id).display(),
