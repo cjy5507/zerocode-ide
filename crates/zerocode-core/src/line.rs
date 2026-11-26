@@ -110,6 +110,29 @@ impl JobState {
     }
 }
 
+/// How telling a job's end did not go (t-131644), written in its record by
+/// the process that tried.
+///
+/// The teller signs with the seat of the pane that put the job in — a job's
+/// waiter keeps that pane's environment — and a window restart mints every
+/// seat anew: an end told after a restart, of a job put in before it, is
+/// refused by the new window before anything is planned, so it never lands
+/// late. `window_gone` is that case seen at the moment of the failure, and
+/// the window tells such an end itself; any other failure stays here, and in
+/// the log's last line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyFailed {
+    /// When the tell was tried and did not go.
+    pub at_ms: i64,
+    /// The log's last line's reason: how the ledger's command exited and the
+    /// first thing it said, or why it did not start.
+    pub why: String,
+    /// The window process the teller's seat came from (its environment's
+    /// `ZEROCODE_WINDOW_PID`) had ended when the tell was tried.
+    #[serde(default)]
+    pub window_gone: bool,
+}
+
 /// One job on the line, as zo writes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
@@ -142,6 +165,11 @@ pub struct Job {
     /// none, and is told as it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_run: Option<String>,
+    /// Telling `notify` how the job ended did not go (t-131644): the line's
+    /// word for it, beside the log's last line. A record written before it,
+    /// or of an end that was told, has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_failed: Option<NotifyFailed>,
     pub state: JobState,
     pub queued_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -623,6 +651,38 @@ mod tests {
         assert_eq!(back, told);
     }
 
+    /// A record written before t-131644 has no `notify_failed` and reads as
+    /// one with none, and none is not written; the line's word on an end it
+    /// could not tell reads back whole, and one that names no `window_gone`
+    /// reads as a window that stood.
+    #[test]
+    fn a_tell_that_did_not_go_reads_back_and_none_is_not_written() {
+        let old = r#"{"id":"j-1","project":"/p/.git","checkout":"/p","owner":"w-1","cap_secs":60,
+            "command":["true"],"notify":"worker:w-1","state":"passed","queued_ms":1}"#;
+        let job: Job = serde_json::from_str(old).expect("a record from before t-131644");
+        assert_eq!(job.notify_failed, None);
+        let written = serde_json::to_string(&job).expect("json");
+        assert!(!written.contains("notify_failed"), "{written}");
+        let untold = Job {
+            notify_failed: Some(NotifyFailed {
+                at_ms: 9,
+                why: "exit 1 — refused".into(),
+                window_gone: true,
+            }),
+            ..job
+        };
+        let back: Job = serde_json::from_str(&serde_json::to_string(&untold).expect("json"))
+            .expect("read back");
+        assert_eq!(back, untold);
+        let unnamed = r#"{"id":"j-2","project":"/p/.git","checkout":"/p","owner":"w-1","cap_secs":60,
+            "command":["true"],"state":"passed","queued_ms":1,"notify_failed":{"at_ms":9,"why":"x"}}"#;
+        let job: Job = serde_json::from_str(unnamed).expect("a record");
+        assert_eq!(
+            job.notify_failed.map(|failed| failed.window_gone),
+            Some(false)
+        );
+    }
+
     #[test]
     fn a_look_carries_what_waits_and_runs_and_the_newest_ended_with_a_stamp_that_moves() {
         let home = tempfile::tempdir().expect("a zo home");
@@ -643,6 +703,7 @@ mod tests {
             command: vec!["true".into()],
             notify: None,
             notify_run: None,
+            notify_failed: None,
             state,
             queued_ms: queued,
             started_ms: None,
@@ -700,6 +761,7 @@ mod tests {
             command: vec!["true".to_owned()],
             notify: None,
             notify_run: None,
+            notify_failed: None,
             state: JobState::Waiting,
             queued_ms,
             started_ms: None,

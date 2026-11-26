@@ -195,7 +195,7 @@ pub(super) fn verb_gate(
     if let Some((run_id, Some(project))) = &reach.run {
         let caller = caller
             .as_deref()
-            .ok_or_else(|| unidentified(verb, run_id))?;
+            .ok_or_else(|| unread_caller(verb, run_id, &seat, term))?;
         if project.inferred() && project.root == caller && reach.coordinator && for_run.is_none() {
             confirm(&held, run_id, project, caller, &seat, term, now_ms);
         } else if project.root != caller {
@@ -251,7 +251,7 @@ pub(super) fn verb_gate(
             (Some(caller), Some(project)) if caller != project.root => {
                 verb_crossing(verb, run_id, project, caller, &seat, term)?
             }
-            (None, Some(_)) => return Err(unidentified(verb, run_id)),
+            (None, Some(_)) => return Err(unread_caller(verb, run_id, &seat, term)),
             // A run with no project written down is reached through its
             // recipients, each judged above against this pane's project: a
             // letter to nobody placed is not answered across the unknown.
@@ -271,6 +271,30 @@ fn unidentified(verb: &str, run: &str) -> String {
     format!(
         "the project of this pane or {run} is not identified — `{verb}` is not answered across an unknown project. Ask from the run's own project pane."
     )
+}
+
+/// The refusal for a verb whose caller's project the window cannot read, into
+/// a run whose project is known (t-131644). A caller whose address no pane of
+/// this window holds is refused for what it is: a window restart mints every
+/// team anew, and a process that started before it — a build line job's
+/// waiter — keeps the address its pane had then. That was answered as an
+/// unidentified project, and on 2026-11-26 the coordinator went looking for a
+/// project problem behind three build line ends nobody heard. The refusal
+/// stands either way, and the window log keeps the first of each address.
+fn unread_caller(verb: &str, run: &str, seat: &str, term: Option<u32>) -> String {
+    if term.is_some() {
+        return unidentified(verb, run);
+    }
+    let reason = format!(
+        "the address {seat} that sent this `{verb}` is no pane in this window now — the window \
+         restarted after the process that sent it started (a process keeps the address its pane \
+         had when it started, as a build line job's waiter does), or its pane was closed. Nothing \
+         was done in {run}; send it from a pane open in this window."
+    );
+    if let Some(count) = worth_a_line(format!("gone caller {seat}")) {
+        note(&format!("{reason} (met {count} time(s))"));
+    }
+    reason
 }
 
 /// A federation run has no coordinator. Its explicit host team supplies the

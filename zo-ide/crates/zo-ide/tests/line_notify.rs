@@ -317,6 +317,25 @@ fn a_send_that_does_not_go_is_written_in_the_jobs_record() {
     assert!(record.get("notify_failed").is_none(), "a send that went left a mark: {record}");
 }
 
+/// t-131644: a retry is a job of its own. `zo line retry` copies the first job's record, and an
+/// end the first could not tell is the first's: the retry starts with no such mark, or the window
+/// would tell the retry's end once more for it.
+#[test]
+fn a_retry_carries_no_mark_of_an_end_its_first_could_not_tell() {
+    let fixture = Fixture::new();
+    let first = fixture.add_under(Some(a_pid_that_ended()), "worker:w-7", "exit 3", "untold", true);
+    fixture.marked(&first);
+    let output = fixture.zo(BOARD, "again").args(["line", "retry", &first]).output().expect("zo line retry");
+    assert!(output.status.success(), "zo line retry: {}", String::from_utf8_lossy(&output.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).expect("the receipt");
+    let again = receipt["job"].as_str().expect("the job's id").to_owned();
+    let record = fixture.record(&again);
+    assert!(record.get("notify_failed").is_none(), "the retry carries its first's mark: {record}");
+    // Its own end, told from the board, before the line's folder goes.
+    fixture.told(&again, "again");
+    fixture.settled(&again);
+}
+
 /// The line tells how a job it ended came to its end, too (t-118403, 11-20):
 /// a running job whose runner was gone, and a waiting job whose waiter was
 /// gone before its turn — both lost, told once, by the look that ended them,

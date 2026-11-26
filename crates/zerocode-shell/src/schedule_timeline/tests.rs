@@ -1577,6 +1577,7 @@ fn a_project_with_no_queue_shows_its_jobs_on_the_machines_line() {
         command: vec!["cargo".into(), "test".into()],
         notify: None,
         notify_run: None,
+        notify_failed: None,
         state,
         queued_ms: kst(8, 9, 0, 0),
         started_ms: slot.map(|_| kst(8, 9, 1, 0)),

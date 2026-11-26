@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use zerocode_core::agent_shims;
-use zerocode_core::line::{self, Class, Hold, Job, JobState, Line, Machine, Pause, Until};
+use zerocode_core::line::{self, Class, Hold, Job, JobState, Line, Machine, NotifyFailed, Pause, Until};
+use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
 
 use crate::build_cli::now_ms;
 
@@ -289,6 +290,8 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
                 retry_of: Some(old.id.clone()),
                 stop_asked: false,
                 ended_by: None,
+                // An end the first could not tell is the first's: the window tells it once (t-131644).
+                notify_failed: None,
                 ..old
             };
             let again = put_with_waiter(&line, &machine, again)?;
@@ -407,6 +410,7 @@ fn job_of(put: &Put, cwd: &Path) -> Job {
         command: put.command.clone(),
         notify: put.notify.clone(),
         notify_run: None,
+        notify_failed: None,
         state: JobState::Waiting,
         queued_ms: now,
         started_ms: None,
@@ -1109,8 +1113,8 @@ fn tee(output: Option<impl io::Read + Send + 'static>, log: &File, to_err: bool)
 /// look that ended the job (`tell_ended`) — in the run the address is found in
 /// (`send_args`). `send` changes the ledger, so it goes under a name the window
 /// can take again unchanged, the job's: without one the window refused every
-/// end the line told (t-118403). A send that does not go is left, and the job's
-/// log says so as its last line.
+/// end the line told (t-118403). A send that does not go is left: the job's
+/// log says so as its last line, and its record says it too (`untold`).
 fn notify(line: &Line, job: &Job, took: Duration) {
     let Some(to) = job.notify.as_deref() else {
         return;
@@ -1132,6 +1136,36 @@ fn notify(line: &Line, job: &Job, took: Duration) {
     if let Ok(log) = OpenOptions::new().create(true).append(true).open(&path) {
         close_log(&log, &path, &format!("zo line: telling {to} how the job ended did not go: {why}"));
     }
+    untold(line, &job.id, why, teller_window_gone());
+}
+
+/// Writes in job `id`'s record that its end was not told (t-131644), under the
+/// line's lock, over the record as it stands now: when, `why`, and whether the
+/// window whose seat the teller signed with had ended. On 2026-11-25 and 26
+/// three ends a restart had left without a seat were refused and kept only in
+/// their logs, and the workers waiting on them waited on. The window reads
+/// this to tell such an end itself. A record that cannot be read or written
+/// keeps what the log says.
+fn untold(line: &Line, id: &str, why: String, window_gone: bool) {
+    let Ok(_lock) = lock(line) else {
+        return;
+    };
+    let Ok(mut job) = line.job(id) else {
+        return;
+    };
+    job.notify_failed = Some(NotifyFailed { at_ms: now_ms(), why, window_gone });
+    let _ = line.save(&job);
+}
+
+/// Whether the window this process's seat came from — the one its environment
+/// names (`WINDOW_PID_ENV`), whose pane put the job in or looked — has ended:
+/// a restart mints every seat anew, so a seat whose window is gone is one the
+/// window refuses (t-131644). A process no window names says none is gone.
+fn teller_window_gone() -> bool {
+    std::env::var(WINDOW_PID_ENV)
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .is_some_and(|pid| !alive(pid))
 }
 
 /// The words `notify` gives `zerocode-orc` to tell `to` how `job` ended. The
