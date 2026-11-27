@@ -119,25 +119,22 @@ fn todays_rule_reads_the_tables_the_product_already_warns_from() {
 /// not.
 #[test]
 fn the_places_a_command_names_outside_its_task_are_the_ones_stamped() {
-    // The home folder is read twice below, so for the test's span it is pinned to a folder
-    // outside the temporary roots: a build line's `HOME` may sit under /tmp, which the rule
-    // counts as the task's own, and `~/scratch` would then be no outside place. The guard holds
-    // the crate's lock, as a test beside this one may point `HOME` at a config home of its own.
-    let _home = crate::tests::EnvGuard::set("HOME", "/work/home");
+    // Use a home outside the temporary roots so `~/scratch` is counted as outside the task.
+    let (home_var, home) = if cfg!(windows) {
+        ("USERPROFILE", r"C:\work\home")
+    } else {
+        ("HOME", "/work/home")
+    };
+    let _home = crate::tests::EnvGuard::set(home_var, home);
+    let home = Path::new(home);
     // A folder outside the temporary ones, so `..` of it is not a scratch path.
     let cwd = Path::new("/work/zo");
-    let home = PathBuf::from(std::env::var_os("HOME").expect("a home"));
     let outside = outside_places(
         "rm -rf ~/scratch build /tmp/zo-x ../sibling/*.rs ../sibling/keep && echo 1 2>> /etc/zo.log",
         cwd,
         cwd,
     );
-    // The shared temporary folder is scratch (the rule above): a home that sits
-    // under it, as a build job's temporary home does, has its own `scratch` there.
-    let mut expected = vec![home.join("scratch"), cwd.join("../sibling/keep"), PathBuf::from("/etc/zo.log")];
-    if home.starts_with(zerocode_core::jev::tool_guard::SHARED_TEMP_DIR) {
-        expected.remove(0);
-    }
+    let expected = vec![home.join("scratch"), cwd.join("../sibling/keep"), PathBuf::from("/etc/zo.log")];
     assert_eq!(outside, expected);
     assert_eq!(
         named_places("echo x 2>>'/etc/a b' > out.txt; ls -la"),
