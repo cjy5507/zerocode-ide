@@ -38498,6 +38498,14 @@ const flatTranscript = await page.evaluate(async () => {
   const face = document.getElementById("worker-view");
   const list = face?.querySelector(".helper-turns");
   seen.opened = Boolean(list);
+  // A long conversation stands its earlier turns in steps after the first frame (`openHeldTurns`, b2eae66ce):
+  // the briefing and the 400 rows read below are the whole page's, so the steps are waited for, as the measuring
+  // tool waits (conversation-perf.mjs). The 40 ms above was the whole open before the steps; on a hosted runner
+  // the second step had often not stood the briefing by then, and `getComputedStyle(brief)` threw (16 of the 71
+  // sampled CI browser jobs after b2eae66ce, none of the 24 before it).
+  for (let wait = 0; wait < 200 && list?.__openFloor !== null && list?.__openFloor !== undefined; wait += 1) {
+    await new Promise((done) => setTimeout(done, 10));
+  }
   // The turns alone: the status row is the list's own last child now (the
   // extension's spinner row), and is not a turn.
   seen.count = list.querySelectorAll(":scope > [data-turn]").length;
