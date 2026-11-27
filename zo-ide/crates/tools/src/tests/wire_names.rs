@@ -85,8 +85,13 @@ fn the_wire_bytes_are_reported() {
 fn the_wire_shows_todays_general_names_and_fields() {
     let wire = wire_parameters();
     let baseline = claude_code_baseline();
+    // `Bash` does not expose `dangerouslyDisableSandbox` (sandbox policy is set
+    // by user configuration only, never by model input).
     // `Read`'s PDF page range and its over-size read: zo's reader has neither.
-    let not_in_zo: &[(&str, &[&str])] = &[("Read", &["pages", "allow_large"])];
+    let not_in_zo: &[(&str, &[&str])] = &[
+        ("Bash", &["dangerouslyDisableSandbox"]),
+        ("Read", &["pages", "allow_large"]),
+    ];
     for name in ["Bash", "Read", "Write", "Edit"] {
         let skipped = not_in_zo
             .iter()

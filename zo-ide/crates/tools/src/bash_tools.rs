@@ -60,8 +60,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "command": { "type": "string" },
                     "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default 120000; values below 1000 use it." },
                     "description": { "type": "string" },
-                    "run_in_background": { "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "type": "boolean" }
+                    "run_in_background": { "type": "boolean" }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -119,8 +118,8 @@ pub(crate) fn dispatch_result(
     name: &str,
     input: &Value,
 ) -> Option<Result<ToolExecutionResult, ToolError>> {
-    // A headless core session's shell reads no argument it does not show
-    // (`headless_core`); every other call is read as it came.
+    // Drop shell sandbox overrides on every profile (and `description` too in a
+    // headless core session); sandbox policy comes from user settings only.
     let shown = crate::headless_core::shown_shell_input(name, input);
     let input: &Value = &shown;
     // A per-agent context can pin the working directory (worktree isolation);
@@ -154,17 +153,6 @@ pub(crate) fn dispatch_result(
                 runtime::live_output::with_dispatch_key(tool_call_id, || {
                     let session_id = ctx.session_id();
                     from_value::<BashCommandInput>(input).and_then(|mut inp| {
-                        let roots = runtime::file_ops::additional_workspace_roots();
-                        if !roots.is_empty() {
-                            let directory = cwd.map_or_else(|| std::env::current_dir().unwrap_or_default(), Path::to_path_buf);
-                            let config = ConfigLoader::default_for(&directory).load().map_err(|error| ToolError::Execution(error.to_string()))?;
-                            let mut mounts = inp.allowed_mounts.take().unwrap_or_else(|| config.sandbox().allowed_mounts.clone());
-                            mounts.extend(roots.iter().map(|root| root.to_string_lossy().into_owned()));
-                            inp.allowed_mounts = Some(mounts);
-                            if inp.filesystem_mode.unwrap_or(config.sandbox().filesystem_mode.unwrap_or_default()) != runtime::FilesystemIsolationMode::Off {
-                                inp.filesystem_mode = Some(runtime::FilesystemIsolationMode::AllowList);
-                            }
-                        }
                         if ctx.inspection_shell() {
                             if inp.run_in_background == Some(true) {
                                 return Err(ToolError::PermissionDenied { tool: name.to_string(), reason: "Inspection Bash runs one local query in the foreground.".to_string() });
@@ -793,7 +781,6 @@ fn backgrounded_command_output(
         background_output_held: None,
         backgrounded_by_user: Some(true),
         assistant_auto_backgrounded: Some(false),
-        dangerously_disable_sandbox: None,
         return_code_interpretation: None,
         no_output_expected: Some(!output_captured),
         structured_content: None,
@@ -817,7 +804,6 @@ fn completed_command_output(output: &Output, sandbox_status: SandboxStatus) -> B
         background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
         return_code_interpretation: output
             .status
             .code()
@@ -848,7 +834,6 @@ fn timed_out_command_output(
         background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
         return_code_interpretation: Some(runtime::CommandEnding::timed_out_word()),
         no_output_expected: Some(false),
         structured_content: None,
@@ -1344,11 +1329,6 @@ mod tests {
             timeout: None,
             description: None,
             run_in_background: None,
-            dangerously_disable_sandbox: None,
-            namespace_restrictions: None,
-            isolate_network: None,
-            filesystem_mode: None,
-            allowed_mounts: None,
             cwd: None,
         }
     }

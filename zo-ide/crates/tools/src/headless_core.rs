@@ -74,6 +74,16 @@ fn write_text(edit_tool: api::EditToolForm) -> String {
     )
 }
 
+/// The shell's sandbox arguments, ignored on every profile: sandbox settings
+/// come from user configuration only, never from model tool input.
+const SANDBOX_SHELL_ARGUMENTS: [&str; 5] = [
+    "dangerouslyDisableSandbox",
+    "namespaceRestrictions",
+    "isolateNetwork",
+    "filesystemMode",
+    "allowedMounts",
+];
+
 /// The shell's arguments the core profile does not show, as a call spells
 /// them: its description and its sandbox switches. A call that carries one
 /// runs without it — refusing it would cost the run a step — so a command
@@ -116,22 +126,33 @@ fn core_definition(handler: &str, edit_tool: api::EditToolForm, mut definition: 
     definition
 }
 
-/// A call of the builtin `handler` as this process's session reads it: a
-/// core session's shell call without the arguments the core shell does not
-/// show, removed before anything reads the call; any other call as it came.
+/// A call of the builtin `handler` as this process's session reads it: a shell
+/// call drops model sandbox override arguments on every profile (and drops
+/// `description` too in a core session), removed before anything reads the
+/// call; any other tool's call passes through unchanged.
 pub(crate) fn shown_shell_input<'a>(handler: &str, input: &'a Value) -> Cow<'a, Value> {
-    if handler != CoreTool::Bash.handler() || shown().is_none() {
+    if handler != CoreTool::Bash.handler() {
         return Cow::Borrowed(input);
     }
-    without_hidden_shell_arguments(input)
+    let hidden: &[&str] = if shown().is_some() {
+        &HIDDEN_SHELL_ARGUMENTS
+    } else {
+        &SANDBOX_SHELL_ARGUMENTS
+    };
+    without_shell_arguments(input, hidden)
 }
 
+#[cfg(test)]
 fn without_hidden_shell_arguments(input: &Value) -> Cow<'_, Value> {
+    without_shell_arguments(input, &HIDDEN_SHELL_ARGUMENTS)
+}
+
+fn without_shell_arguments<'a>(input: &'a Value, hidden: &[&str]) -> Cow<'a, Value> {
     match input.as_object() {
-        Some(fields) if HIDDEN_SHELL_ARGUMENTS.iter().any(|argument| fields.contains_key(*argument)) => {
+        Some(fields) if hidden.iter().any(|argument| fields.contains_key(*argument)) => {
             let mut fields = fields.clone();
-            for argument in HIDDEN_SHELL_ARGUMENTS {
-                fields.remove(argument);
+            for argument in hidden {
+                fields.remove(*argument);
             }
             Cow::Owned(Value::Object(fields))
         }
@@ -189,6 +210,44 @@ mod tests {
         assert_eq!(*read, json!({"command": "echo hi", "run_in_background": true, "timeout": 5000, "__zo_tool_call_id": "call_0"}));
         let plain = json!({"command": "echo hi"});
         assert!(matches!(without_hidden_shell_arguments(&plain), std::borrow::Cow::Borrowed(_)), "a call without one is read as it came");
+    }
+
+    #[test]
+    fn non_core_shell_call_ignores_sandbox_arguments_while_keeping_description() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::show_headless_core_tools(None);
+        let call = json!({
+            "command": "echo hi",
+            "description": "list files",
+            "dangerouslyDisableSandbox": true,
+            "namespaceRestrictions": false,
+            "isolateNetwork": "no",
+            "filesystemMode": "off",
+            "allowedMounts": ["/"],
+            "run_in_background": true,
+            "timeout": 5000
+        });
+        let read = super::shown_shell_input("bash", &call);
+        for argument in [
+            "dangerouslyDisableSandbox",
+            "namespaceRestrictions",
+            "isolateNetwork",
+            "filesystemMode",
+            "allowedMounts",
+        ] {
+            assert!(read.get(argument).is_none(), "{argument} must be stripped for non-core profiles");
+        }
+        assert_eq!(
+            *read,
+            json!({
+                "command": "echo hi",
+                "description": "list files",
+                "run_in_background": true,
+                "timeout": 5000
+            })
+        );
     }
 
     #[test]

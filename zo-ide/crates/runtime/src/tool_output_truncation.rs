@@ -536,9 +536,6 @@ fn bash_digest_header(parsed: &BashCommandOutput) -> String {
     if parsed.assistant_auto_backgrounded == Some(true) {
         header_notes.push("auto_backgrounded".to_string());
     }
-    if parsed.dangerously_disable_sandbox == Some(true) {
-        header_notes.push("sandbox_disabled".to_string());
-    }
     if let Some(interp) = &parsed.return_code_interpretation {
         header_notes.push(format!("exit: {interp}"));
     }

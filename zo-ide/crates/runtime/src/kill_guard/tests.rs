@@ -232,7 +232,6 @@ mod real_run {
     use zerocode_core::shell_rule::kill::WINDOW_PID_ENV;
 
     use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
-    use crate::sandbox::FilesystemIsolationMode;
     use crate::{
         execute_bash, BashCommandInput, PermissionContext, PermissionMode, PermissionOutcome,
         PermissionOverride, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
@@ -738,11 +737,6 @@ mod real_run {
             timeout: Some(20_000),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(true),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
     }

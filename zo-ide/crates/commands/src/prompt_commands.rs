@@ -802,11 +802,6 @@ fn run_inline_command(
         timeout: shell.line_limit_ms,
         description: None,
         run_in_background: None,
-        dangerously_disable_sandbox: None,
-        namespace_restrictions: None,
-        isolate_network: None,
-        filesystem_mode: None,
-        allowed_mounts: None,
         cwd: Some(base_dir.to_path_buf()),
     };
     match runtime::execute_bash(input) {

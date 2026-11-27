@@ -114,7 +114,6 @@ fn blocked_output(violation: &WorkspaceScopeViolation) -> BashCommandOutput {
         background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
         return_code_interpretation: Some("preflight_blocked:workspace_scope".to_string()),
         no_output_expected: Some(false),
         structured_content: None,

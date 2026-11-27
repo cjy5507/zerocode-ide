@@ -811,13 +811,15 @@ impl SystemPromptBuilder {
     /// when the builder was handed no settings or no working directory (a
     /// micro-prompt, a test), which leaves such a prompt byte for byte as it was.
     ///
-    /// The bash tool's schema carries a `dangerouslyDisableSandbox` switch
-    /// whether or not a sandbox is on, and nothing else in the prompt said which
-    /// it was. With the sandbox off, the model read the switch as a sandbox: in
-    /// seven of ten benchmark transcripts it held back from installing what it
-    /// needed ("sandboxed maybe no network", "apt may fail due to permissions")
-    /// and worked around a missing tool instead — for eleven steps in one, and
-    /// past the time limit in another.
+    /// Historically the bash tool's schema carried a `dangerouslyDisableSandbox`
+    /// switch whether or not a sandbox was on, and nothing else in the prompt
+    /// said which it was. With the sandbox off, the model read the switch as a
+    /// sandbox: in seven of ten benchmark transcripts it held back from
+    /// installing what it needed ("sandboxed maybe no network", "apt may fail
+    /// due to permissions") and worked around a missing tool instead — for
+    /// eleven steps in one, and past the time limit in another. The switch is
+    /// now gone from the schema, and this line still tells the model upfront
+    /// whether the host restricts shell files/network or runs commands directly.
     ///
     /// The status is the one the bash tool resolves for a command that passes no
     /// switch of its own ([`resolve_sandbox_status`]), read from the same

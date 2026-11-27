@@ -695,3 +695,104 @@ fn a_redirected_sed_read_reads_as_the_read_tool_itself() {
     );
     assert!(shown.contains("\nline 2 of the notes\nline 3 of the notes\n"), "{shown}");
 }
+
+#[test]
+fn bash_tool_ignores_model_sandbox_override_arguments() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::show_headless_core_tools(None);
+
+    let bash_spec = crate::mvp_tool_specs()
+        .iter()
+        .find(|spec| spec.name == "bash")
+        .expect("bash spec");
+    let properties = bash_spec.input_schema["properties"]
+        .as_object()
+        .expect("bash schema properties");
+    for forbidden in [
+        "dangerouslyDisableSandbox",
+        "namespaceRestrictions",
+        "isolateNetwork",
+        "filesystemMode",
+        "allowedMounts",
+    ] {
+        assert!(
+            !properties.contains_key(forbidden),
+            "bash schema must not expose {forbidden}"
+        );
+    }
+
+    let config_home = temp_path("bash-sandbox-ignore-home");
+    let cwd = temp_path("bash-sandbox-ignore-cwd");
+    fs::create_dir_all(&config_home).expect("create config home");
+    fs::create_dir_all(&cwd).expect("create cwd");
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"sandbox":{"enabled":true,"namespaceRestrictions":false,"networkIsolation":true,"filesystemMode":"allow-list","allowedMounts":["logs"]}}"#,
+    )
+    .expect("write user settings");
+    let previous_config_home = std::env::var_os("ZO_CONFIG_HOME");
+    std::env::set_var("ZO_CONFIG_HOME", &config_home);
+
+    let override_call = json!({
+        "command": "printf 'still-sandboxed'",
+        "dangerouslyDisableSandbox": true,
+        "namespaceRestrictions": true,
+        "isolateNetwork": false,
+        "filesystemMode": "off",
+        "allowedMounts": ["/"]
+    });
+    let wrong_type_call = json!({
+        "command": "printf 'still-sandboxed'",
+        "dangerouslyDisableSandbox": "yes",
+        "isolateNetwork": "no",
+        "filesystemMode": 123
+    });
+
+    let via_wire = run_tool_in_cwd("Bash", &override_call, &cwd);
+    let via_wrong_type = run_tool_in_cwd("Bash", &wrong_type_call, &cwd);
+    let ctx = ToolContext::new().with_cwd(cwd.clone());
+    let via_direct_dispatch = crate::bash_tools::dispatch(&ctx, None, "bash", &override_call)
+        .expect("bash is a known tool");
+
+    match previous_config_home {
+        Some(value) => std::env::set_var("ZO_CONFIG_HOME", value),
+        None => std::env::remove_var("ZO_CONFIG_HOME"),
+    }
+    let _ = fs::remove_dir_all(&config_home);
+    let _ = fs::remove_dir_all(&cwd);
+
+    for (label, raw) in [
+        ("wire dispatch", via_wire),
+        ("wrong-type sandbox fields", via_wrong_type),
+        ("direct bash_tools::dispatch", via_direct_dispatch),
+    ] {
+        let raw = raw.unwrap_or_else(|err| panic!("{label}: {err}"));
+        let output: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(output["stdout"], "still-sandboxed", "{label}: {output}");
+        assert_eq!(output["sandboxStatus"]["enabled"], true, "{label}: {output}");
+        assert_eq!(output["sandboxStatus"]["requested"]["enabled"], true, "{label}: {output}");
+        assert_eq!(
+            output["sandboxStatus"]["requested"]["network_isolation"], true,
+            "{label}: {output}"
+        );
+        assert_eq!(
+            output["sandboxStatus"]["requested"]["namespace_restrictions"], false,
+            "{label}: {output}"
+        );
+        assert_eq!(
+            output["sandboxStatus"]["requested"]["filesystem_mode"], "allow-list",
+            "{label}: {output}"
+        );
+        assert_eq!(
+            output["sandboxStatus"]["requested"]["allowed_mounts"],
+            json!(["logs"]),
+            "{label}: {output}"
+        );
+        assert!(
+            output["dangerouslyDisableSandbox"].is_null(),
+            "{label}: {output}"
+        );
+    }
+}

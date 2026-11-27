@@ -32,16 +32,6 @@ pub struct BashCommandInput {
     pub description: Option<String>,
     #[serde(rename = "run_in_background")]
     pub run_in_background: Option<bool>,
-    #[serde(rename = "dangerouslyDisableSandbox")]
-    pub dangerously_disable_sandbox: Option<bool>,
-    #[serde(rename = "namespaceRestrictions")]
-    pub namespace_restrictions: Option<bool>,
-    #[serde(rename = "isolateNetwork")]
-    pub isolate_network: Option<bool>,
-    #[serde(rename = "filesystemMode")]
-    pub filesystem_mode: Option<FilesystemIsolationMode>,
-    #[serde(rename = "allowedMounts")]
-    pub allowed_mounts: Option<Vec<String>>,
     /// Working directory for the spawned command. `None` (the default and the
     /// wire behavior) runs in the live process cwd; a per-agent tool context
     /// sets it so `isolation:"worktree"` executes inside the agent's worktree
@@ -111,8 +101,6 @@ pub struct BashCommandOutput {
     pub backgrounded_by_user: Option<bool>,
     #[serde(rename = "assistantAutoBackgrounded")]
     pub assistant_auto_backgrounded: Option<bool>,
-    #[serde(rename = "dangerouslyDisableSandbox")]
-    pub dangerously_disable_sandbox: Option<bool>,
     #[serde(rename = "returnCodeInterpretation")]
     pub return_code_interpretation: Option<String>,
     #[serde(rename = "noOutputExpected")]
@@ -271,8 +259,7 @@ mod transport_tests {
         let count = shlex::try_quote(count.to_str().unwrap()).unwrap();
         execute_bash(BashCommandInput {
             command:format!("printf 'execution\\n' >> {count}; cat {reply}"), timeout:Some(5_000),
-            description:None, run_in_background:None, dangerously_disable_sandbox:Some(true),
-            namespace_restrictions:None, isolate_network:None, filesystem_mode:None, allowed_mounts:None,
+            description:None, run_in_background:None,
             cwd:Some(directory.to_path_buf()),
         }).unwrap()
     }
@@ -850,7 +837,7 @@ pub fn execute_bash_with_tasks(
         Some(dir) => dir,
         None => env::current_dir()?,
     };
-    let sandbox_status = sandbox_status_for_input(&input, &cwd);
+    let sandbox_status = sandbox_status_for_cwd(&cwd);
     // Disk preflight at the shared chokepoint: every agent/workflow bash run
     // funnels through here, so ENOSPC pressure is surfaced BEFORE the long
     // build that would otherwise die on it — a warning with headroom left,
@@ -889,7 +876,6 @@ pub fn execute_bash_with_tasks(
                 background_output_held: None,
                 backgrounded_by_user: Some(false),
                 assistant_auto_backgrounded: Some(false),
-                dangerously_disable_sandbox: input.dangerously_disable_sandbox,
                 return_code_interpretation: None,
                 no_output_expected: Some(false),
                 structured_content: None,
@@ -919,7 +905,6 @@ pub fn execute_bash_with_tasks(
             background_output_held: None,
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
-            dangerously_disable_sandbox: input.dangerously_disable_sandbox,
             return_code_interpretation: None,
             no_output_expected: Some(true),
             structured_content: None,
@@ -1160,7 +1145,7 @@ async fn execute_bash_async(
         Err(_) => {
             end_cut_run(child_pid, &spill).await;
             let stderr = timeout_stderr_with_background_advice(effective_timeout_ms, background);
-            return Ok(cut_output(&input, stderr, sandbox_status));
+            return Ok(cut_output(stderr, sandbox_status));
         }
     };
 
@@ -1195,7 +1180,6 @@ async fn execute_bash_async(
         background_output_held: held_output.then_some(true),
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
         return_code_interpretation,
         no_output_expected,
         structured_content: None,
@@ -1280,15 +1264,10 @@ async fn end_cut_run(child_pid: Option<u32>, spill: &Mutex<RawSpill>) {
 
 /// The result of a run its deadline cut: no streams, `stderr` saying why and
 /// what to do instead, and `interrupted` so the caller knows nothing finished.
-fn cut_output(
-    input: &BashCommandInput,
-    stderr: String,
-    sandbox_status: SandboxStatus,
-) -> BashCommandOutput {
+fn cut_output(stderr: String, sandbox_status: SandboxStatus) -> BashCommandOutput {
     BashCommandOutput {
         stderr,
         interrupted: true,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
         return_code_interpretation: Some(CommandEnding::timed_out_word()),
         no_output_expected: Some(true),
         sandbox_status: Some(sandbox_status),
@@ -1306,29 +1285,77 @@ fn spill_path(spill: Arc<Mutex<RawSpill>>) -> Option<String> {
         .map(|path| path.display().to_string())
 }
 
-fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
-    static CACHED_SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
+fn load_sandbox_config(cwd: &std::path::Path) -> SandboxConfig {
+    ConfigLoader::default_for(cwd).load().map_or_else(
+        |_| SandboxConfig::default(),
+        |runtime_config| runtime_config.sandbox().clone(),
+    )
+}
 
-    let config = CACHED_SANDBOX_CONFIG
-        .get_or_init(|| {
-            ConfigLoader::default_for(cwd).load().map_or_else(
-                |_| SandboxConfig::default(),
-                |runtime_config| runtime_config.sandbox().clone(),
-            )
-        })
-        .clone();
+struct CachedSandboxConfig {
+    cwd: PathBuf,
+    config_home: Option<std::ffi::OsString>,
+    config: SandboxConfig,
+}
+
+fn sandbox_status_for_config(config: &SandboxConfig, cwd: &std::path::Path) -> SandboxStatus {
+    let roots = crate::file_ops::additional_workspace_roots();
+    let (filesystem_mode_override, allowed_mounts_override) = if roots.is_empty() {
+        (None, None)
+    } else {
+        let mut mounts = config.allowed_mounts.clone();
+        mounts.extend(roots.iter().map(|root| root.to_string_lossy().into_owned()));
+        let mode = if config.filesystem_mode.unwrap_or_default() == FilesystemIsolationMode::Off {
+            None
+        } else {
+            Some(FilesystemIsolationMode::AllowList)
+        };
+        (mode, Some(mounts))
+    };
     let request = config.resolve_request(
-        input.dangerously_disable_sandbox.map(|disabled| !disabled),
-        input.namespace_restrictions,
-        input.isolate_network,
-        input.filesystem_mode,
-        input.allowed_mounts.clone(),
+        None,
+        None,
+        None,
+        filesystem_mode_override,
+        allowed_mounts_override,
     );
     resolve_sandbox_status_for_request_with_macos_seatbelt(
         &request,
         cwd,
         config.macos_seatbelt.unwrap_or(false),
     )
+}
+
+fn sandbox_status_for_cwd(cwd: &std::path::Path) -> SandboxStatus {
+    static CACHED_SANDBOX_CONFIG: OnceLock<Mutex<Option<CachedSandboxConfig>>> = OnceLock::new();
+
+    let config_home = env::var_os("ZO_CONFIG_HOME");
+    let cache = CACHED_SANDBOX_CONFIG.get_or_init(|| Mutex::new(None));
+    let config = {
+        let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = guard.as_ref() {
+            if cached.cwd == cwd && cached.config_home == config_home {
+                cached.config.clone()
+            } else {
+                let loaded = load_sandbox_config(cwd);
+                *guard = Some(CachedSandboxConfig {
+                    cwd: cwd.to_path_buf(),
+                    config_home,
+                    config: loaded.clone(),
+                });
+                loaded
+            }
+        } else {
+            let loaded = load_sandbox_config(cwd);
+            *guard = Some(CachedSandboxConfig {
+                cwd: cwd.to_path_buf(),
+                config_home,
+                config: loaded.clone(),
+            });
+            loaded
+        }
+    };
+    sandbox_status_for_config(&config, cwd)
 }
 
 /// User-declared `settings.env`, cached once per process exactly like
@@ -1893,7 +1920,7 @@ fn fail_closed_if_sandbox_unavailable(sandbox_status: &SandboxStatus) -> io::Res
     // the "frozen" 5-minute retry loop bug).
     if let Some(reason) = crate::sandbox::current_sandbox_unavailability(sandbox_status) {
         return Err(io::Error::other(format!(
-            "sandbox requested but unavailable: {reason}. Set dangerouslyDisableSandbox=true or sandbox.enabled=false to run without sandbox."
+            "sandbox requested but unavailable: {reason}. Set sandbox.enabled=false to run without sandbox."
         )));
     }
     Ok(())
@@ -1942,7 +1969,7 @@ mod tests {
         default_bash_timeout_ms, execute_bash, execute_bash_with_tasks, BashCommandInput,
         DEFAULT_BASH_TIMEOUT_MS, TOOL_CHILD_ENV,
     };
-    use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
+    use crate::sandbox::{FilesystemIsolationMode, SandboxConfig, SandboxStatus};
     use crate::task_registry::{TaskReach, TaskRegistry, TaskStatus};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -2023,11 +2050,6 @@ mod tests {
             timeout,
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         }
     }
@@ -2103,8 +2125,8 @@ mod tests {
         }
     }
 
-    /// A run as the bash tool starts it, with the sandbox off, so that only the
-    /// wait and the end of the process group are under test (t-19897).
+    /// A run as the bash tool starts it, so that only the wait and the end of
+    /// the process group are under test (t-19897).
     #[cfg(unix)]
     fn unsandboxed(command: &str, timeout: u64) -> BashCommandInput {
         BashCommandInput {
@@ -2112,11 +2134,6 @@ mod tests {
             timeout: Some(timeout),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(true),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         }
     }
@@ -2947,11 +2964,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
         .expect("bash command should execute");
@@ -2984,11 +2996,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(true),
-            namespace_restrictions: None,
-            isolate_network: None,
-            filesystem_mode: None,
-            allowed_mounts: None,
             cwd: Some(canonical.clone()),
         })
         .expect("bash command should execute");
@@ -3014,11 +3021,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
         .expect("bash command should execute");
@@ -3038,11 +3040,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
         .expect("bash command should execute");
@@ -3113,11 +3110,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         });
         match previous {
@@ -3142,11 +3134,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
         .expect("bash command should execute");
@@ -3155,22 +3142,80 @@ mod tests {
     }
 
     #[test]
-    fn disables_sandbox_when_requested() {
+    fn disables_sandbox_when_configured_in_settings() {
+        let _lock = crate::test_env_lock();
+        let config_home = tempfile::tempdir().expect("config home");
+        std::fs::write(
+            config_home.path().join("settings.json"),
+            r#"{"sandbox":{"enabled":false}}"#,
+        )
+        .expect("write user settings");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let previous_config_home = std::env::var_os("ZO_CONFIG_HOME");
+        std::env::set_var("ZO_CONFIG_HOME", config_home.path());
         let output = execute_bash(BashCommandInput {
             command: String::from("printf 'hello'"),
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(true),
-            namespace_restrictions: None,
-            isolate_network: None,
-            filesystem_mode: None,
-            allowed_mounts: None,
-            cwd: None,
-        })
-        .expect("bash command should execute");
+            cwd: Some(workspace.path().to_path_buf()),
+        });
+        match previous_config_home {
+            Some(value) => std::env::set_var("ZO_CONFIG_HOME", value),
+            None => std::env::remove_var("ZO_CONFIG_HOME"),
+        }
+        let output = output.expect("bash command should execute");
 
         assert!(!output.sandbox_status.expect("sandbox status").enabled);
+    }
+
+    #[test]
+    fn model_sandbox_arguments_in_json_do_not_override_settings() {
+        let _lock = crate::test_env_lock();
+        let config_home = tempfile::tempdir().expect("config home");
+        std::fs::write(
+            config_home.path().join("settings.json"),
+            r#"{"sandbox":{"enabled":true,"namespaceRestrictions":false,"networkIsolation":true,"filesystemMode":"allow-list","allowedMounts":["logs"]}}"#,
+        )
+        .expect("write user settings");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let previous_config_home = std::env::var_os("ZO_CONFIG_HOME");
+        std::env::set_var("ZO_CONFIG_HOME", config_home.path());
+        let parsed: BashCommandInput = serde_json::from_value(serde_json::json!({
+            "command": "printf 'hello'",
+            "timeout": SPAWN_TEST_TIMEOUT_MS,
+            "dangerouslyDisableSandbox": true,
+            "namespaceRestrictions": true,
+            "isolateNetwork": false,
+            "filesystemMode": "off",
+            "allowedMounts": ["/"],
+            "cwd": workspace.path(),
+        }))
+        .expect("bash input deserializes");
+        let output = execute_bash(parsed);
+        match previous_config_home {
+            Some(value) => std::env::set_var("ZO_CONFIG_HOME", value),
+            None => std::env::remove_var("ZO_CONFIG_HOME"),
+        }
+        let output = output.expect("bash command should execute");
+        let status = output.sandbox_status.expect("sandbox status");
+        assert!(
+            status.enabled,
+            "model dangerouslyDisableSandbox must not disable sandbox"
+        );
+        assert!(
+            status.requested.network_isolation,
+            "model isolateNetwork must not override user networkIsolation"
+        );
+        assert!(
+            !status.requested.namespace_restrictions,
+            "model namespaceRestrictions must not override user settings"
+        );
+        assert_eq!(
+            status.requested.filesystem_mode,
+            FilesystemIsolationMode::AllowList
+        );
+        assert_eq!(status.requested.allowed_mounts, vec!["logs"]);
     }
 
     #[test]
@@ -3223,11 +3268,6 @@ mod tests {
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
         .expect("bash command should execute inside runtime");
@@ -3265,14 +3305,7 @@ mod tests {
             timeout: Some(1_500),
             description: None,
             run_in_background: Some(false),
-            // Disable zo's sandbox so the test exercises only the kill path,
-            // not scratch-dir redirection (memory: spawn tests use this flag).
-            dangerously_disable_sandbox: Some(true),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
-            cwd: None,
+            cwd: Some(std::env::temp_dir()),
         })
         .expect("bash command should execute");
         assert!(output.interrupted, "command should have timed out");
@@ -3357,18 +3390,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
-        let status = super::sandbox_status_for_input(
-            &BashCommandInput {
-                command: String::new(),
-                timeout: None,
-                description: None,
-                run_in_background: Some(false),
-                dangerously_disable_sandbox: Some(false),
+        let status = super::sandbox_status_for_config(
+            &SandboxConfig {
+                enabled: Some(true),
                 namespace_restrictions: Some(false),
-                isolate_network: Some(false),
+                network_isolation: Some(false),
                 filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-                allowed_mounts: None,
-                cwd: None,
+                ..SandboxConfig::default()
             },
             &workspace,
         );
@@ -3396,6 +3424,36 @@ mod tests {
             !polluted,
             ".sandbox-home must not be created inside the workspace"
         );
+    }
+
+    #[test]
+    fn additional_workspace_roots_extend_sandbox_mounts() {
+        let _lock = crate::test_env_lock();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let extra = tempfile::tempdir().expect("extra root");
+        crate::file_ops::set_additional_workspace_roots(vec![extra.path().to_path_buf()]);
+        let status = super::sandbox_status_for_config(
+            &SandboxConfig {
+                enabled: Some(true),
+                namespace_restrictions: Some(false),
+                network_isolation: Some(false),
+                filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+                allowed_mounts: vec!["logs".to_string()],
+                macos_seatbelt: None,
+            },
+            workspace.path(),
+        );
+        crate::file_ops::set_additional_workspace_roots(Vec::new());
+
+        assert_eq!(
+            status.requested.filesystem_mode,
+            FilesystemIsolationMode::AllowList
+        );
+        assert!(status.requested.allowed_mounts.contains(&"logs".to_string()));
+        assert!(status
+            .requested
+            .allowed_mounts
+            .contains(&extra.path().to_string_lossy().into_owned()));
     }
 }
 
@@ -3795,11 +3853,6 @@ mod truncation_tests {
             timeout: Some(20_000),
             description: None,
             run_in_background: Some(false),
-            dangerously_disable_sandbox: Some(false),
-            namespace_restrictions: Some(false),
-            isolate_network: Some(false),
-            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
-            allowed_mounts: None,
             cwd: None,
         })
         .expect("bash runs");

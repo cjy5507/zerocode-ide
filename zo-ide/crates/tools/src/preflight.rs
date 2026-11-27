@@ -143,7 +143,6 @@ fn branch_divergence_output(
         background_output_held: None,
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
         return_code_interpretation: Some("preflight_blocked:branch_divergence".to_string()),
         no_output_expected: Some(false),
         structured_content: Some(vec![serde_json::to_value(

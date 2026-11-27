@@ -286,6 +286,7 @@ impl CoreTool {
     const fn settings_only(self) -> &'static [&'static str] {
         match self {
             Self::Bash => &[
+                "dangerouslyDisableSandbox",
                 "namespaceRestrictions",
                 "isolateNetwork",
                 "filesystemMode",
@@ -513,6 +514,7 @@ mod tests {
     fn the_shell_takes_cmd_and_never_takes_sandbox_knobs_from_the_model() {
         let sent = json!({
             "cmd": "ls",
+            "dangerouslyDisableSandbox": true,
             "filesystemMode": "off",
             "namespaceRestrictions": false,
             "isolateNetwork": false,
