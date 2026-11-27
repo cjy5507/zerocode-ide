@@ -2691,25 +2691,30 @@ fn skip_parked_verifier(
 /// Emit a non-critical deep-phase progress note into the render stream. A closed
 /// channel just means the turn is unwinding, so the error is ignored.
 /// Spec-literal self-verify gate for the streaming dispatcher's terminal arm,
-/// parity with the sync `run_turn`: an edit that reproduced a task-specified
-/// backticked literal with the wrong case is patched deterministically (a
-/// model repair only fixes the casing ~50% of the time, measured). Offloaded
-/// through `spawn_blocking` because the gate probes git when the prompt
-/// carries a candidate literal, and this dispatcher also drives TUI turns on
-/// the render reactor. The visible note keeps the file mutation honest
-/// instead of silent.
-async fn run_spec_literal_gate(original: &str, render_tx: &mpsc::Sender<RenderBlock>) {
+/// parity with the sync `run_turn`: an edit this turn's tools made that
+/// reproduced a task-specified backticked literal with the wrong case is
+/// patched deterministically (a model repair only fixes the casing ~50% of the
+/// time, measured). Offloaded through `spawn_blocking` because the gate reads
+/// and writes files, and this dispatcher also drives TUI turns on the render
+/// reactor. The visible note names every file it rewrote, so the mutation is
+/// never silent.
+async fn run_spec_literal_gate(
+    original: &str,
+    edited: Vec<String>,
+    render_tx: &mpsc::Sender<RenderBlock>,
+) {
     let spec_original = original.to_string();
     let patched = tokio::task::spawn_blocking(move || {
-        super::turn_end::spec_literal_autopatch(&spec_original)
+        let root = std::env::current_dir().unwrap_or_default();
+        super::turn_end::spec_literal_autopatch(&spec_original, &edited, &root)
     })
     .await
-    .unwrap_or(false);
-    if patched {
+    .unwrap_or_default();
+    if !patched.is_empty() {
         deep_note(
             render_tx,
             &BlockIdGen::default(),
-            "spec-literal gate: auto-patched exact-case literal(s)",
+            super::turn_end::spec_literal_patched_note(&patched),
         )
         .await;
     }
@@ -2870,6 +2875,9 @@ where
         // followup) turn must charge the goal budget the sum. Cumulative is
         // monotonic within this runtime instance, so re-derive it at return.
         let turn_base_output = self.usage_tracker.cumulative_usage().output_tokens;
+        // The files this turn's own tools edited, over every Stop-loop leg —
+        // the only files the spec-literal gate may rewrite.
+        let mut edited = Vec::new();
         let result = loop {
             let round_images = std::mem::take(&mut images);
             // A leg that repeats the words a decline just stood on (t-57512)
@@ -2947,6 +2955,7 @@ where
                     }
                 }
             };
+            super::turn_end::add_edited_files(&mut edited, &summary);
             // TurnEnd (Stop) hook — same contract and bound as the sync loop
             // (`run_turn`). Hook commands run synchronously with the shared 5s
             // timeout, so the render loop only ever pauses when the user opted
@@ -2978,7 +2987,10 @@ where
                     input = followup;
                 }
                 _ => {
-                    run_spec_literal_gate(&original, &render_tx).await;
+                    if self.spec_literal_gate_runs() {
+                        run_spec_literal_gate(&original, std::mem::take(&mut edited), &render_tx)
+                            .await;
+                    }
                     summary.turn_output_tokens = self
                         .usage_tracker
                         .cumulative_usage()

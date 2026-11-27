@@ -204,6 +204,13 @@ pub struct RuntimeFeatureConfig {
     /// the propose half a human used to trigger with `/improve`. Defaults off
     /// because it spends a minutes-long `zo -p` turn in the background.
     auto_improve_proposals_enabled: bool,
+    /// Settings `specLiteralAutopatchEnabled`: opt-in (t-132606). When on, a
+    /// finished turn rewrites a backticked literal of the request that a file
+    /// this turn's own tools edited reproduced in the wrong case
+    /// (`(Deprecated)` for `` `(DEPRECATED)` ``), and names each file it
+    /// rewrote. Defaults off: it writes files nobody asked it to write in
+    /// that turn's words, and never in a read-only (plan) turn.
+    spec_literal_autopatch_enabled: bool,
     team_inbox_digest_enabled: bool,
     team_inbox_digest_max_updates: usize,
     /// Settings `recallHintEnabled`: whether a turn that references a past
@@ -260,6 +267,7 @@ impl Default for RuntimeFeatureConfig {
             auto_memory_enabled: true,
             auto_dream_enabled: true,
             auto_improve_proposals_enabled: false,
+            spec_literal_autopatch_enabled: false,
             team_inbox_digest_enabled: true,
             team_inbox_digest_max_updates: 8,
             recall_hint_enabled: true,
@@ -1143,6 +1151,10 @@ impl ConfigLoader {
             auto_improve_proposals_enabled: parse_opt_in_flag(
                 &merged_value,
                 "autoImproveProposalsEnabled",
+            )?,
+            spec_literal_autopatch_enabled: parse_opt_in_flag(
+                &merged_value,
+                "specLiteralAutopatchEnabled",
             )?,
             team_inbox_digest_enabled: parse_enabled_flag(
                 &merged_value,
@@ -2990,6 +3002,11 @@ impl RuntimeFeatureConfig {
     }
 
     #[must_use]
+    pub fn spec_literal_autopatch_enabled(&self) -> bool {
+        self.spec_literal_autopatch_enabled
+    }
+
+    #[must_use]
     pub fn team_inbox_digest_enabled(&self) -> bool {
         self.team_inbox_digest_enabled
     }
@@ -3803,6 +3820,20 @@ mod feature_toggle_tests {
         assert!(RuntimeFeatureConfig::default()
             .with_auto_improve_proposals_enabled(true)
             .auto_improve_proposals_enabled());
+    }
+
+    #[test]
+    fn spec_literal_autopatch_is_opt_in_off_by_default() {
+        // t-132606: the turn-end literal rewrite writes files, so it waits
+        // for the person's key.
+        assert!(!RuntimeFeatureConfig::default().spec_literal_autopatch_enabled());
+        let mut object = BTreeMap::new();
+        object.insert(
+            "specLiteralAutopatchEnabled".to_string(),
+            JsonValue::Bool(true),
+        );
+        let value = JsonValue::Object(object);
+        assert!(super::parse_opt_in_flag(&value, "specLiteralAutopatchEnabled").unwrap());
     }
 
     #[test]

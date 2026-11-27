@@ -38,7 +38,7 @@ use telemetry::{MemoryTelemetrySink, SessionTracer, TelemetryEvent};
 
 use super::{
     fingerprint_tool_call, is_truncation_stop_reason, original_has_candidate_spec_literals,
-    record_tool_fingerprint, GATE_CHANGED_FILES_CALLS, MAX_TRUNCATION_CONTINUATIONS, QuotaEscape,
+    record_tool_fingerprint, MAX_TRUNCATION_CONTINUATIONS, QuotaEscape,
     TOOL_REPETITION_THRESHOLD, TRUNCATION_CONTINUATION_REMINDER, TURN_END_SNAPSHOT_CALLS,
 };
 
@@ -6799,11 +6799,25 @@ fn streaming_denied_tool_result_is_not_blocked_by_parallel_safe_precompute() {
         );
         tokio::pin!(turn);
 
+        // A turn can finish in the same poll that rendered its results (with
+        // the spec-literal gate off it awaits nothing at its end, t-132606):
+        // what it rendered is then already in the channel, in order.
+        let mut finished = None;
         let first_result_tool_id = loop {
             tokio::select! {
                 turn_result = &mut turn => {
                     release_read_gate(&read_gate);
-                    panic!("turn finished before any rendered tool result: {turn_result:?}");
+                    let rendered = std::iter::from_fn(|| render_rx.try_recv().ok()).find_map(|block| {
+                        match block {
+                            RenderBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.0),
+                            _ => None,
+                        }
+                    });
+                    let Some(first) = rendered else {
+                        panic!("turn finished before any rendered tool result: {turn_result:?}");
+                    };
+                    finished = Some(turn_result);
+                    break first;
                 }
                 maybe_block = render_rx.recv() => {
                     if let RenderBlock::ToolResult { tool_call_id, .. } =
@@ -6824,7 +6838,11 @@ fn streaming_denied_tool_result_is_not_blocked_by_parallel_safe_precompute() {
         );
 
         release_read_gate(&read_gate);
-        let summary = turn.await.expect("streaming turn should finish");
+        let summary = match finished {
+            Some(turn_result) => turn_result,
+            None => turn.await,
+        }
+        .expect("streaming turn should finish");
         assert_eq!(summary.tool_results.len(), 3);
         let first_output = match &summary.tool_results[0].blocks[0] {
             ContentBlock::ToolResult { output, is_error, .. } => {
@@ -8685,66 +8703,173 @@ fn candidate_spec_literal_detector_matches_autopatch_filter() {
     );
 }
 
-#[test]
-fn spec_literal_gate_skips_git_probe_when_request_has_no_literal() {
-    // [perf] The per-turn spec-literal autopatch runs `gate_changed_files`
-    // (`git diff HEAD` + `git ls-files --others`) on a terminal arm reached on
-    // EVERY completed turn. It can only ever repair a backticked spec literal in
-    // the request, so a turn whose request carries no candidate literal must skip
-    // the git probe entirely — even on a dirty repo. We observe the probe through
-    // a thread-local counter incremented at the top of `gate_changed_files`.
-    //
-    // This is the regression the perf finding flagged: the old
-    // `if changed.is_empty()` short-circuit ran AFTER both git subprocesses had
-    // already spawned, so a chatty/non-coding turn paid full git cost. Reverting
-    // the new `original_has_candidate_spec_literals` gate makes the no-literal leg
-    // below probe git (count > 0) and this test fail.
-    struct StopApi;
-    impl ApiClient for StopApi {
+/// Names, to a fresh run of this test binary, the folder a spec-literal gate
+/// test runs its turn in.
+const SPEC_LITERAL_ROOT_ENV: &str = "ZO_SPEC_LITERAL_TEST_ROOT";
+
+/// Runs `body` with its own git repository as the working directory, in a
+/// fresh run of this test binary that runs `test` alone (the gate reads the
+/// working directory, which belongs to the whole process — the same reason as
+/// `prompt::tests::with_root_exported`), and returns what that run wrote to
+/// stderr.
+fn spec_literal_gate_alone(test: &str, body: impl FnOnce()) -> String {
+    if std::env::var_os(SPEC_LITERAL_ROOT_ENV).is_some() {
+        body();
+        return String::new();
+    }
+    let root = tempfile::tempdir().expect("temp root");
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_crate, path)| path);
+    let output = {
+        let _guard = crate::test_env_lock();
+        std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg(format!("{module}::{test}"))
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .env(SPEC_LITERAL_ROOT_ENV, root.path())
+            .env_remove("ZO_TEAM_INBOX_STORE")
+            .current_dir(root.path())
+            .output()
+            .expect("run the test alone")
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success() && stdout.contains(" 1 passed;"),
+        "{test}, run alone:\n{stdout}\n{stderr}"
+    );
+    stderr
+}
+
+/// One finished turn in the working directory, a git repository: `before.txt`
+/// was committed and then changed by the person before the turn to hold the
+/// request's marker in the wrong case; the turn's own `write_file` writes
+/// `edited.txt` with the same wrong case. `enabled` is the settings key
+/// `specLiteralAutopatchEnabled` (`None` leaves it out). Returns the two files
+/// as the turn left them.
+fn spec_literal_turn(enabled: Option<bool>, mode: PermissionMode) -> (String, String) {
+    struct WriteThenStop(bool);
+    impl ApiClient for WriteThenStop {
         fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            if std::mem::replace(&mut self.0, true) {
+                return Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            let path = std::env::current_dir().expect("cwd").join("edited.txt");
+            let input = serde_json::json!({ "path": path, "content": "usage: run (Deprecated)\n" });
             Ok(vec![
-                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::ToolUse {
+                    id: "write-1".to_string(),
+                    name: "write_file".to_string(),
+                    input: input.to_string(),
+                },
                 AssistantEvent::MessageStop,
             ])
         }
     }
 
-    fn run_one(request: &str) -> usize {
-        let mut runtime = ConversationRuntime::new_with_features(
-            Session::new(),
-            StopApi,
-            StaticToolExecutor::new(),
-            PermissionPolicy::new(PermissionMode::DangerFullAccess),
-            vec!["system".to_string()],
-            &RuntimeFeatureConfig::default(),
+    let cwd = std::env::current_dir().expect("cwd");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    fs::write(cwd.join("before.txt"), "usage: run\n").expect("before.txt");
+    git(&["add", "before.txt"]);
+    git(&["commit", "-q", "-m", "base"]);
+    fs::write(cwd.join("before.txt"), "usage: run (Deprecated)\n").expect("the person's edit");
+
+    let home = cwd.join("home").join(".zo");
+    fs::create_dir_all(&home).expect("home settings dir");
+    let settings = enabled.map_or_else(
+        || serde_json::json!({}),
+        |on| serde_json::json!({ "specLiteralAutopatchEnabled": on }),
+    );
+    fs::write(home.join("settings.json"), settings.to_string()).expect("settings");
+    let features = ConfigLoader::new(&cwd, &home)
+        .load()
+        .expect("load settings")
+        .feature_config()
+        .clone();
+    let writes = StaticToolExecutor::new().register("write_file", |input| {
+        let input: serde_json::Value = serde_json::from_str(input).expect("write input");
+        let path = input["path"].as_str().expect("path");
+        let content = input["content"].as_str().expect("content");
+        fs::write(path, content).expect("write");
+        Ok(serde_json::json!({ "type": "create", "filePath": path, "content": content }).to_string())
+    });
+    let mut runtime = ConversationRuntime::new_with_features(
+        Session::new(),
+        WriteThenStop(false),
+        writes,
+        PermissionPolicy::new(mode).with_tool_requirement("write_file", PermissionMode::ReadOnly),
+        vec!["system".to_string()],
+        &features,
+    );
+    runtime
+        .run_turn("print the help marker `(DEPRECATED)` exactly as written", None)
+        .expect("the turn runs");
+    (
+        fs::read_to_string(cwd.join("before.txt")).expect("before.txt"),
+        fs::read_to_string(cwd.join("edited.txt")).expect("edited.txt"),
+    )
+}
+
+/// The spec-literal gate rewrites files nobody asked it to in that turn's
+/// words, so it does nothing until the settings turn it on (t-132606).
+#[test]
+fn the_spec_literal_gate_is_off_unless_the_settings_turn_it_on() {
+    spec_literal_gate_alone("the_spec_literal_gate_is_off_unless_the_settings_turn_it_on", || {
+        let (before, edited) = spec_literal_turn(None, PermissionMode::DangerFullAccess);
+        assert_eq!(before, "usage: run (Deprecated)\n", "the person's file was rewritten");
+        assert_eq!(edited, "usage: run (Deprecated)\n", "the gate ran with no setting");
+    });
+}
+
+/// The person's test (t-132606): a file already changed before the turn is
+/// not the gate's — git calls it changed, the turn's tools never touched it.
+#[test]
+fn the_spec_literal_gate_leaves_a_file_changed_before_the_turn() {
+    spec_literal_gate_alone("the_spec_literal_gate_leaves_a_file_changed_before_the_turn", || {
+        let (before, _) = spec_literal_turn(Some(true), PermissionMode::DangerFullAccess);
+        assert_eq!(before, "usage: run (Deprecated)\n", "the person's file was rewritten");
+    });
+}
+
+/// With the setting on, what this turn's own tools wrote is rewritten to the
+/// request's exact case, and the turn names the file it rewrote.
+#[test]
+fn the_spec_literal_gate_rewrites_what_this_turns_tools_wrote_and_names_it() {
+    let said = spec_literal_gate_alone(
+        "the_spec_literal_gate_rewrites_what_this_turns_tools_wrote_and_names_it",
+        || {
+            let (_, edited) = spec_literal_turn(Some(true), PermissionMode::DangerFullAccess);
+            assert_eq!(edited, "usage: run (DEPRECATED)\n", "the turn's own file was not rewritten");
+        },
+    );
+    if std::env::var_os(SPEC_LITERAL_ROOT_ENV).is_none() {
+        assert!(
+            said.contains("spec-literal gate: auto-patched exact-case literal(s) in edited.txt"),
+            "the turn did not name the file it rewrote:\n{said}"
         );
-        // `run_turn` is synchronous and runs on this (the test) thread, so the
-        // counter increment lands on the same thread we read — no parallel test
-        // can perturb it (it is thread-local).
-        GATE_CHANGED_FILES_CALLS.with(|c| c.set(0));
-        runtime
-            .run_turn(request, None)
-            .expect("conversation loop should succeed");
-        GATE_CHANGED_FILES_CALLS.with(std::cell::Cell::get)
     }
+}
 
-    // No candidate backticked literal: the gate must never spawn a git process.
-    assert_eq!(
-        run_one("just summarize what changed, no code"),
-        0,
-        "a turn with no backticked literal must NOT spawn the spec-literal git probe"
-    );
-
-    // A candidate marker literal IS present: the gate proceeds to inspect the
-    // worktree, so the git probe runs at least once (the complement that proves
-    // the assertion above is not vacuously true — i.e. that the probe CAN fire).
-    // The marker is a synthetic token that cannot appear case-mismatched in any
-    // real source file, so the autopatch finds nothing to rewrite and the test
-    // never mutates the working tree — only the cheap `git diff` probe runs.
-    assert!(
-        run_one("emit the help marker `(ZZQX-NONESUCH-MARKER)` exactly as written") >= 1,
-        "a turn whose request carries a candidate literal must run the git probe"
-    );
+/// A read-only turn — plan mode, a held `/goal` or `/loop` turn — writes no
+/// file of its own, so the gate does not run in it even with the setting on.
+#[test]
+fn the_spec_literal_gate_does_not_run_in_a_read_only_turn() {
+    spec_literal_gate_alone("the_spec_literal_gate_does_not_run_in_a_read_only_turn", || {
+        let (before, edited) = spec_literal_turn(Some(true), PermissionMode::ReadOnly);
+        assert_eq!(before, "usage: run (Deprecated)\n", "the person's file was rewritten");
+        assert_eq!(edited, "usage: run (Deprecated)\n", "the gate ran in a read-only turn");
+    });
 }
 
 #[test]

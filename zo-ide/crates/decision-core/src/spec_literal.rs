@@ -111,9 +111,10 @@ fn is_code_reference_literal(s: &str) -> bool {
         })
 }
 
-/// Cheap preflight used by the runtime before it probes git. It intentionally
-/// shares the detector's exact candidate predicate so inline code references do
-/// not trigger either an unsafe patch or unnecessary worktree scans.
+/// Cheap preflight used by the runtime before it reads the files a turn
+/// edited. It intentionally shares the detector's exact candidate predicate so
+/// inline code references do not trigger either an unsafe patch or needless
+/// file reads.
 #[must_use]
 pub fn has_candidate_spec_literals(prompt: &str) -> bool {
     extract_backtick_literals(prompt).into_iter().any(|literal| {

@@ -1,9 +1,11 @@
 //! Turn-completion support for [`ConversationRuntime`]: exhausted-budget
-//! closers, the `TurnEnd`-hook context builder, the changed-files snapshots, and
-//! the deterministic spec-literal auto-patch. Split out of `mod.rs` so the turn
+//! closers, the `TurnEnd`-hook context builder, the changed-files snapshot, and
+//! the deterministic spec-literal auto-patch (opt-in). Split out of `mod.rs` so the turn
 //! loops there read as orchestration. Behaviour-preserving: these were
 //! `ConversationRuntime` methods and module-level helpers, now `pub(super)`
 //! where the loops in `mod.rs` (and `deep_gate`/tests) still reach them.
+
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -147,15 +149,6 @@ pub(super) fn build_turn_end_hook_context(
 }
 #[cfg(test)]
 thread_local! {
-    /// Test-only seam: counts [`gate_changed_files`] entries on the *current
-    /// thread* (i.e. how many times this turn spawned the `git diff` /
-    /// `git ls-files` subprocesses). The spec-literal gate skips the whole probe
-    /// when the original request has no candidate backticked literal, so a
-    /// non-literal turn must leave this at zero. Thread-local (not a global
-    /// atomic) because `run_turn` is synchronous and runs on the calling test's
-    /// own thread — so parallel tests never perturb each other's count.
-    pub(crate) static GATE_CHANGED_FILES_CALLS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
     /// Test-only seam: counts [`changed_files_snapshot_async`] entries on the
     /// thread that awaits it — the streaming turn's TurnEnd `git diff`. Counted
     /// before the `spawn_blocking` hop, because the git run itself lands on
@@ -209,42 +202,12 @@ pub(super) fn changed_files_snapshot() -> Vec<String> {
         .collect()
 }
 
-/// Files touched this turn for the spec-literal gate: tracked changes
-/// (`changed_files_snapshot`) plus newly created untracked files, which
-/// `git diff HEAD` omits but a feature task routinely adds (a new module, a
-/// scratch repro). `.gitignore` still filters build output.
-fn gate_changed_files() -> Vec<String> {
-    #[cfg(test)]
-    GATE_CHANGED_FILES_CALLS.with(|c| c.set(c.get() + 1));
-    let mut files = changed_files_snapshot();
-    if let Ok(output) = std::process::Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            files.extend(
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToOwned::to_owned),
-            );
-        }
-    }
-    files
-}
-
 /// Whether `original` contains at least one *candidate* spec literal — a
 /// single-backtick span the spec-literal autopatch could ever act on. This
 /// uses the exact candidate filter from `decision-core`, including its rejection
 /// of Markdown inline-code references such as `Cart.subtotal()`. When it returns
-/// `false`, the autopatch is provably a no-op regardless of what changed on disk,
-/// so the git probe ([`gate_changed_files`]) can be skipped entirely.
+/// `false`, the autopatch is provably a no-op whatever this turn edited, so no
+/// file is read.
 pub(super) fn original_has_candidate_spec_literals(original: &str) -> bool {
     decision_core::has_candidate_spec_literals(original)
 }
@@ -286,44 +249,45 @@ fn spec_literal_autopatch_path_allowed(path: &str) -> bool {
             .is_some_and(|(stem, _)| stem.ends_with("_test") || stem.ends_with("_spec")))
 }
 
-/// Spec-literal self-verify (deterministic auto-patch): for each file changed
-/// this turn, if it reproduced a literal the original request spelled out in
-/// backticks (e.g. a help marker `` `(DEPRECATED)` ``) with the wrong case
-/// (`(Deprecated)`), rewrite it to the exact case on disk and return `true`.
+/// Add the files one leg of a turn edited — its edit and write results'
+/// `filePath`s ([`crate::edited_file_paths`]) — to `edited`, each once.
+pub(super) fn add_edited_files(edited: &mut Vec<String>, leg: &TurnSummary) {
+    for path in crate::edited_file_paths(&leg.tool_results) {
+        if !edited.contains(&path) {
+            edited.push(path);
+        }
+    }
+}
+
+/// Spec-literal self-verify (deterministic auto-patch, t-132606): of the files
+/// this turn's own tools edited (`edited`, absolute) under `root`, each that
+/// reproduced a literal the original request spelled out in backticks (e.g. a
+/// help marker `` `(DEPRECATED)` ``) with the wrong case (`(Deprecated)`) is
+/// rewritten to the exact case on disk. Returns the files it rewrote, relative
+/// to `root`, for the turn to name. A file git calls changed is not a target:
+/// that list holds the person's own edits from before the turn.
 /// Does NOT route through the model: a repair prompt only fixes the casing
 /// ~50 % of the time (measured), whereas the marker is a pure substitution.
-/// `false` when nothing changed, nothing mismatched, or the workspace is not
-/// git-inspectable.
 ///
 /// A free function (not an associated fn): the streaming dispatcher offloads
 /// it through `spawn_blocking`, whose `'static` closure must not drag the
-/// runtime's `C`/`T` type parameters along.
-///
-/// [perf] This terminal arm runs on *every* completed turn — both the sync
-/// `run_turn` loop and the streaming `run_turn_streaming_maybe_deep`
-/// dispatcher. The git probe ([`gate_changed_files`] = `git diff HEAD` +
-/// `git ls-files --others`) is the dominant per-turn stall on a dirty repo,
-/// and the old `changed.is_empty()` short-circuit ran only *after* both
-/// subprocesses had already spawned — so a chatty, non-coding turn paid the
-/// full cost every time. The autopatch can only ever repair a backticked spec
-/// literal in the request, so when `original` carries no candidate literal we
-/// return early *before* touching git
-/// ([`original_has_candidate_spec_literals`]): no candidate ⇒ no possible
-/// patch ⇒ no reason to inspect the worktree.
-pub(super) fn spec_literal_autopatch(original: &str) -> bool {
-    if !original_has_candidate_spec_literals(original) {
-        return false;
+/// runtime's `C`/`T` type parameters along. Whether it runs at all is the
+/// runtime's ([`ConversationRuntime::spec_literal_gate_runs`]).
+pub(super) fn spec_literal_autopatch(original: &str, edited: &[String], root: &Path) -> Vec<String> {
+    if edited.is_empty() || !original_has_candidate_spec_literals(original) {
+        return Vec::new();
     }
-    let changed = gate_changed_files();
-    if changed.is_empty() {
-        return false;
-    }
-    let mut patched = false;
-    for path in &changed {
-        if !spec_literal_autopatch_path_allowed(path) {
+    let mut patched = Vec::new();
+    for path in edited {
+        let path = root.join(path);
+        let Ok(inside) = path.strip_prefix(root) else {
+            continue;
+        };
+        let inside = inside.to_string_lossy();
+        if !spec_literal_autopatch_path_allowed(&inside) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
         let mismatches = decision_core::detect_case_mismatched_literals(original, &content);
@@ -331,11 +295,19 @@ pub(super) fn spec_literal_autopatch(original: &str) -> bool {
             continue;
         }
         let fixed = decision_core::apply_case_fixes(&content, &mismatches);
-        if fixed != content && std::fs::write(path, fixed).is_ok() {
-            patched = true;
+        if fixed != content && std::fs::write(&path, fixed).is_ok() {
+            patched.push(inside.into_owned());
         }
     }
     patched
+}
+
+/// The line a turn shows for the files the spec-literal gate rewrote.
+pub(super) fn spec_literal_patched_note(patched: &[String]) -> String {
+    format!(
+        "spec-literal gate: auto-patched exact-case literal(s) in {}",
+        patched.join(", ")
+    )
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -343,6 +315,15 @@ where
     C: ApiClient,
     T: ToolExecutor,
 {
+    /// Whether this finished turn runs the spec-literal gate
+    /// ([`spec_literal_autopatch`]): only when the settings turned it on
+    /// (`specLiteralAutopatchEnabled`), and never in a read-only turn — plan
+    /// mode, a held `/goal`/`/loop` turn — which writes no file of its own.
+    pub(super) fn spec_literal_gate_runs(&self) -> bool {
+        self.spec_literal_autopatch_enabled
+            && self.active_permission_mode() != crate::PermissionMode::ReadOnly
+    }
+
     /// Assemble the [`TurnSummary`] for a completed turn. Shared by the sync
     /// ([`Self::run_turn_once`]) and streaming
     /// ([`Self::run_turn_streaming_with_images`]) loops, which built an identical

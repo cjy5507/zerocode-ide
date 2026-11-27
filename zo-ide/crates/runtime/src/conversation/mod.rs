@@ -137,9 +137,7 @@ use reminders::{
 };
 // Spec-literal-gate seams the `#[cfg(test)] mod tests` reaches through `super::`.
 #[cfg(test)]
-use turn_end::{
-    original_has_candidate_spec_literals, GATE_CHANGED_FILES_CALLS, TURN_END_SNAPSHOT_CALLS,
-};
+use turn_end::{original_has_candidate_spec_literals, TURN_END_SNAPSHOT_CALLS};
 // Repetition-guard items the `#[cfg(test)] mod tests` reaches through `super::`.
 #[cfg(test)]
 use repetition::{
@@ -884,6 +882,9 @@ pub struct ConversationRuntime<C, T> {
     /// User-facing gate for the input-triggered recall hint. Defaults on; when
     /// off, a past-reference cue never injects [`RECALL_HINT_REMINDER`].
     recall_hint_enabled: bool,
+    /// Settings `specLiteralAutopatchEnabled`: whether a finished turn runs the
+    /// spec-literal gate ([`turn_end::spec_literal_autopatch`]). Defaults off.
+    spec_literal_autopatch_enabled: bool,
     /// True after the runtime has deferred preflight precompaction once to give
     /// `StateDistill` a request-visible working-state snapshot. Stored separately
     /// from the transient prompt because the prompt is cleared at turn start;
@@ -1938,6 +1939,7 @@ where
             team_inbox_digest_enabled: feature_config.team_inbox_digest_enabled(),
             team_inbox_digest_max_updates: feature_config.team_inbox_digest_max_updates(),
             recall_hint_enabled: feature_config.recall_hint_enabled(),
+            spec_literal_autopatch_enabled: feature_config.spec_literal_autopatch_enabled(),
             state_distill_deferred_precompaction: false,
             overflow_recovery: overflow_recovery::OverflowRecovery::default(),
             precompaction_warned: false,
@@ -2363,11 +2365,15 @@ where
         // several legs; the returned summary is the last leg's, so re-derive the
         // turn total here (cumulative is monotonic within this runtime instance).
         let turn_base_output = self.usage_tracker.cumulative_usage().output_tokens;
+        // The files this turn's own tools edited, over every Stop-loop leg —
+        // the only files the spec-literal gate may rewrite.
+        let mut edited = Vec::new();
         let result = loop {
             let (mut summary, followup) = match self.run_turn_once(input, &mut prompter, loop_count) {
                 Ok(value) => value,
                 Err(error) => break Err(error),
             };
+            turn_end::add_edited_files(&mut edited, &summary);
             match followup {
                 Some(followup) if loop_count < self.max_stop_loops => {
                     loop_count += 1;
@@ -2375,12 +2381,17 @@ where
                 }
                 _ => {
                     // The agentic turn stopped. Run the spec-literal self-verify
-                    // gate (once — this arm always returns): if an edit reproduced
-                    // a task-specified literal with the wrong case, patch it on
-                    // disk directly (deterministic — a model repair only fixes the
-                    // casing ~50% of the time, measured).
-                    if turn_end::spec_literal_autopatch(&original) {
-                        eprintln!("[zo] spec-literal gate: auto-patched exact-case literal(s)");
+                    // gate (once — this arm always returns) when the settings
+                    // turned it on: if an edit reproduced a task-specified
+                    // literal with the wrong case, patch it on disk directly
+                    // (deterministic — a model repair only fixes the casing ~50%
+                    // of the time, measured).
+                    if self.spec_literal_gate_runs() {
+                        let root = std::env::current_dir().unwrap_or_default();
+                        let patched = turn_end::spec_literal_autopatch(&original, &edited, &root);
+                        if !patched.is_empty() {
+                            eprintln!("[zo] {}", turn_end::spec_literal_patched_note(&patched));
+                        }
                     }
                     summary.turn_output_tokens = self
                         .usage_tracker
