@@ -42,6 +42,23 @@ pub(super) fn checkout_of(cwd: &str) -> Option<String> {
         .and_then(|root| root.to_str().map(str::to_owned))
 }
 
+/// The checkout pane `term`'s front process works in, read now — asked once,
+/// inside the one-time grant of a hand-started agent's team
+/// (`hooks::leader_checkout`), so an agent started right after a `cd` is
+/// placed where it runs even before the next sweep (the sweep's record can
+/// still name the folder the shell stood in). One `lsof` per granted pane on
+/// macOS, the sweep's question for one pid; `None` elsewhere, where the system
+/// will not say, before the pane is locked, and for a folder in no checkout.
+pub(super) fn front_checkout(state: &AppState, term: TermId) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let held = state.terminals().handle(term)?;
+    let pid = lock_pty(&held).foreground_process_id()?;
+    let cwd = system_runtime::process_cwds(&[pid]).remove(&pid)?;
+    checkout_of(&cwd)
+}
+
 /// The panes whose answer differs from what the window was last told — a
 /// first answer counts, because the window knows nothing yet. Ordered by
 /// pane so two sweeps over the same pool emit the same sequence. No disk is

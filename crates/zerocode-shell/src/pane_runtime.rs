@@ -1466,12 +1466,22 @@ pub(super) fn note_pane_state(
         .contains_key(&report.term)
     {
         // The team it is granted gets the record a launch road writes for its
-        // leader (`team_envs`), so a worker it asks for can be seated beside it.
+        // leader (`team_envs`), so a worker it asks for can be seated beside it
+        // — in the checkout its agent works in, not the folder a report
+        // names (`hooks::leader_checkout`).
         let state = app.state::<AppState>();
         let mut record = None;
         let held = hooks::grant_pane_capabilities(report.term, || {
             let team = agent_teams::grant_team_env(state.local_data_root(), report.term);
-            record = (!team.is_empty()).then(|| agent_teams::granted_leader_env(&team, worktree));
+            record = (!team.is_empty()).then(|| {
+                // Asked here, once per grant, never for each report.
+                let checkout = hooks::leader_checkout(
+                    report.term,
+                    pane_cwd_runtime::front_checkout(&state, report.term),
+                    worktree,
+                );
+                agent_teams::granted_leader_env(&team, checkout.as_deref())
+            });
             team
         });
         if held && let Some(record) = record {

@@ -70,6 +70,45 @@ pub fn bridge() -> Option<&'static Bridge> {
 /// arriving every few seconds does not touch the filesystem each time.
 static GRANTED_PANES: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// The checkout each live pane's hook coordinates name (`ZEROCODE_WORKTREE_ID`,
+/// written by [`pty_env`]), by terminal — dropped when the terminal ends.
+static PANE_WORKTREES: LazyLock<Mutex<HashMap<u32, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The checkout [`pty_env`] gave the pane `term`, while that pane lives.
+pub fn spawned_worktree(term: u32) -> Option<String> {
+    PANE_WORKTREES.lock().ok()?.get(&term).cloned()
+}
+
+/// Forget the checkout of a pane that ended or never started.
+pub fn forget_spawned_worktree(term: u32) {
+    if let Ok(mut held) = PANE_WORKTREES.lock() {
+        held.remove(&term);
+    }
+}
+
+/// The checkout a hand-started pane's team is granted under
+/// (`granted_leader_env`): the checkout its front process works in, where the
+/// window can read that (`front`); else the one this window spawned the pane
+/// in; else the folder its report names.
+///
+/// A report's folder is the environment of whatever ran its hook, and a
+/// typed Codex's hooks run in its shared app-server daemon, which wears the
+/// folder of the pane that started it days ago (t-94962). Granted from the
+/// report, a Codex typed in another project's terminal had its team — and
+/// with it the run it opened and every worker it summoned — seated in the
+/// daemon's project (11-27). The front process is where the agent was
+/// started — after a `cd` into another repository too, the checkout the
+/// window moves the tab to — and is the same answer whichever pane a report
+/// is filed on, from the first report on.
+pub fn leader_checkout(term: u32, front: Option<String>, reported: Option<&str>) -> Option<String> {
+    front.or_else(|| spawned_worktree(term)).or_else(|| {
+        reported
+            .filter(|folder| !folder.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 /// Grant a pane the launched-agent capabilities after the fact.
 ///
 /// The capability paths ride a launch token: a pane the window opened for an
@@ -136,6 +175,7 @@ pub fn grant_pane_capabilities(
 
 /// Take a pane's after-the-fact grant back — its terminal ended.
 pub fn revoke_pane_capabilities(term: u32) {
+    forget_spawned_worktree(term);
     let had = GRANTED_PANES
         .lock()
         .map(|mut held| held.remove(&term))
@@ -462,6 +502,11 @@ pub fn pty_env(
     worktree: &Path,
     base: Option<&str>,
 ) -> Vec<(String, String)> {
+    if let Some(term) = term_of_pane_key(pane_key)
+        && let Ok(mut held) = PANE_WORKTREES.lock()
+    {
+        held.insert(term, worktree.to_string_lossy().into_owned());
+    }
     let Some(bridge) = bridge() else {
         return Vec::new();
     };
@@ -6317,5 +6362,92 @@ pub(crate) mod tests {
             || vec![pane(TYPED, None, true)],
         );
         assert_eq!((term_of_pane_key(&claude.pane_key), how), kept);
+    }
+
+    /// A typed Codex's reports come through its shared daemon wearing the
+    /// folder of the pane that started it, so the run it opened and the
+    /// workers it summoned sat in that project (11-27). Its team is granted
+    /// under the checkout this window spawned the pane in, whatever folder a
+    /// report names; the record goes with the terminal.
+    #[test]
+    fn a_typed_panes_team_takes_the_checkout_it_was_spawned_in() {
+        const TERM: u32 = 9_041;
+        let _ = pty_env(
+            &pane_key_of(TERM),
+            None,
+            Path::new("/work/spawned-here"),
+            None,
+        );
+        assert_eq!(
+            spawned_worktree(TERM).as_deref(),
+            Some("/work/spawned-here")
+        );
+        assert_eq!(
+            leader_checkout(TERM, None, Some("/work/daemon-pane")).as_deref(),
+            Some("/work/spawned-here"),
+            "the team took the folder the daemon's report named"
+        );
+        // The agent was started after a `cd` into another repository: the
+        // checkout its front process works in, the one the tab follows.
+        assert_eq!(
+            leader_checkout(
+                TERM,
+                Some("/work/other-repo".to_string()),
+                Some("/work/daemon-pane")
+            )
+            .as_deref(),
+            Some("/work/other-repo")
+        );
+        // A pane this window did not spawn: the report's folder, if any.
+        assert_eq!(
+            leader_checkout(TERM + 1, None, Some("/work/daemon-pane")).as_deref(),
+            Some("/work/daemon-pane")
+        );
+        assert_eq!(leader_checkout(TERM + 1, None, Some("")), None);
+        assert_eq!(leader_checkout(TERM + 1, None, None), None);
+        // The terminal ends: its checkout goes with it.
+        revoke_pane_capabilities(TERM);
+        assert_eq!(spawned_worktree(TERM), None);
+    }
+
+    /// The team grant asks where the front process works once, inside the
+    /// one-time grant: never for each report on the hook road every pane's
+    /// news takes one at a time (11-27: a version that asked before the grant
+    /// started `lsof` for every report of a hand-started pane, review
+    /// t-133224), and never off macOS, where nothing would answer.
+    #[test]
+    fn the_team_grant_asks_the_front_checkout_once() {
+        let sweep = include_str!("pane_cwd_runtime.rs");
+        let front = &sweep[sweep
+            .find("pub(super) fn front_checkout")
+            .expect("front_checkout")..];
+        let front = &front[..front.find("\n}\n").expect("its end")];
+        let gate = front
+            .find("cfg!(target_os = \"macos\")")
+            .expect("off macOS it answers nothing");
+        let lock = front.find("lock_pty").expect("the front pid");
+        assert!(
+            gate < lock,
+            "the pane is locked before the platform is asked: {front}"
+        );
+        let runtime = include_str!("pane_runtime.rs");
+        let grant = &runtime[runtime
+            .find("let held = hooks::grant_pane_capabilities(report.term, || {")
+            .expect("the grant")..];
+        let grant = &grant[..grant.find("        });\n").expect("its end")];
+        assert!(
+            grant.contains("pane_cwd_runtime::front_checkout"),
+            "the front checkout is asked outside the one-time grant"
+        );
+        let before = &runtime[..runtime
+            .find("let held = hooks::grant_pane_capabilities(report.term, || {")
+            .expect("the grant")];
+        let note = &before[before
+            .rfind("fn note_pane_state(")
+            .expect("note_pane_state")..];
+        assert!(
+            !note.contains("front_checkout"),
+            "the front checkout is asked for every report"
+        );
     }
 }

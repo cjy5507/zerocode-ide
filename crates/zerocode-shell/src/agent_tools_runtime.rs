@@ -1889,6 +1889,7 @@ impl agent_teams::Host for TeamWindow {
             Ok(pty) => pty,
             Err(error) => {
                 state.pane_sessions().remove(&term);
+                hooks::forget_spawned_worktree(term);
                 let reason = format!("a worker process failed to spawn {program}: {error}");
                 agent_teams::restore_pane_token(team, pane, previous_pane_token);
                 cleanup_failed_worker_checkout(state.local_data_root(), isolated.as_ref(), &reason);
