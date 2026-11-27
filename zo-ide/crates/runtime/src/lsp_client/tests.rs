@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mcp_client::McpStdioTransport;
 
@@ -227,9 +226,8 @@ async fn dispatches_to_transport() {
     assert_eq!(result["hover"], "mocked");
 }
 
-/// A folder of this test's own, named `zo-lsp-test-<label>-<clock>-<pid>`: the fake servers' scripts must
-/// outlive the function that writes them, and most tests never removed theirs, so the folders of runs that
-/// ended are taken back once a process instead (`core_types::ended_process_folders`).
+/// A separate folder for each fixture, even when parallel tests read the same clock tick.
+/// Sweep folders left by earlier processes once per run.
 fn temp_dir(label: &str) -> PathBuf {
     static SWEPT: std::sync::Once = std::sync::Once::new();
     SWEPT.call_once(|| {
@@ -238,11 +236,7 @@ fn temp_dir(label: &str) -> PathBuf {
             "zo-lsp-test-",
         );
     });
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("zo-lsp-test-{label}-{unique}-{}", std::process::id()))
+    crate::test_root::process_fixture_dir(&format!("zo-lsp-test-{label}"))
 }
 
 /// Starts a fake server script through `python3`, as the MCP stdio suite
@@ -252,7 +246,10 @@ fn python_script_transport(script_path: &std::path::Path) -> McpStdioTransport {
     McpStdioTransport {
         command: "python3".to_string(),
         args: vec![script_path.display().to_string()],
-        env: BTreeMap::new(),
+        env: BTreeMap::from([(
+            "ZO_LSP_TEST_PROBE_STDERR".to_string(),
+            script_path.with_extension("trace").display().to_string(),
+        )]),
         tool_call_timeout_ms: None,
     }
 }
@@ -263,9 +260,15 @@ fn write_lsp_server_script() -> PathBuf {
     let script_path = root.join("fake-lsp-server.py");
     let script = [
         "#!/usr/bin/env python3",
-        "import json, sys",
+        "import sys, time",
+        "def probe(message):",
+        "    print(f'{time.time():.6f} {message}', file=sys.stderr, flush=True)",
+        "probe(f'script entered with Python {sys.version_info[:3]}')",
+        "import json",
+        "probe('imported json')",
         "",
         "def read_message():",
+        "    probe('reading request header')",
         "    header = b''",
         r"    while not header.endswith(b'\r\n\r\n'):",
         "        chunk = sys.stdin.buffer.read(1)",
@@ -276,19 +279,23 @@ fn write_lsp_server_script() -> PathBuf {
         r"    for line in header.decode().split('\r\n'):",
         r"        if line.lower().startswith('content-length:'):",
         r"            length = int(line.split(':', 1)[1].strip())",
+        "    probe(f'reading {length} request body bytes')",
         "    payload = sys.stdin.buffer.read(length)",
         "    return json.loads(payload.decode())",
         "",
         "def send_message(message):",
         "    payload = json.dumps(message).encode()",
         r"    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)",
+        "    probe(f'flushing {len(payload)} bytes')",
         "    sys.stdout.buffer.flush()",
+        "    probe('flushed stdout')",
         "",
         "while True:",
         "    request = read_message()",
         "    if request is None:",
         "        break",
         "    method = request['method']",
+        r#"    probe(f'received {method} id={request.get("id")}')"#,
         "    if 'id' not in request:",
         "        continue",
         "    if method == 'textDocument/hover':",
@@ -492,10 +499,16 @@ fn write_diagnostics_lsp_server_script_where_a_change(publishes: ChangePublishes
     let script_path = root.join("fake-lsp-diag.py");
     let script = [
         "#!/usr/bin/env python3",
-        "import json, sys",
+        "import sys, time",
+        "def probe(message):",
+        "    print(f'{time.time():.6f} {message}', file=sys.stderr, flush=True)",
+        "probe(f'script entered with Python {sys.version_info[:3]}')",
+        "import json",
+        "probe('imported json')",
         change_clears,
         "",
         "def read_message():",
+        "    probe('reading request header')",
         "    header = b''",
         r"    while not header.endswith(b'\r\n\r\n'):",
         "        chunk = sys.stdin.buffer.read(1)",
@@ -506,19 +519,23 @@ fn write_diagnostics_lsp_server_script_where_a_change(publishes: ChangePublishes
         r"    for line in header.decode().split('\r\n'):",
         r"        if line.lower().startswith('content-length:'):",
         r"            length = int(line.split(':', 1)[1].strip())",
+        "    probe(f'reading {length} request body bytes')",
         "    payload = sys.stdin.buffer.read(length)",
         "    return json.loads(payload.decode())",
         "",
         "def send_message(message):",
         "    payload = json.dumps(message).encode()",
         r"    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)",
+        "    probe(f'flushing {len(payload)} bytes')",
         "    sys.stdout.buffer.flush()",
+        "    probe('flushed stdout')",
         "",
         "while True:",
         "    request = read_message()",
         "    if request is None:",
         "        break",
         "    method = request['method']",
+        r#"    probe(f'received {method} id={request.get("id")}')"#,
         "    if method == 'initialize':",
         "        send_message({",
         "            'jsonrpc': '2.0',",

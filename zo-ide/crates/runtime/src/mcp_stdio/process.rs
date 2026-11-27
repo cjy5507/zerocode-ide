@@ -75,6 +75,10 @@ impl McpStdioProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         apply_env(&mut command, &transport.env);
+        #[cfg(test)]
+        if let Some(path) = transport.env.get("ZO_LSP_TEST_PROBE_STDERR") {
+            command.stderr(Stdio::from(std::fs::File::create(path)?));
+        }
 
         let mut child = command.spawn()?;
         let stdin = child
