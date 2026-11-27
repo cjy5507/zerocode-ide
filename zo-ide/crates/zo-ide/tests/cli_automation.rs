@@ -532,3 +532,41 @@ async fn persistent_plain_session_reports_last_error_and_recovers_the_next_promp
         if recover { assert!(bodies[1].contains("second distinct persistent prompt")); }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zo_without_permission_mode_flag_defaults_to_read_only() {
+    let f = Fixture::new();
+    let default_status = f
+        .run(&["--status", "--model", "claude-sonnet-4-6"], "", None)
+        .await;
+    success(&default_status);
+    let default_line = String::from_utf8_lossy(&default_status.stdout);
+    assert!(
+        default_line.contains("· read-only ·"),
+        "omitting --permission-mode must default to read-only, got: {default_line}"
+    );
+    assert!(
+        !default_line.contains("danger-full-access"),
+        "omitting --permission-mode must not grant full access, got: {default_line}"
+    );
+
+    let full_status = f
+        .run(
+            &[
+                "--status",
+                "--model",
+                "claude-sonnet-4-6",
+                "--permission-mode",
+                "danger-full-access",
+            ],
+            "",
+            None,
+        )
+        .await;
+    success(&full_status);
+    let full_line = String::from_utf8_lossy(&full_status.stdout);
+    assert!(
+        full_line.contains("· danger-full-access ·"),
+        "explicit --permission-mode danger-full-access must still grant full access, got: {full_line}"
+    );
+}

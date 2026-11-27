@@ -1,131 +1,9 @@
-//! Startup workspace risk classification.
-//!
-//! This module is intentionally pure and UI-free: it decides whether a cwd is
-//! too broad to silently inherit the default full-access permission posture. A
-//! later interactive trust prompt can reuse this classifier without entangling
-//! prompting with permission-mode parsing.
+//! Interactive workspace trust gate and persisted trust decisions.
 
 use std::path::{Path, PathBuf};
 
-use core_types::paths::{default_config_home, zo_global_config_roots, ZO_DIR_NAME};
+use core_types::paths::{default_config_home, zo_global_config_roots};
 use runtime::PermissionMode;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceRisk {
-    Normal,
-    HighBlastRadius,
-}
-
-impl WorkspaceRisk {
-    #[must_use]
-    pub(crate) const fn requires_safe_default(self) -> bool {
-        matches!(self, Self::HighBlastRadius)
-    }
-}
-
-#[must_use]
-pub(crate) fn classify_cwd(cwd: &Path) -> WorkspaceRisk {
-    let cwd = normalize_existing_path(cwd);
-    if is_filesystem_root(&cwd) || is_global_home_or_ancestor(&cwd) {
-        WorkspaceRisk::HighBlastRadius
-    } else {
-        WorkspaceRisk::Normal
-    }
-}
-
-fn is_filesystem_root(path: &Path) -> bool {
-    path.parent().is_none()
-}
-
-fn is_global_home_or_ancestor(cwd: &Path) -> bool {
-    global_home_roots()
-        .into_iter()
-        .any(|root| root.matches_cwd(cwd))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GlobalHomeRoot {
-    path: PathBuf,
-    protect_ancestors: bool,
-}
-
-impl GlobalHomeRoot {
-    fn matches_cwd(&self, cwd: &Path) -> bool {
-        paths_equal(cwd, &self.path)
-            || (self.protect_ancestors && path_starts_with(&self.path, cwd))
-    }
-}
-
-#[cfg(not(windows))]
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    left == right
-}
-
-#[cfg(windows)]
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    windows_path_components(left) == windows_path_components(right)
-}
-
-#[cfg(not(windows))]
-fn path_starts_with(path: &Path, base: &Path) -> bool {
-    path.starts_with(base)
-}
-
-#[cfg(windows)]
-fn path_starts_with(path: &Path, base: &Path) -> bool {
-    let path = windows_path_components(path);
-    let base = windows_path_components(base);
-    path.len() >= base.len() && path[..base.len()] == base
-}
-
-#[cfg(windows)]
-fn windows_path_components(path: &Path) -> Vec<String> {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
-        .collect()
-}
-
-fn global_home_roots() -> Vec<GlobalHomeRoot> {
-    let mut roots = Vec::new();
-    for config_home in zo_global_config_roots()
-        .into_iter()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        let config_home = normalize_existing_path(&config_home);
-        push_global_home_root(
-            &mut roots,
-            GlobalHomeRoot {
-                path: config_home.clone(),
-                protect_ancestors: false,
-            },
-        );
-        if is_conventional_zo_config_dir(&config_home) {
-            if let Some(parent) = config_home.parent() {
-                push_global_home_root(
-                    &mut roots,
-                    GlobalHomeRoot {
-                        path: parent.to_path_buf(),
-                        protect_ancestors: true,
-                    },
-                );
-            }
-        }
-    }
-    roots
-}
-
-fn push_global_home_root(roots: &mut Vec<GlobalHomeRoot>, root: GlobalHomeRoot) {
-    if let Some(existing) = roots.iter_mut().find(|existing| existing.path == root.path) {
-        existing.protect_ancestors |= root.protect_ancestors;
-    } else {
-        roots.push(root);
-    }
-}
-
-fn is_conventional_zo_config_dir(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| name == std::ffi::OsStr::new(ZO_DIR_NAME))
-}
 
 fn normalize_existing_path(path: &Path) -> PathBuf {
     if let Ok(canonical) = std::fs::canonicalize(path) {
@@ -527,7 +405,6 @@ fn prompt_workspace_trust_typed(cwd: &Path, _inline: bool) -> Option<PermissionM
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_cwd, WorkspaceRisk};
     use std::path::Path;
 
     #[test]
@@ -564,12 +441,6 @@ mod tests {
         let coloured = trust_rows("~/work/acme-api", 1, 100, true);
         assert!(coloured[4].contains("\x1b[") && coloured[4].contains("2. Workspace-write"));
     }
-    
-
-
-    fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
-        with_env_paths(&[("HOME", Some(home))], f)
-    }
 
     fn with_env_paths<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T {
         let previous = vars
@@ -593,93 +464,6 @@ mod tests {
             Ok(value) => value,
             Err(payload) => std::panic::resume_unwind(payload),
         }
-    }
-
-    #[test]
-    fn workspace_trust_marks_home_as_high_blast_radius() {
-        let _guard = crate::test_env_lock();
-        let root = crate::support::temp_dir("home");
-        let home = root.join("dev");
-        std::fs::create_dir_all(&home).expect("home dir");
-        let risk = with_home(&home, || classify_cwd(&home));
-        std::fs::remove_dir_all(root).expect("cleanup");
-        assert_eq!(risk, WorkspaceRisk::HighBlastRadius);
-    }
-
-    #[test]
-    fn workspace_trust_marks_home_ancestor_as_high_blast_radius() {
-        let _guard = crate::test_env_lock();
-        let root = crate::support::temp_dir("ancestor");
-        let home = root.join("users").join("dev");
-        std::fs::create_dir_all(&home).expect("home dir");
-        let users_dir = home.parent().expect("home parent").to_path_buf();
-        let risk = with_home(&home, || classify_cwd(&users_dir));
-        std::fs::remove_dir_all(root).expect("cleanup");
-        assert_eq!(risk, WorkspaceRisk::HighBlastRadius);
-    }
-
-    #[test]
-    fn workspace_trust_allows_project_below_home() {
-        let _guard = crate::test_env_lock();
-        let root = crate::support::temp_dir("project");
-        let home = root.join("dev");
-        let project = home.join("repo");
-        std::fs::create_dir_all(&project).expect("project dir");
-        let risk = with_home(&home, || classify_cwd(&project));
-        std::fs::remove_dir_all(root).expect("cleanup");
-        assert_eq!(risk, WorkspaceRisk::Normal);
-    }
-
-    #[test]
-    fn workspace_trust_marks_zo_config_home_parent_as_high_blast_radius() {
-        let _guard = crate::test_env_lock();
-        let root = crate::support::temp_dir("zo-config-home");
-        let protected_home = root.join("global-home");
-        let config_home = protected_home.join(".zo");
-        let unrelated_home = root.join("unrelated-home");
-        std::fs::create_dir_all(&config_home).expect("config home dir");
-        std::fs::create_dir_all(&unrelated_home).expect("unrelated home dir");
-        let risk = with_env_paths(
-            &[
-                ("HOME", Some(&unrelated_home)),
-                ("ZO_CONFIG_HOME", Some(&config_home)),
-                ("ZO_HOME", None),
-            ],
-            || classify_cwd(&protected_home),
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-        assert_eq!(risk, WorkspaceRisk::HighBlastRadius);
-    }
-
-    #[test]
-    fn workspace_trust_does_not_mark_arbitrary_config_parent_as_high_blast_radius() {
-        let _guard = crate::test_env_lock();
-        let root = crate::support::temp_dir("custom-config-home");
-        let config_parent = root.join("config-parent");
-        let config_home = config_parent.join("zo-config");
-        let unrelated_home = root.join("unrelated-home");
-        std::fs::create_dir_all(&config_home).expect("config home dir");
-        std::fs::create_dir_all(&unrelated_home).expect("unrelated home dir");
-        let risk = with_env_paths(
-            &[
-                ("HOME", Some(&unrelated_home)),
-                ("ZO_CONFIG_HOME", Some(&config_home)),
-                ("ZO_HOME", None),
-            ],
-            || classify_cwd(&config_parent),
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
-        assert_eq!(risk, WorkspaceRisk::Normal);
-    }
-
-    #[test]
-    fn workspace_trust_marks_filesystem_root_as_high_blast_radius() {
-        let _guard = crate::test_env_lock();
-        let mut root = std::env::temp_dir();
-        while let Some(parent) = root.parent() {
-            root = parent.to_path_buf();
-        }
-        assert_eq!(classify_cwd(&root), WorkspaceRisk::HighBlastRadius);
     }
 
     #[test]

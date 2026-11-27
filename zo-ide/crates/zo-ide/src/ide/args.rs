@@ -603,7 +603,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
             person_model_pin: None,
             cwd,
             model,
-            permission_mode: permission_mode.unwrap_or(PermissionMode::WorkspaceWrite),
+            permission_mode: permission_mode.unwrap_or(PermissionMode::ReadOnly),
             named_permission_mode: permission_mode,
             allowed_tools,
             disable_spawn_family: no_spawn,
@@ -835,6 +835,16 @@ mod tests {
         assert!(!launch.render.render_markdown);
         assert!(!launch.render.verbose_stderr);
         assert!(launch.open.resume.is_none());
+    }
+
+    #[test]
+    fn unspecified_permission_mode_defaults_to_read_only() {
+        let launch = parse(&args(&[])).expect("parse");
+        assert_eq!(launch.open.permission_mode, PermissionMode::ReadOnly);
+        assert!(!launch.permission_mode_explicit);
+        let full = parse(&args(&["--permission-mode", "danger-full-access"])).expect("parse");
+        assert_eq!(full.open.permission_mode, PermissionMode::DangerFullAccess);
+        assert!(full.permission_mode_explicit);
     }
 
     /// The refusal ladder's switching mode is a closed word, over the setting

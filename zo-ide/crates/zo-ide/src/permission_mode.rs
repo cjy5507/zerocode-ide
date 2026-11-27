@@ -66,8 +66,8 @@ fn permission_mode_from_resolved(mode: ResolvedPermissionMode) -> PermissionMode
     }
 }
 
-/// The effective default permission mode: env override first, then the config
-/// for the current directory, then a workspace-risk-aware fallback.
+/// The effective default permission mode: the config for the current directory
+/// first, then read-only when nothing is configured.
 #[must_use]
 pub fn default_permission_mode() -> PermissionMode {
     resolve_permission_mode(fallback_permission_mode_for_current_dir)
@@ -86,16 +86,16 @@ pub fn interactive_default_permission_mode(inline: bool) -> PermissionMode {
 /// Shared config → `fallback` resolution. The environment override is
 /// intentionally NOT consulted: the permission mode comes only from the actual
 /// configured value for the current directory (the live `/permissions`
-/// selection persisted to settings), falling back to the workspace-risk-aware
-/// default when nothing is configured. Only the cwd fallback differs between
-/// the headless and interactive entry points.
+/// selection persisted to settings), falling back to read-only when nothing is
+/// configured. Only the cwd fallback differs between the headless and
+/// interactive entry points.
 fn resolve_permission_mode(fallback: impl FnOnce() -> PermissionMode) -> PermissionMode {
     config_permission_mode_for_current_dir().unwrap_or_else(fallback)
 }
 
 fn interactive_fallback_permission_mode_for_current_dir(inline: bool) -> PermissionMode {
     current_cli_cwd().ok().as_deref().map_or(
-        PermissionMode::DangerFullAccess,
+        PermissionMode::ReadOnly,
         |cwd| {
             crate::workspace_trust::resolve_trust_for_cwd(
                 cwd,
@@ -119,17 +119,13 @@ fn config_permission_mode_for_current_dir() -> Option<PermissionMode> {
 
 fn fallback_permission_mode_for_current_dir() -> PermissionMode {
     current_cli_cwd().ok().as_deref().map_or(
-        PermissionMode::DangerFullAccess,
+        PermissionMode::ReadOnly,
         fallback_permission_mode_for_cwd,
     )
 }
 
-fn fallback_permission_mode_for_cwd(cwd: &Path) -> PermissionMode {
-    if crate::workspace_trust::classify_cwd(cwd).requires_safe_default() {
-        PermissionMode::ReadOnly
-    } else {
-        PermissionMode::DangerFullAccess
-    }
+const fn fallback_permission_mode_for_cwd(_cwd: &Path) -> PermissionMode {
+    PermissionMode::ReadOnly
 }
 
 /// Canonicalise a permission-mode label, including Claude Code-compatible
@@ -182,5 +178,57 @@ mod tests {
     #[test]
     fn permission_mode_from_unknown_label_fails_safe() {
         assert_eq!(permission_mode_from_label("future-mode"), PermissionMode::ReadOnly);
+    }
+
+    #[test]
+    fn fallback_permission_mode_is_read_only_for_ordinary_project_dir() {
+        let _guard = crate::test_env_lock();
+        let root = crate::support::temp_dir("perm-fallback-ro");
+        let home = root.join("dev");
+        let config_home = root.join("config");
+        let project = home.join("repo");
+        std::fs::create_dir_all(&config_home).expect("config dir");
+        std::fs::create_dir_all(&project).expect("project dir");
+
+        let previous_cwd = std::env::current_dir().expect("cwd");
+        let previous_home = std::env::var_os("HOME");
+        let previous_config = std::env::var_os("ZO_CONFIG_HOME");
+        let previous_zo_home = std::env::var_os("ZO_HOME");
+
+        std::env::set_var("HOME", &home);
+        std::env::set_var("ZO_CONFIG_HOME", &config_home);
+        std::env::remove_var("ZO_HOME");
+        std::env::set_current_dir(&project).expect("set cwd");
+
+        let by_cwd = super::fallback_permission_mode_for_cwd(&project);
+        let headless_default = super::default_permission_mode();
+        let interactive_default = super::interactive_default_permission_mode(false);
+
+        std::env::set_current_dir(&previous_cwd).expect("restore cwd");
+        match previous_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_config {
+            Some(v) => std::env::set_var("ZO_CONFIG_HOME", v),
+            None => std::env::remove_var("ZO_CONFIG_HOME"),
+        }
+        match previous_zo_home {
+            Some(v) => std::env::set_var("ZO_HOME", v),
+            None => std::env::remove_var("ZO_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(by_cwd, PermissionMode::ReadOnly, "any folder falls back to read-only");
+        assert_eq!(
+            headless_default,
+            PermissionMode::ReadOnly,
+            "default_permission_mode falls back to read-only"
+        );
+        assert_eq!(
+            interactive_default,
+            PermissionMode::ReadOnly,
+            "interactive_default_permission_mode falls back to read-only without TTY/config"
+        );
     }
 }
