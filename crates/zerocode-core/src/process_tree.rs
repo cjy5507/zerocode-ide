@@ -202,7 +202,7 @@ fn end_tree_by_taskkill(pid: u32) {
 }
 
 /// `taskkill /T /F /PID <pid>` for every pid at once — each tree's ending
-/// started before any is waited for — then [`TASKKILL_WAIT`] at most for all
+/// started before any is waited for — then `TASKKILL_WAIT` at most for all
 /// of them together (152): several trees wait once, not once a tree.
 #[cfg(windows)]
 pub fn end_trees(pids: &[u32]) {
