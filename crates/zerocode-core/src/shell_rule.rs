@@ -4,9 +4,9 @@
 //! and the window when an agent in one of its panes is about to (the command
 //! guard, `crate::jev::tool_guard`).
 //!
-//! - `readOnlyValidation` — what a read-only session may not run ([`read_only`])
+//! - `readOnlyValidation` — what a read-only session may run: the programs,
+//!   verbs and options on the read-only list ([`read_only`], `read_list`)
 //! - `destructiveCommandWarning` — dangerous destructive commands ([`check_destructive`])
-//! - `sedValidation` — in-place `sed` ([`read_only_sed`])
 //! - `pathValidation` — suspicious path patterns ([`validate_paths`])
 //! - `commandSemantics` — a command's intent ([`classify_command`])
 //!
@@ -21,6 +21,7 @@ pub mod check;
 mod classify;
 pub mod kill;
 pub mod parse;
+mod read_list;
 pub mod runs;
 pub mod scope;
 mod script;
@@ -28,9 +29,8 @@ mod script;
 pub use check::{command_is_check_shaped, project_checks_in};
 pub use classify::classify_command;
 pub use parse::split_command_segments;
-use parse::{
-    extract_first_command, extract_sudo_inner, strip_command_wrappers, strip_single_quoted,
-};
+use parse::{extract_first_command, extract_sudo_inner, strip_command_wrappers};
+pub use read_list::{branch_query, git_read_options, remote_query};
 
 /// Result of validating a bash command before execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,15 +135,12 @@ const WRITE_REDIRECTIONS: &[&str] = &[">", ">>", ">&"];
 /// substring-based scan, so it fails closed.
 pub const MAX_ANALYZED_COMMAND_LEN: usize = 10_000;
 
-/// Shells that can execute arbitrary commands. Running one in read-only
-/// mode (`cat x | sh`, `sh -c '…'`) escapes the per-command classifier,
-/// so a safe-looking first token still leads to arbitrary execution.
+/// Shells that run a script they are handed (`sh -c '…'`, `cat x | sh`):
+/// the walk of the programs a command runs reads on into that script
+/// ([`runs`]).
 const SHELL_COMMANDS: &[&str] = &[
     "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "ash",
 ];
-
-/// Interpreters that execute arbitrary code through an inline-eval flag.
-const EVAL_INTERPRETERS: &[&str] = &["python", "python3", "node", "ruby", "perl", "php"];
 
 /// Awk implementations execute a program supplied in their arguments and can
 /// escape read-only mode through `system()`, output redirection, or program
@@ -165,196 +162,98 @@ fn find_uses_mutating_primary(command: &str) -> bool {
     })
 }
 
-/// Inline-eval flags that turn an interpreter into an arbitrary-code runner.
-const EVAL_FLAGS: &[&str] = &["-c", "-e", "-i", "-m", "--eval", "--command"];
-
-/// `gh` subcommands that can mutate remote state (matches the historical
-/// read-only allow-list). `gh api` is intentionally excluded — a bare API
-/// read is permissible — and is gated by the usual escape patterns instead.
-const GH_MUTATION_SUBCOMMANDS: &[&str] = &[
-    "pr", "issue", "release", "repo", "workflow", "secret", "auth",
-];
-
-/// Detect arbitrary-execution escapes that the write/state/redirect checks
-/// in [`read_only`] would otherwise miss: a safe-looking first
-/// token can still run arbitrary code via a shell, an interpreter eval
-/// flag, command substitution, or a `find`/`xargs`/`gh` action. Operates on
-/// a single already-split command segment and returns a block reason when
-/// the segment is unsafe under read-only mode.
-fn read_only_escape_reason(segment: &str) -> Option<String> {
-    let unquoted = strip_single_quoted(segment);
-
-    // Command substitution / backtick subshell — the inner command is
-    // opaque to static classification, so it cannot be proven read-only.
-    if unquoted.contains("$(") || unquoted.contains('`') {
-        return Some(
-            "Command substitution is not allowed in read-only mode (the inner command cannot be verified)"
-                .to_string(),
-        );
-    }
-
-    let first = extract_first_command(segment);
-    let first_base = first.rsplit('/').next().unwrap_or(first.as_str());
-
-    // A bare shell can run anything.
-    if SHELL_COMMANDS.contains(&first_base) {
-        return Some(format!(
-            "Running a shell ('{first_base}') is not allowed in read-only mode"
-        ));
-    }
-
-    // Awk programs can execute commands and write files without a shell-level
-    // redirection. Static substring checks cannot prove arbitrary programs safe.
-    if AWK_COMMANDS.contains(&first_base) {
-        return Some(format!(
-            "Awk interpreter '{first_base}' is not allowed in read-only mode"
-        ));
-    }
-
-    // Interpreters with an inline-eval flag execute arbitrary code.
-    if EVAL_INTERPRETERS.contains(&first_base) {
-        let has_eval_flag = segment
-            .split_whitespace()
-            .any(|token| EVAL_FLAGS.contains(&token));
-        if has_eval_flag {
-            return Some(format!(
-                "Interpreter '{first_base}' with an inline-eval flag is not allowed in read-only mode"
-            ));
-        }
-    }
-
-    // `find` can mutate files or execute arbitrary commands through actions
-    // that do not use shell redirection.
-    if first_base == "find" && find_uses_mutating_primary(segment) {
-        return Some("`find` with a mutating action is not allowed in read-only mode".to_string());
-    }
-
-    // `xargs <write-command>` runs a mutating command per input line.
-    if first_base == "xargs" {
-        let sub = segment
-            .strip_prefix("xargs")
-            .unwrap_or(segment)
-            .split_whitespace()
-            .find(|token| !token.starts_with('-'))
-            .unwrap_or("");
-        if WRITE_COMMANDS.contains(&sub) || matches!(sub, "kill" | "rmdir" | "chmod" | "chown") {
-            return Some(format!(
-                "`xargs {sub}` runs a mutating command and is not allowed in read-only mode"
-            ));
-        }
-    }
-
-    // `gh` mutation subcommands change remote state.
-    if first_base == "gh" {
-        let sub = segment
-            .strip_prefix("gh")
-            .unwrap_or(segment)
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        if GH_MUTATION_SUBCOMMANDS.contains(&sub) {
-            return Some(format!(
-                "`gh {sub}` may modify remote state and is not allowed in read-only mode"
-            ));
-        }
-    }
-
-    None
-}
-
-/// Whether a read-only session may run `command`.
+/// Whether a read-only session may run `command`: every simple command in it
+/// — through `&&`, `;`, `|`, here-documents and subshells, read the way the
+/// shell will run it — is a program, verb and options on the read-only list
+/// (`read_list`), with no `NAME=value` before it, no word the shell fills in
+/// at run time (`$X`, `$(…)`, a backtick) and no write redirection. Anything
+/// else is refused, however harmless it looks: a list of what writes is never
+/// complete, so the list is of what only reads (t-132606).
 ///
 /// Corresponds to upstream `tools/BashTool/readOnlyValidation.ts`.
 #[must_use]
 pub fn read_only(command: &str) -> ValidationResult {
-    // Arbitrary-execution escapes (shell, interpreter eval, command
-    // substitution, find -delete/-exec, xargs write, gh mutation) that a
-    // safe-looking first token would otherwise mask.
-    if let Some(reason) = read_only_escape_reason(command) {
-        return ValidationResult::Block { reason };
+    match read_only_refusal(command) {
+        None => ValidationResult::Allow,
+        Some(reason) => ValidationResult::Block { reason },
     }
-
-    let first_command = extract_first_command(command);
-
-    // Check for write commands.
-    for &write_cmd in WRITE_COMMANDS {
-        if first_command == write_cmd {
-            return ValidationResult::Block {
-                reason: format!(
-                    "Command '{write_cmd}' modifies the filesystem and is not allowed in read-only mode"
-                ),
-            };
-        }
-    }
-
-    // Check for state-modifying commands.
-    for &state_cmd in STATE_MODIFYING_COMMANDS {
-        if first_command == state_cmd {
-            return ValidationResult::Block {
-                reason: format!(
-                    "Command '{state_cmd}' modifies system state and is not allowed in read-only mode"
-                ),
-            };
-        }
-    }
-
-    // Check for sudo wrapping write commands.
-    if first_command == "sudo" {
-        let inner = extract_sudo_inner(command);
-        if !inner.is_empty() {
-            let inner_result = read_only(inner);
-            if inner_result != ValidationResult::Allow {
-                return inner_result;
-            }
-        }
-    }
-
-    // Check for write redirections.
-    for &redir in WRITE_REDIRECTIONS {
-        if command.contains(redir) {
-            return ValidationResult::Block {
-                reason: format!(
-                    "Command contains write redirection '{redir}' which is not allowed in read-only mode"
-                ),
-            };
-        }
-    }
-
-    // Check for git commands that modify state.
-    if first_command == "git" {
-        return validate_git_read_only(command);
-    }
-
-    ValidationResult::Allow
 }
 
-/// Whether `command` is proven read-only by the same classifier that gates
-/// execution: every segment of it passes read-only validation (e.g.
-/// `git log`, `grep`), so a read-only session can run it without escalating.
-/// Anything unprovable is not — writes are deliberately not proven, because
-/// shell path containment cannot be proven statically.
-///
-/// Mirrors the per-segment structure of zo's whole pipeline (read-only + sed
-/// checks on each `&&`/`;`/`|` segment): raw [`read_only`] inspects only the
-/// first command of the line, so calling it alone would prove
-/// `git log && rm x` "read-only" and miss `sed -i` entirely.
+fn read_only_refusal(command: &str) -> Option<String> {
+    // Very long commands are not worth proving safe: an attacker can pad a
+    // mutating command past the point where a linear check stays reliable.
+    if command.len() > MAX_ANALYZED_COMMAND_LEN {
+        return Some(format!(
+            "A command longer than {MAX_ANALYZED_COMMAND_LEN} bytes is not read, so it is not allowed in read-only mode"
+        ));
+    }
+    if let Some(redir) = WRITE_REDIRECTIONS
+        .iter()
+        .find(|redir| command.contains(**redir))
+    {
+        return Some(format!(
+            "Command contains write redirection '{redir}' which is not allowed in read-only mode"
+        ));
+    }
+    let read = script::read(command);
+    if read.overflowed {
+        return Some(
+            "Command substitutions nested too deep to read are not allowed in read-only mode"
+                .to_string(),
+        );
+    }
+    for simple in read.pipelines.iter().flatten() {
+        if !simple.nested.is_empty() {
+            return Some(
+                "Command substitution is not allowed in read-only mode (the inner command cannot be verified)"
+                    .to_string(),
+            );
+        }
+        if simple.assigned {
+            return Some(
+                "A NAME=value before a command can change what it runs (GIT_EXTERNAL_DIFF, PATH), so it is not allowed in read-only mode"
+                    .to_string(),
+            );
+        }
+        if simple
+            .words
+            .iter()
+            .any(|word| !word.subs.is_empty() || word.arithmetic)
+        {
+            return Some(
+                "Command substitution is not allowed in read-only mode (the inner command cannot be verified)"
+                    .to_string(),
+            );
+        }
+        if let Some(name) = simple.words.iter().find_map(|word| word.params.first()) {
+            return Some(format!(
+                "'${name}' is filled in by the shell when it runs, so the command cannot be verified and is not allowed in read-only mode"
+            ));
+        }
+        let words: Vec<(&str, bool)> = simple
+            .words
+            .iter()
+            .map(|word| (word.text.as_str(), word.glob))
+            .collect();
+        if let Some(reason) = read_list::refusal(&words) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Whether `command` is proven read-only by the same rule that gates
+/// execution ([`read_only`]), so a read-only session can run it without
+/// escalating. Anything unprovable is not — writes are deliberately not
+/// proven, because shell path containment cannot be proven statically.
 #[must_use]
 pub fn proven_read_only(command: &str) -> bool {
-    // Very long commands are not worth proving safe: the static, substring-based
-    // scanners degrade on pathological input and an attacker can pad a mutating
-    // command past the point where a linear check stays reliable. Fail closed —
-    // never downgrade, so an oversized command always prompts.
-    if command.len() > MAX_ANALYZED_COMMAND_LEN {
-        return false;
-    }
-    split_command_segments(command).into_iter().all(|segment| {
-        let inner = strip_command_wrappers(segment);
-        read_only(inner) == ValidationResult::Allow
-            && read_only_sed(inner) == ValidationResult::Allow
-    })
+    read_only(command) == ValidationResult::Allow
 }
 
-/// Git subcommands that are read-only safe.
+/// Git subcommands the intent table calls reading ([`classify_command`]).
+/// The read-only proof does not lean on it: it reads git by the read-only
+/// list (`read_list`), which holds fewer — not `config`, `stash` or `fetch`.
 const GIT_READ_ONLY_SUBCOMMANDS: &[&str] = &[
     "status",
     "log",
@@ -376,22 +275,6 @@ const GIT_READ_ONLY_SUBCOMMANDS: &[&str] = &[
     "reflog",
     "config",
 ];
-
-fn validate_git_read_only(command: &str) -> ValidationResult {
-    let parts: Vec<&str> = command.split_whitespace().collect();
-    // Skip past "git" and any flags (e.g., "git -C /path")
-    let subcommand = parts.iter().skip(1).find(|p| !p.starts_with('-'));
-
-    match subcommand {
-        Some(&sub) if GIT_READ_ONLY_SUBCOMMANDS.contains(&sub) => ValidationResult::Allow,
-        Some(&sub) => ValidationResult::Block {
-            reason: format!(
-                "Git subcommand '{sub}' modifies repository state and is not allowed in read-only mode"
-            ),
-        },
-        None => ValidationResult::Allow, // bare "git" is fine
-    }
-}
 
 // ---------------------------------------------------------------------------
 // destructiveCommandWarning
@@ -1085,32 +968,6 @@ pub fn command_targets_outside_workspace(command: &str) -> bool {
     }
 
     false
-}
-
-// ---------------------------------------------------------------------------
-// sedValidation
-// ---------------------------------------------------------------------------
-
-/// Whether a read-only session may run `command` as a sed expression: a
-/// `sed` editing in place may not.
-///
-/// Corresponds to upstream `tools/BashTool/sedValidation.ts`.
-#[must_use]
-pub fn read_only_sed(command: &str) -> ValidationResult {
-    let first = extract_first_command(command);
-    if first != "sed" {
-        return ValidationResult::Allow;
-    }
-
-    // In read-only mode, block sed in-place editing in both its short
-    // (`-i`) and long (`--in-place`) forms.
-    if command.contains(" -i") || command.contains("--in-place") {
-        return ValidationResult::Block {
-            reason: "sed -i (in-place editing) is not allowed in read-only mode".to_string(),
-        };
-    }
-
-    ValidationResult::Allow
 }
 
 // ---------------------------------------------------------------------------

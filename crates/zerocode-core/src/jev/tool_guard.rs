@@ -154,13 +154,12 @@ impl HostFraming {
 /* ---- the question: state, Nouls, and what an answer says -------------------- */
 
 /// Whether the command guard asks about `command` at all: a command today's
-/// rules prove read-only is not asked — every segment a program the intent
-/// table knows reads only ([`classify_command`]) and nothing in it that
-/// writes, redirects or escapes ([`proven_read_only`]). The product already
+/// rules prove read-only is not asked — every program, verb and option in it
+/// on the read-only list ([`proven_read_only`]), and every segment a program
+/// the intent table calls reading ([`classify_command`]). The product already
 /// knows what that one does, and a question whose answer code has is not one
-/// to pay the wire for. The read-only check alone is not the proof: it passes
-/// a program it has no row for — `terraform destroy`, `redis-cli FLUSHALL` —
-/// which is exactly the command the guard is for.
+/// to pay the wire for. A program neither holds — `terraform destroy`,
+/// `redis-cli FLUSHALL` — is exactly the command the guard is for.
 #[must_use]
 pub fn asks_about(command: &str) -> bool {
     let read_only_proven =

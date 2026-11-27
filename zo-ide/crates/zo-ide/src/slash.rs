@@ -555,7 +555,13 @@ fn plugin_command(cwd: &Path, name: &str, arg: &str, mode: core_types::Permissio
         match config {
             Err(error) => Some(error.to_string()),
             Ok(config) => {
-                let policy = runtime::PermissionPolicy::new(mode).with_permission_rules(config.permission_rules());
+                // A plugin script is not read-only, and is not asked to be: one the person
+                // installed and enabled runs in a workspace-write session, its permission
+                // rules still able to deny it (t-132606 — it ran there before only because
+                // the read-only rule passed every program it had no row for).
+                let policy = runtime::PermissionPolicy::new(mode)
+                    .with_tool_requirement("Bash", core_types::PermissionMode::WorkspaceWrite)
+                    .with_permission_rules(config.permission_rules());
                 let input = serde_json::json!({"command":command.command,"args":arg}).to_string();
                 policy.deny_reason("Bash", &input).or_else(|| match policy.authorize("Bash", &input, None) {
                     runtime::PermissionOutcome::Allow => None,

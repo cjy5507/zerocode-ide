@@ -1,7 +1,7 @@
 //! Pure shell-command tokenizing helpers shared by the validation rules and
 //! the intent classifier: split a line into operator-separated segments,
-//! strip leading wrapper commands (`timeout`, `env`, …), extract the first
-//! bare command, and unquote single-quoted spans. All functions are pure
+//! strip leading wrapper commands (`timeout`, `env`, …) and extract the
+//! first bare command. All functions are pure
 //! (`&str` in, owned/borrowed `str` out) with no validation policy of their
 //! own.
 
@@ -263,21 +263,4 @@ fn find_end_of_value(s: &str) -> Option<usize> {
     } else {
         s.find(char::is_whitespace).map(|at| lead + at)
     }
-}
-
-/// Remove single-quoted spans so a literal operator inside an argument
-/// (e.g. `grep -F '|' file`) does not trip the escape checks. Double
-/// quotes are preserved because the shell still expands `$(…)` and
-/// backticks inside them.
-pub(super) fn strip_single_quoted(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut in_single = false;
-    for ch in input.chars() {
-        match ch {
-            '\'' => in_single = !in_single,
-            _ if in_single => {}
-            _ => output.push(ch),
-        }
-    }
-    output
 }

@@ -2,6 +2,9 @@
 //! argv again: glob expansion and shell syntax never turn data into commands.
 
 use super::{FIND_MUTATING_PRIMARIES, MAX_ANALYZED_COMMAND_LEN};
+// Git's read options are the core's read-only list's (t-132606): one list
+// for what a read-only session may run and what this shell may.
+pub(crate) use zerocode_core::shell_rule::{branch_query, git_read_options, remote_query};
 
 struct Query {
     program: &'static str,
@@ -25,34 +28,6 @@ const QUERIES: &[Query] = &[
     Query { program: "find", subcommand: None, denied_options: FIND_MUTATING_PRIMARIES },
     Query { program: "stat", subcommand: None, denied_options: &[] },
 ];
-const BRANCH_OPTIONS: &[&str] = &["--list", "-l", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current", "--no-color", "--contains", "--no-contains", "--merged", "--no-merged", "--format", "--sort"];
-// Positive option spellings are deliberate: Git accepts abbreviations such
-// as --out for --output, so a blacklist of write flags would not be a guard.
-const GIT_READ_OPTIONS: &[&str] = &[
-    "--short", "--branch", "--porcelain", "--ignored", "--untracked-files",
-    "--oneline", "--format", "--pretty", "--max-count", "--since", "--until",
-    "--after", "--before", "--author", "--committer", "--grep", "--all",
-    "--branches", "--tags", "--remotes", "--graph", "--decorate", "--date",
-    "--no-walk", "--reverse", "--first-parent", "--merges", "--no-merges",
-    "--name-only", "--name-status", "--stat", "--numstat", "--shortstat",
-    "--summary", "--raw", "--patch", "--no-patch", "--no-color", "--color",
-    "--check", "--exit-code", "--quiet", "--cached", "--staged", "--no-index",
-    "--diff-filter", "--unified", "--ignore-all-space", "--ignore-space-change",
-];
-const GIT_READ_SHORT_OPTIONS: &[&str] = &["-s", "-b", "-sb", "-bs", "-z", "-p", "-u", "-n", "-w", "-M", "-C", "-R", "-r", "-m", "-c"];
-
-pub(crate) fn git_read_options(args: &[String]) -> bool {
-    let mut paths = false;
-    args.iter().all(|arg| {
-        if arg == "--" { paths = true; }
-        if paths || !arg.starts_with('-') { return true; }
-        GIT_READ_OPTIONS.contains(&arg.split('=').next().unwrap_or_default())
-            || GIT_READ_SHORT_OPTIONS.contains(&arg.as_str())
-            || arg.strip_prefix('-').is_some_and(|count| !count.is_empty() && count.chars().all(|ch| ch.is_ascii_digit()))
-            || ["-n", "-U"].iter().any(|prefix| arg.strip_prefix(prefix).is_some_and(|count| !count.is_empty() && count.chars().all(|ch| ch.is_ascii_digit())))
-    })
-}
-
 const DENIAL: &str = "Inspection Bash permits one local read-only query; writes, network, shell syntax and unlisted commands/options are refused. Use the file tools or do the work in the parent.";
 
 /// Validate a local query and return shell-safe argv with Git's external
@@ -88,7 +63,7 @@ fn command_words(words: &[String]) -> Result<String, String> {
         return Err(DENIAL.to_string());
     }
     match query.subcommand {
-        Some("branch") if !args.iter().all(|arg| BRANCH_OPTIONS.contains(&arg.split('=').next().unwrap_or_default())) => return Err(DENIAL.to_string()),
+        Some("branch") if !branch_query(args) => return Err(DENIAL.to_string()),
         Some("remote") if !remote_query(args) => return Err(DENIAL.to_string()),
         Some("status" | "log" | "diff" | "show") if !git_read_options(args) => return Err(DENIAL.to_string()),
         _ => {}
@@ -107,16 +82,6 @@ fn command_words(words: &[String]) -> Result<String, String> {
         command_words.extend(words.iter().map(|arg| quote(arg)).collect::<Result<Vec<_>, _>>()?);
     }
     Ok(command_words.join(" "))
-}
-
-fn remote_query(args: &[String]) -> bool {
-    match args {
-        [] => true,
-        [flag] if matches!(flag.as_str(), "-v" | "--verbose") => true,
-        [verb, rest @ ..] if verb == "get-url" => rest.iter().filter(|arg| !arg.starts_with('-')).count() == 1
-            && rest.iter().all(|arg| !arg.starts_with('-') || matches!(arg.as_str(), "--all" | "--push")),
-        _ => false,
-    }
 }
 
 #[cfg(test)]

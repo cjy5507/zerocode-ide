@@ -45,6 +45,10 @@ pub(crate) struct Command {
     /// What it reads on its input from here-documents and here-strings,
     /// its letters only — a shell handed it runs it (`bash <<'EOF'`).
     pub(crate) here: Vec<String>,
+    /// `NAME=value` words stood before it: they reach the program's
+    /// environment (`GIT_EXTERNAL_DIFF=… git diff`), and alone they set the
+    /// shell's own (`PATH=…`).
+    pub(crate) assigned: bool,
 }
 
 /// One word as the shell hands it to a command.
@@ -58,6 +62,10 @@ pub(crate) struct Word {
     pub(crate) subs: Vec<Script>,
     /// It holds an arithmetic expansion.
     pub(crate) arithmetic: bool,
+    /// It starts with an unquoted `*`, `?`, `[` or `{`: the shell may turn
+    /// it into other words, and one of them may start with `-` — a file
+    /// named `-delete` makes `find *` delete.
+    pub(crate) glob: bool,
 }
 
 impl Word {
@@ -424,6 +432,7 @@ impl Reader<'_> {
                 }
                 '$' => self.dollar(&mut word, false),
                 _ => {
+                    word.glob |= word.text.is_empty() && matches!(c, '*' | '?' | '[' | '{');
                     word.text.push(c);
                     self.at += 1;
                 }
@@ -661,7 +670,8 @@ fn is_word_end(c: char) -> bool {
 
 /// Close the command being read into the pipeline, its leading assignments
 /// and compound keywords taken off. Their substitutions still run, so they
-/// stay with the command as scripts it nests.
+/// stay with the command as scripts it nests; that there were assignments
+/// stays too, even when nothing else does.
 fn end_command(pipeline: &mut Pipeline, command: &mut Command) {
     let mut taken = std::mem::take(command);
     let lead = taken
@@ -675,9 +685,14 @@ fn end_command(pipeline: &mut Pipeline, command: &mut Command) {
         })
         .count();
     for word in taken.words.drain(..lead) {
+        taken.assigned |= is_assignment(&word);
         taken.nested.extend(word.subs);
     }
-    if !taken.words.is_empty() || !taken.nested.is_empty() || !taken.here.is_empty() {
+    if !taken.words.is_empty()
+        || !taken.nested.is_empty()
+        || !taken.here.is_empty()
+        || taken.assigned
+    {
         pipeline.push(taken);
     }
 }

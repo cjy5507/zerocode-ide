@@ -47,7 +47,7 @@ fn allows_read_commands_in_read_only() {
 fn blocks_sudo_write_in_read_only() {
     assert!(matches!(
         validate_read_only("sudo rm -rf /tmp/x", PermissionMode::ReadOnly),
-        ValidationResult::Block { reason } if reason.contains("rm")
+        ValidationResult::Block { reason } if reason.contains("'sudo'")
     ));
 }
 
@@ -82,7 +82,7 @@ fn blocks_pipe_to_shell_in_read_only() {
     let workspace = PathBuf::from("/workspace");
     assert!(matches!(
         validate_command("cat /etc/passwd | sh", PermissionMode::ReadOnly, &workspace),
-        ValidationResult::Block { reason } if reason.contains("shell")
+        ValidationResult::Block { reason } if reason.contains("'sh'")
     ));
     // Path-qualified shells are caught by base-name matching.
     assert!(matches!(
@@ -119,17 +119,18 @@ fn blocks_interpreter_eval_in_read_only() {
             "python -c \"import os; os.unlink('/tmp/x')\"",
             PermissionMode::ReadOnly
         ),
-        ValidationResult::Block { reason } if reason.contains("eval")
+        ValidationResult::Block { reason } if reason.contains("'python'")
     ));
     assert!(matches!(
         validate_read_only("node -e \"require('fs')\"", PermissionMode::ReadOnly),
         ValidationResult::Block { .. }
     ));
-    // Running a script without an eval flag is not an escape.
-    assert_eq!(
+    // Running a script without an eval flag runs it all the same: the
+    // read-only list holds no interpreter (t-132606).
+    assert!(matches!(
         validate_read_only("python analyze.py", PermissionMode::ReadOnly),
-        ValidationResult::Allow
-    );
+        ValidationResult::Block { reason } if reason.contains("'python'")
+    ));
 }
 
 #[test]
@@ -208,7 +209,7 @@ fn blocks_find_delete_and_xargs_write_in_read_only() {
 fn blocks_gh_mutation_in_read_only() {
     assert!(matches!(
         validate_read_only("gh pr merge 42", PermissionMode::ReadOnly),
-        ValidationResult::Block { reason } if reason.contains("gh pr")
+        ValidationResult::Block { reason } if reason.contains("'gh'")
     ));
     assert!(matches!(
         validate_read_only("gh release create v1", PermissionMode::ReadOnly),
@@ -217,18 +218,10 @@ fn blocks_gh_mutation_in_read_only() {
 }
 
 #[test]
-fn blocks_sed_inplace_long_form_in_read_only() {
-    assert!(matches!(
-        validate_sed("sed --in-place 's/a/b/' file.txt", PermissionMode::ReadOnly),
-        ValidationResult::Block { .. }
-    ));
-}
-
-#[test]
 fn blocks_sudo_shell_in_read_only() {
     assert!(matches!(
         validate_read_only("sudo bash", PermissionMode::ReadOnly),
-        ValidationResult::Block { reason } if reason.contains("shell")
+        ValidationResult::Block { reason } if reason.contains("'sudo'")
     ));
 }
 
@@ -766,24 +759,6 @@ fn workspace_write_allows_local_writes() {
     );
 }
 
-// --- sedValidation ---
-
-#[test]
-fn blocks_sed_inplace_in_read_only() {
-    assert!(matches!(
-        validate_sed("sed -i 's/old/new/' file.txt", PermissionMode::ReadOnly),
-        ValidationResult::Block { reason } if reason.contains("sed -i")
-    ));
-}
-
-#[test]
-fn allows_sed_stdout_in_read_only() {
-    assert_eq!(
-        validate_sed("sed 's/old/new/' file.txt", PermissionMode::ReadOnly),
-        ValidationResult::Allow
-    );
-}
-
 // --- pathValidation ---
 
 #[test]
@@ -1209,10 +1184,9 @@ fn required_mode_for_command_keeps_full_access_for_unprovable_commands() {
 /// `zerocode-orc send/ask/check` — goes through the bash tool, so the shapes
 /// the ledger's preamble asks for must stay provably read-only: a read-only
 /// worker that cannot report is one the ledger only ever hears as
-/// `went_quiet: never_spoke`. No allowlist entry exists for this and none is
-/// needed — an unknown first command with no escape and no redirection is
-/// read-only by construction. This pin keeps that true across classifier
-/// changes.
+/// `went_quiet: never_spoke`. The read-only list holds these verbs for that
+/// (`zerocode-orc` in the core's `read_list`, t-132606); this pin keeps them
+/// there across classifier changes.
 #[test]
 fn ledger_reporting_verbs_stay_provably_read_only() {
     for command in [

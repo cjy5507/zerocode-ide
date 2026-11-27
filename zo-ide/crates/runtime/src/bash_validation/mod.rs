@@ -2,14 +2,15 @@
 //! shell command.
 //!
 //! The rules themselves are the core crate's (`zerocode_core::shell_rule`,
-//! t-10916): what a read-only session may not run, what is destructive, which
+//! t-10916): what a read-only session may run, what is destructive, which
 //! paths escape, a command's intent. They moved there so the window reads a
 //! command by the same rules zo does; what stays here is the half that speaks
 //! of a [`PermissionMode`]:
-//! - `readOnlyValidation` — block write-like commands in read-only mode
+//! - `readOnlyValidation` — in read-only mode, run only what the read-only
+//!   list proves
 //! - `modeValidation` — enforce permission mode constraints on commands
-//! - `sedValidation` — validate sed expressions before execution
-//! - the pipeline that runs them all ([`validate_command`])
+//! - the pipeline that runs the mode's rule and the every-mode checks
+//!   ([`validate_command`])
 
 use std::path::Path;
 
@@ -27,7 +28,7 @@ use zerocode_core::shell_rule::parse::strip_command_wrappers;
 #[cfg(test)]
 use zerocode_core::shell_rule::parse::extract_first_command;
 use zerocode_core::shell_rule::{
-    command_targets_outside_workspace, proven_read_only, read_only, read_only_sed,
+    command_targets_outside_workspace, proven_read_only, read_only,
     FIND_MUTATING_PRIMARIES, MAX_ANALYZED_COMMAND_LEN,
 };
 
@@ -49,8 +50,8 @@ pub fn validate_read_only(command: &str, mode: PermissionMode) -> ValidationResu
 }
 
 /// Minimal permission mode a bash command actually needs, derived from the
-/// same classifier that gates execution: a command every segment of which
-/// passes read-only validation (e.g. `git log`, `grep`) only needs
+/// same rule that gates execution: a command whose every program, verb and
+/// option is on the read-only list (e.g. `git log`, `grep`) only needs
 /// [`PermissionMode::ReadOnly`], so read-only sessions can run it without
 /// escalating. Anything unprovable keeps the bash tool's static
 /// `DangerFullAccess` requirement — writes are deliberately not downgraded
@@ -95,23 +96,6 @@ pub fn validate_mode(command: &str, mode: PermissionMode) -> ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
-// sedValidation
-// ---------------------------------------------------------------------------
-
-/// Validate sed expressions for safety: in read-only mode an in-place `sed`
-/// is blocked ([`zerocode_core::shell_rule::read_only_sed`]); every other mode
-/// allows it here.
-///
-/// Corresponds to upstream `tools/BashTool/sedValidation.ts`.
-#[must_use]
-pub fn validate_sed(command: &str, mode: PermissionMode) -> ValidationResult {
-    if mode != PermissionMode::ReadOnly {
-        return ValidationResult::Allow;
-    }
-    read_only_sed(command)
-}
-
-// ---------------------------------------------------------------------------
 // Pipeline: run all validations
 // ---------------------------------------------------------------------------
 
@@ -119,35 +103,37 @@ pub fn validate_sed(command: &str, mode: PermissionMode) -> ValidationResult {
 ///
 /// Returns the first non-Allow result, or Allow if all validations pass.
 ///
-/// Shell-aware: the per-command checks (mode/read-only and sed) run on
+/// Shell-aware: a read-only session reads the whole line against the
+/// read-only list, every simple command of it as the shell will run it
+/// ([`read_only`]) — wrappers are not stripped first, because `env
+/// GIT_EXTERNAL_DIFF=… git diff` is not `git diff`. Other modes check
 /// **each** segment of a compound command (`a && b`, `a | b`, `a; b`, …)
-/// after wrapper-stripping, so a safe leading command can never smuggle
-/// in a blocked trailing one. The substring-based destructive and path
-/// checks run once over the whole line (they already match anywhere).
+/// after wrapper-stripping, so a safe leading command can never smuggle in
+/// a blocked trailing one. The substring-based destructive and path checks
+/// run once over the whole line (they already match anywhere).
 #[must_use]
 pub fn validate_command(command: &str, mode: PermissionMode, workspace: &Path) -> ValidationResult {
-    // 1 + 2. Per-segment mode and sed validation.
-    for segment in split_command_segments(command) {
-        let inner = strip_command_wrappers(segment);
-
-        let result = validate_mode(inner, mode);
-        if result != ValidationResult::Allow {
-            return result;
-        }
-
-        let result = validate_sed(inner, mode);
-        if result != ValidationResult::Allow {
-            return result;
-        }
+    // 1. The mode's own rule.
+    let result = if mode == PermissionMode::ReadOnly {
+        read_only(command)
+    } else {
+        split_command_segments(command)
+            .into_iter()
+            .map(|segment| validate_mode(strip_command_wrappers(segment), mode))
+            .find(|result| *result != ValidationResult::Allow)
+            .unwrap_or(ValidationResult::Allow)
+    };
+    if result != ValidationResult::Allow {
+        return result;
     }
 
-    // 3. Destructive command warnings (substring match over whole line).
+    // 2. Destructive command warnings (substring match over whole line).
     let result = check_destructive(command);
     if result != ValidationResult::Allow {
         return result;
     }
 
-    // 4. Path validation (substring match over whole line).
+    // 3. Path validation (substring match over whole line).
     validate_paths(command, workspace)
 }
 
