@@ -541,20 +541,27 @@ mod tests {
 
     impl Project {
         fn new(settings: &str, commit: bool) -> Self {
+            let project = Self::unrecorded(settings);
+            if commit {
+                init_git_repo_with(&project.cwd, ".zo/settings.local.json", true);
+            } else {
+                let real = project.settings_path().canonicalize().expect("canonical");
+                crate::config::local_record::remember(&project.home, &real, settings.as_bytes())
+                    .expect("record");
+            }
+            project
+        }
+
+        /// The same project with nothing said about whose the file is:
+        /// neither recorded nor committed. For a test that hands the
+        /// narrowing its read and its write itself, so no record is asked.
+        fn unrecorded(settings: &str) -> Self {
             let root = TestRoot::new("allow-always-narrow");
             let cwd = root.join("project");
             let home = root.join("home").join(".zo");
             fs::create_dir_all(cwd.join(".zo")).expect("project .zo");
             fs::create_dir_all(&home).expect("home .zo");
             fs::write(cwd.join(".zo").join(SETTINGS_FILE), settings).expect("write settings");
-            if commit {
-                init_git_repo_with(&cwd, ".zo/settings.local.json", true);
-            } else {
-                let path = cwd.join(".zo").join(SETTINGS_FILE);
-                let real = path.canonicalize().expect("canonical");
-                crate::config::local_record::remember(&home, &real, settings.as_bytes())
-                    .expect("record");
-            }
             let folder = root.join("state").join(STATE_FOLDER);
             Self { _root: root, cwd, home, folder }
         }
@@ -846,7 +853,7 @@ mod tests {
     #[test]
     fn an_empty_file_leaves_no_marker() {
         for empty in ["", " \n\t"] {
-            let project = Project::new(empty, false);
+            let project = Project::unrecorded(empty);
             let outcome =
                 narrow_with(&project.cwd, &project.folder, LOCK_WAIT, &mut || Some(empty.to_string()), &mut |_| {
                     panic!("no write")
@@ -860,7 +867,7 @@ mod tests {
     /// A file that changes between the read and the write is not written over.
     #[test]
     fn a_file_that_changes_while_it_is_read_is_left_as_it_was_and_unmarked() {
-        let project = Project::new("{}", false);
+        let project = Project::unrecorded("{}");
         let before = format!(r#"{{"permissions":{{"allow":["{BROAD}"]}}}}"#);
         let mut reads = [before.clone(), format!("{before} ")].into_iter();
         let mut writes = 0;
@@ -997,7 +1004,7 @@ mod tests {
     /// glob the person writes into a new file later stays theirs.
     #[test]
     fn a_project_without_the_file_is_marked_and_nothing_is_created() {
-        let project = Project::new("{}", false);
+        let project = Project::unrecorded("{}");
         fs::remove_file(project.settings_path()).expect("remove settings");
         let outcome =
             narrow_with(&project.cwd, &project.folder, LOCK_WAIT, &mut || panic!("no read"), &mut |_| {

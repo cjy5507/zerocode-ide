@@ -82,11 +82,30 @@ impl Scratch {
         std::fs::write(&path, document.to_string()).expect("opt the project in");
     }
 
+    /// A project server the person consented to: `add --project --trust`
+    /// where zo keeps its record of local files. Where it keeps none
+    /// `--trust` is refused, so the server is added and its name written into
+    /// the trust record as a person writes it.
+    fn add_trusted(&self, name: &str) {
+        if runtime::can_tell_persons_own_settings_file() {
+            self.run(&["add", name, "--project", "--trust", "--", "npx"])
+                .expect("add trusted");
+            return;
+        }
+        self.run(&["add", name, "--project", "--", "npx"])
+            .expect("add project");
+        let mut names: Vec<String> = std::fs::read_to_string(self.trust_record())
+            .map(|text| serde_json::from_str(&text).expect("the record is JSON"))
+            .unwrap_or_default();
+        names.push(name.to_string());
+        std::fs::write(self.trust_record(), json!(names).to_string())
+            .expect("a person writes the record");
+    }
+
     /// A project `remove` as it was before it edited the record: the server
     /// leaves the settings document and its name stays trusted.
     fn leave_a_trusted_name_behind(&self, name: &str) {
-        self.run(&["add", name, "--project", "--trust", "--", "npx"])
-            .expect("add trusted");
+        self.add_trusted(name);
         assert_eq!(
             runtime::remove_mcp_server(self.home.path(), &self.project_settings(), name).expect("old remove"),
             McpEdit::Removed
@@ -595,6 +614,49 @@ fn a_project_add_without_trust_leaves_the_trust_record_alone_and_says_so() {
         .contains_key("repo"));
 }
 
+/// Where zo keeps no record of local files `--trust` could record nothing, so
+/// `add --project --trust` is refused before anything is written: in an empty
+/// folder no `.zo` appears, and where a settings document and a trust record
+/// stand both keep their bytes, for a new name and for one already there. The
+/// refusal names the way that works first.
+#[cfg(windows)]
+#[test]
+fn a_project_add_with_trust_where_no_record_is_kept_is_refused_before_anything_is_written() {
+    let scratch = Scratch::new();
+    let error = scratch
+        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
+        .expect_err("--trust records nothing here");
+    assert!(
+        error.starts_with("to run repo on this system, add it to your own settings instead"),
+        "{error}"
+    );
+    let zo = scratch.cwd.path().join(".zo");
+    assert!(!zo.exists(), "add made {}", zo.display());
+
+    scratch
+        .run(&["add", "kept", "--project", "--", "npx"])
+        .expect("add project");
+    std::fs::write(scratch.trust_record(), "[\"kept\"]\n").expect("a person writes the record");
+    let settings = std::fs::read(scratch.project_settings()).expect("project settings");
+    let record = std::fs::read(scratch.trust_record()).expect("trust record");
+    for line in [
+        ["add", "repo", "--project", "--trust", "--", "npx"],
+        ["add", "kept", "--project", "--trust", "--", "uvx"],
+    ] {
+        scratch.run(&line).expect_err("--trust records nothing here");
+        assert_eq!(
+            std::fs::read(scratch.project_settings()).expect("project settings"),
+            settings,
+            "{line:?}"
+        );
+        assert_eq!(
+            std::fs::read(scratch.trust_record()).expect("trust record"),
+            record,
+            "{line:?}"
+        );
+    }
+}
+
 /// With consent the name stands in the record, and the next load runs the
 /// server — the whole point of the flag.
 #[test]
@@ -756,9 +818,7 @@ fn a_project_remove_takes_the_name_out_of_the_trust_record_and_keeps_the_others(
 #[test]
 fn a_server_added_under_a_removed_name_is_gated_again() {
     let scratch = Scratch::new();
-    scratch
-        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
-        .expect("add trusted");
+    scratch.add_trusted("repo");
     scratch
         .run(&["remove", "repo", "--project"])
         .expect("remove project");
@@ -812,9 +872,7 @@ fn a_remove_leaves_the_trust_record_alone_when_the_name_was_never_trusted_there(
 #[test]
 fn a_project_remove_says_in_words_that_the_name_came_out_of_the_record() {
     let scratch = Scratch::new();
-    scratch
-        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
-        .expect("add trusted");
+    scratch.add_trusted("repo");
 
     let printed = scratch
         .run(&["remove", "repo", "--project"])
@@ -836,9 +894,7 @@ fn a_project_remove_says_in_words_that_the_name_came_out_of_the_record() {
 #[test]
 fn a_project_remove_that_cannot_edit_the_record_says_the_server_is_already_gone() {
     let scratch = Scratch::new();
-    scratch
-        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
-        .expect("add trusted");
+    scratch.add_trusted("repo");
     let broken = r#"{"repo": true}"#;
     std::fs::write(scratch.trust_record(), broken).expect("a person breaks the record");
 
@@ -876,9 +932,7 @@ fn a_project_remove_that_cannot_edit_the_record_says_the_server_is_already_gone(
 fn a_project_remove_takes_out_a_name_left_in_the_record_after_its_server_was_gone() {
     let scratch = Scratch::new();
     scratch.leave_a_trusted_name_behind("repo");
-    scratch
-        .run(&["add", "kept", "--project", "--trust", "--", "npx"])
-        .expect("add trusted");
+    scratch.add_trusted("kept");
 
     let report = scratch.json(&["remove", "repo", "--project", "--json"]);
 

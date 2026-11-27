@@ -1287,6 +1287,20 @@ fn render_blocked_mcp_section(untrusted: &[&UntrustedMcpServer]) -> Option<Strin
         "  These project-scoped servers are gated for supply-chain safety. To enable one:"
             .to_string(),
     );
+    // Where zo keeps no record of local files, a folder's trust record and
+    // local settings read as the repository's: only the person's own settings
+    // file enables a server there.
+    if !runtime::can_tell_persons_own_settings_file() {
+        lines.push(
+            "    • add it to your own settings with `zo mcp add <name> …` (without --project), or"
+                .to_string(),
+        );
+        lines.push(
+            "    • set \"enableAllProjectMcpServers\": true in your own (User) settings file."
+                .to_string(),
+        );
+        return Some(lines.join("\n"));
+    }
     lines.push(
         "    • trust it with `zo mcp add <name> --project --trust …` (zo records .zo/trusted-mcp-servers.json as yours), or".to_string(),
     );
