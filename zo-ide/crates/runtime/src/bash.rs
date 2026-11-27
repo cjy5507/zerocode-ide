@@ -2114,6 +2114,12 @@ mod tests {
         );
     }
 
+    /// A background task the watcher has closed either way: a test that waits
+    /// for `Completed` alone reads a failed task as a slow one (t-133401).
+    fn ended(task: &crate::task_registry::Task) -> bool {
+        matches!(task.status, TaskStatus::Completed | TaskStatus::Failed)
+    }
+
     fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         let until = Instant::now() + deadline;
         loop {
@@ -2506,9 +2512,8 @@ mod tests {
             .expect("background spawn");
         let task_id = output.background_task_id.expect("task id");
 
-        wait_for(Duration::from_secs(5), || {
-            registry.get(&task_id).filter(|task| task.status == TaskStatus::Completed)
-        });
+        let task = wait_for(Duration::from_secs(5), || registry.get(&task_id).filter(ended));
+        assert_eq!(task.status, TaskStatus::Completed, "{}", task.output);
         let log = registry.output(&task_id).expect("task output");
         assert!(log.len() <= BACKGROUND_TASK_LIMITS.tail_bytes);
         assert!(log.starts_with(crate::background_log::OLDER_OUTPUT_TRUNCATED));
@@ -2557,11 +2562,8 @@ mod tests {
             "must be a registry task id, not a bare PID: {task_id}"
         );
 
-        wait_for(Duration::from_secs(5), || {
-            registry
-                .get(&task_id)
-                .filter(|task| task.status == TaskStatus::Completed)
-        });
+        let task = wait_for(Duration::from_secs(5), || registry.get(&task_id).filter(ended));
+        assert_eq!(task.status, TaskStatus::Completed, "{}", task.output);
         let log = registry.output(&task_id).expect("task output");
         // The log opens by echoing the command itself, and that echo contains
         // the literal markers — assert on the streamed remainder so a run that
