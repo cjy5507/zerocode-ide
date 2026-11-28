@@ -382,7 +382,15 @@ class Bench(unittest.TestCase):
             (self.state / "running").unlink(missing_ok=True)
 
     def test_a_question_left_open_is_waited_for_and_one_past_the_bound_ends_the_bench(self):
-        out = self.run_bench("run", "--scenario", "t-answer", FAKE_ZO_SCRIPT=json.dumps({"ndjson": [USAGE], "state": {"confirming": "3"}, "last_message": "42"}))
+        # Waited for: the question closes after three status reads, however long the
+        # machine takes to answer them, so this run gets a bound those reads cannot
+        # outlast (2026-11-28: four reads and three polls outran 500 ms on a loaded
+        # runner; with each read 0.2 s slower to start, so they do here). The bound
+        # itself is judged below, by a question that never closes.
+        waited = json.loads(json.dumps(self.raw))
+        waited["question_wait_ms"]["value"] = 60_000
+        out = self.run_bench("run", "--scenario", "t-answer", table=waited,
+                             FAKE_ZO_SCRIPT=json.dumps({"ndjson": [USAGE], "state": {"confirming": "3"}, "last_message": "42"}))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(sum(1 for _folder, words in self.calls() if words.startswith("quit")), 2, "the live run's teardown ran once it closed")
         shutil.rmtree(self.top)
