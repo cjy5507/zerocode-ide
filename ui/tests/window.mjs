@@ -18841,7 +18841,40 @@ const skillViewResult = await page.evaluate(async ([report, library]) => {
     overflow: view.scrollWidth > view.clientWidth,
     catalogs: ['en','ja','zh','es'].every((locale) => ['library.tab.skills','library.tab.mcp','library.status.repo','library.status.only','skills.conflict','skills.evidence'].every((key) => CATALOG[locale]?.[key])) };
 }, [SKILL_VIEW_FIXTURE, SKILL_LIBRARY_FIXTURE]);
-ok('skills is a first-class document with a keyed 300-row paint under 120ms', skillViewResult.kind === 'skills' && skillViewResult.heading === skillViewResult.headingWanted && skillViewResult.heading !== 'title' && skillViewResult.searchLabel !== 'search' && skillViewResult.cards === 300 && skillViewResult.firstPaintMs < 120 && skillViewResult.height > 0, JSON.stringify(skillViewResult));
+// The 120 ms budget is judged on five fresh pages, each opened and let finish its boot, and their
+// median: one paint on a busy runner went over it now and then (macOS 5 of 58 runs, 11-16 to
+// 11-28, 136.7 ms on 11-28) while the page's own budget held. The person chose this on 2026-11-28;
+// the paint above, in this long-lived page, is still read and kept in the record.
+const skillPaintSamples = [];
+for (let sample = 0; sample < 5; sample += 1) {
+  const { page: paintPage } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
+  try {
+    await waitBootSettled(paintPage);
+    skillPaintSamples.push(await paintPage.evaluate(async ([report, library]) => {
+      setSettingsOpen(false);
+      window.__ANSWER__.install_bundled_skill = () => [];
+      window.__ANSWER__.library_report = () => library;
+      window.__ANSWER__.library_look = () => library;
+      window.__ANSWER__.skills_list = () => report;
+      window.__ANSWER__.skills_rescan = () => report;
+      skillsReport = null; libraryReport = null;
+      if (skillsPending) await skillsPending;
+      const start = performance.now();
+      document.getElementById('nav-skills').click();
+      await refreshSkills();
+      const tab = tabs.find((tab) => tab.kind === 'skills');
+      const view = docHost(tab.pane, 'skills');
+      view.getBoundingClientRect();
+      await new Promise(requestAnimationFrame);
+      const ms = performance.now() - start;
+      return view.querySelectorAll('.lib-part[data-part="skills"] .lib-row').length === 300 ? ms : null;
+    }, [SKILL_VIEW_FIXTURE, SKILL_LIBRARY_FIXTURE]));
+  } finally {
+    await paintPage.close();
+  }
+}
+const skillPaintMedian = skillPaintSamples.every((ms) => typeof ms === 'number') ? [...skillPaintSamples].sort((a, b) => a - b)[2] : null;
+ok('skills is a first-class document with a keyed 300-row paint under 120ms', skillViewResult.kind === 'skills' && skillViewResult.heading === skillViewResult.headingWanted && skillViewResult.heading !== 'title' && skillViewResult.searchLabel !== 'search' && skillViewResult.cards === 300 && skillPaintMedian !== null && skillPaintMedian < 120 && skillViewResult.height > 0, JSON.stringify({ ...skillViewResult, paintSamplesMs: skillPaintSamples, paintMedianMs: skillPaintMedian }));
 ok('skills search and filters create zero nodes and combine on the same rows', skillViewResult.created === 0 && skillViewResult.sameNodes && skillViewResult.searchCount === 1 && skillViewResult.ownCount === 1 && skillViewResult.combinedCount === 0 && skillViewResult.allBack === 300, JSON.stringify(skillViewResult));
 ok('Skills arrow navigation keeps focus in its document instead of the terminal sink', skillViewResult.keyboardNext === 'family-1', JSON.stringify(skillViewResult));
 ok('skills detail reuses markdown, exposes the conflict and real evidence, and has four catalogs', skillViewResult.detail === 'Release review' && skillViewResult.evidence.includes('term-8') && skillViewResult.conflict && skillViewResult.variants === 2 && skillViewResult.catalogs && !skillViewResult.overflow, JSON.stringify(skillViewResult));
