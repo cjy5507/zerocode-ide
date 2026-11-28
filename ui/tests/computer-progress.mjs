@@ -2783,7 +2783,23 @@ async function testTheBandTakesNoPressFromAMenu(browser, origin, ok) {
   for (const [width, full] of [[320, true], [900, true], [1800, false]]) {
     const { page, faults } = await openComputerPage(browser, origin);
     try {
+      // `setViewportSize` can answer before the page has had its `resize`, and
+      // an open menu closes on a resize (it moves the point the menu aims at).
+      // A resize that lands after the menu below opened reads as CI's 11-26
+      // and 11-28 failures did (the 1800px case, `late.items` 0), so the menu
+      // opens only once the page has had the resize to the new size.
+      await page.evaluate(({ width, height }) => {
+        window.__RESIZED_TO_SIZE__ = new Promise((done) => {
+          const heard = () => {
+            if (window.innerWidth !== width || window.innerHeight !== height) return;
+            window.removeEventListener("resize", heard);
+            done();
+          };
+          window.addEventListener("resize", heard);
+        });
+      }, { width, height: 640 });
       await page.setViewportSize({ width, height: 640 });
+      await page.evaluate(() => window.__RESIZED_TO_SIZE__);
       if (full) await page.evaluate(fillTheStatusBar, FULL_BAR_GAUGES);
       else await page.evaluate(() => { window.__HOLD_POLLERS__ = true; });
       const seen = await evaluateCase(page, async ({ state }) => {
