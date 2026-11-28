@@ -237,11 +237,35 @@ function Assert-EmbeddedRoutes([string]$Binary) {
   if ($LASTEXITCODE -ne 0) { throw "installed executable has the wrong embedded UI route set" }
 }
 
-function Assert-FileDigestMatches([string]$Actual, [string]$Expected, [string]$Label) {
-  $ActualDigest = (Get-FileHash -LiteralPath $Actual -Algorithm SHA256).Hash
-  $ExpectedDigest = (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash
-  if ($ActualDigest -ne $ExpectedDigest) {
-    throw "$Label bytes differ from the inspected release binary"
+# Tauri's bundler writes the installer kind into the executable before it packs
+# each installer: the first `__TAURI_BUNDLE_TYPE_VAR_UNK` becomes `..._MSI` in
+# the MSI and `..._NSS` in the NSIS installer (tauri-utils platform.rs), and it
+# puts the original bytes back once each installer is packed, so the release
+# binary keeps `UNK`. The installed executable must equal the release binary
+# with that one marker set to its installer's kind, byte for byte: a wrong
+# kind, a marker left at `UNK` or any other byte fails. So does a release
+# binary without the marker, which the bundler only warns about.
+$BundleTypeMarker = "__TAURI_BUNDLE_TYPE_VAR_UNK"
+
+function Get-BytesDigest([byte[]]$Bytes) {
+  $Sha = [System.Security.Cryptography.SHA256]::Create()
+  try { return [System.Convert]::ToHexString($Sha.ComputeHash($Bytes)) } finally { $Sha.Dispose() }
+}
+
+function Get-BundledBinaryDigest([string]$ReleaseBinary, [string]$Kind) {
+  if ($Kind -cnotin @("MSI", "NSS")) { throw "unknown installer kind: $Kind" }
+  $Bytes = [System.IO.File]::ReadAllBytes($ReleaseBinary)
+  $At = [System.Text.Encoding]::Latin1.GetString($Bytes).IndexOf($BundleTypeMarker, [System.StringComparison]::Ordinal)
+  if ($At -lt 0) { throw "the release binary carries no $BundleTypeMarker for the bundler to set" }
+  $KindBytes = [System.Text.Encoding]::ASCII.GetBytes($Kind)
+  [Array]::Copy($KindBytes, 0, $Bytes, $At + $BundleTypeMarker.Length - $KindBytes.Length, $KindBytes.Length)
+  return Get-BytesDigest $Bytes
+}
+
+function Assert-FileDigestMatches([string]$Actual, [string]$Expected, [string]$Kind, [string]$Label) {
+  $ActualDigest = Get-BytesDigest ([System.IO.File]::ReadAllBytes($Actual))
+  if ($ActualDigest -ne (Get-BundledBinaryDigest $Expected $Kind)) {
+    throw "$Label bytes differ from the inspected release binary as the bundler sets it for $Kind"
   }
 }
 
@@ -286,7 +310,8 @@ function Assert-Installed(
   [bool]$WaitForMigration,
   [int]$Launches,
   [string]$ExpectedThumbprint,
-  [string]$ExpectedBinary
+  [string]$ExpectedBinary,
+  [string]$ExpectedKind
 ) {
   $Binary = Find-InstalledBinary $InstallRoot
   Assert-PeIdentity $Binary $ExpectedVersion "installed executable"
@@ -295,7 +320,7 @@ function Assert-Installed(
     [void](Assert-AuthenticodeTrust $Binary $ExpectedThumbprint "installed executable")
   }
   if ($ExpectedBinary) {
-    Assert-FileDigestMatches $Binary $ExpectedBinary "installed executable"
+    Assert-FileDigestMatches $Binary $ExpectedBinary $ExpectedKind "installed executable"
     & node (Join-Path $Root "scripts/check-package-artifacts.mjs") --helpers $Binary
     if ($LASTEXITCODE -ne 0) { throw "installed package is missing a helper executable" }
   }
@@ -330,11 +355,11 @@ if ($PreviousMsi) {
   Install-Msi $Msi $MsiRoot "MSI upgrade"
   Assert-MsiProductState $CurrentProductCode $InstallStateDefault "current MSI after upgrade"
   Assert-MsiProductState $PreviousProductCode $InstallStateUnknown "previous MSI after upgrade"
-  Assert-Installed $MsiRoot $Version $false 2 $ExpectedSigner $ReleaseBinary
+  Assert-Installed $MsiRoot $Version $false 2 $ExpectedSigner $ReleaseBinary "MSI"
 } else {
   Install-Msi $Msi $MsiRoot "MSI install"
   Assert-MsiProductState $CurrentProductCode $InstallStateDefault "current MSI after install"
-  Assert-Installed $MsiRoot $Version $true 2 $ExpectedSigner $ReleaseBinary
+  Assert-Installed $MsiRoot $Version $true 2 $ExpectedSigner $ReleaseBinary "MSI"
   [IO.File]::WriteAllBytes($Legacy, [Convert]::FromBase64String($AfterBase64))
 }
 $MsiExit = Invoke-Process "msiexec.exe" @("/x", $Msi, "/qn", "/norestart")
@@ -348,7 +373,7 @@ if ($PreviousNsis) {
 } else {
   Install-Nsis $Nsis $NsisRoot "NSIS install"
 }
-Assert-Installed $NsisRoot $Version $false 2 $ExpectedSigner $ReleaseBinary
+Assert-Installed $NsisRoot $Version $false 2 $ExpectedSigner $ReleaseBinary "NSS"
 
 # Tauri's stock NSIS uninstaller removes LocalAppData/<bundle-id>. Do not run it
 # here: the ephemeral runner is discarded, while deleting the state would make
