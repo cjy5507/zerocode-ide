@@ -258,9 +258,14 @@ export async function testConversationPaneDiagrams(browser, origin, ok) {
       const term = await openTermTab({ placement: "tab" });
       paneAgents.set(term, "zo");
       hookStates.set(term, "idle");
-      window.__ANSWER__.pane_log = () => ({
+      // The transcript answers by its cursor, as the engine does: a read after `next` brings only
+      // what came after it, here nothing. Sending both turns to every read had the pane append them
+      // again on each of its polls, so the document held two diagrams and more within a second, and
+      // a slow runner's first look missed the moment it held one (CI 11-26 and 11-28: landed false,
+      // drawn 1).
+      window.__ANSWER__.pane_log = ({ after } = {}) => ({
         found: true, next: 2, skipped: false, more: false, folded: false, model: "claude-opus-5",
-        turns: [{ role: "user", text: "흐름을 그림으로 보여 줘." }, { role: "assistant", text }],
+        turns: after == null ? [{ role: "user", text: "흐름을 그림으로 보여 줘." }, { role: "assistant", text }] : [],
       });
       await setPaneChat(term, true);
       const asked = () => window.__DIAGRAMS__.asked.filter((name) => name === "판흐름-그림").length;
