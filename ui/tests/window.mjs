@@ -3,7 +3,7 @@ import { runShards, shardCount } from "./window-shards.mjs";
 import "./scm-notices.mjs";
 import "./mail-waiting.mjs";
 import "./prompt-parked.mjs";
-import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, openPlainWindowPage, WINDOW_MOTION_REST, foldConversations } from "./window-boot.mjs";
+import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, openPlainWindowPage, WINDOW_MOTION_REST, foldConversations, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
 import { reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";
 import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
@@ -17606,7 +17606,11 @@ ok(
 // The shared workspace-board fixture can still deliver an agent paint here.
 // That is real new activity and correctly restarts the usage settle timer;
 // measure this scenario's three beats in a fresh document with no such debt.
-const { page: usageMomentsPage, faults: usageMomentsFaults } = await openWindowTestPage(browser, origin);
+// The boot itself asks for usage once its last awaited phase stands (`refreshClaudeUsage`
+// after `browser_tabs_restored`). Asked after `before` below, that is a second ask in the
+// settle window (CI 11-23 and 11-28: before 0, after 2): the scenario starts once it was asked.
+const { page: usageMomentsPage, faults: usageMomentsFaults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
+await waitBootSettled(usageMomentsPage);
 const usageMoments = await usageMomentsPage.evaluate(async () => {
   const seen = {};
   const asked = () => window.__COUNTS__.claude_usage ?? 0;

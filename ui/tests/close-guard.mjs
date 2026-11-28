@@ -1,4 +1,4 @@
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 
 /* 코디 판이 「갑자기 꺼짐」 (t-67936).
  *
@@ -308,9 +308,14 @@ export async function testCloseGuard({ browser, origin, ok, faults }) {
 }
 
 export async function testRestartNotice({ browser, origin, ok, faults }) {
-  const { page } = await openWindowTestPage(browser, origin, { faults });
+  const { page } = await openWindowTestPage(browser, origin, { faults, before: recordBootPhases });
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
+    // The boot asks for the installed build's notice once its last awaited phase stands
+    // (`askReleaseStatus` after `browser_tabs_restored`), and an answer with no notice closes
+    // the update toast. Landing after this test raised its own toast, it closed it under the
+    // click (CI 11-28: "not stable", then detached): the test starts once the boot has asked.
+    await waitBootSettled(page);
     await page.evaluate(() => {
       setLocale("ko", { persist: false });
       window.__ROAD__ = [];
