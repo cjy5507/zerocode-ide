@@ -3,7 +3,7 @@ import { runShards, shardCount } from "./window-shards.mjs";
 import "./scm-notices.mjs";
 import "./mail-waiting.mjs";
 import "./prompt-parked.mjs";
-import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST, foldConversations } from "./window-boot.mjs";
+import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, openPlainWindowPage, WINDOW_MOTION_REST, foldConversations, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
 import { reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";
 import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
@@ -329,6 +329,53 @@ suite("window-harness", async ({ browser, origin, ok }) => {
   ok("a file of the window's own that is lost on every turn ends the suite, and the failure names the file",
     every.turns === 3 && every.end.includes("shell-secret.js failed: net::ERR_CONNECTION_FAILED"),
     JSON.stringify({ turns: every.turns, end: every.end.slice(0, 300) }));
+  /* The same road for a page a check stands up by hand (`openPlainWindowPage`): the shared flow's pages that keep a
+   * platform or a boot of their own waited out 30 s for `BOUND` when a connection was not made (third PR run
+   * 46035760071, Windows, `macClipboardPage`) and ended the suite. */
+  const plain = { turns: 0, saidOnTheLostTurn: 0, faults: [] };
+  const plainPage = await openPlainWindowPage(browser, origin, { faults: plain.faults, prepare: async (opened) => {
+    plain.turns += 1;
+    await standBackend(opened);
+    if (plain.turns > 1) return;
+    opened.on("pageerror", () => { plain.saidOnTheLostTurn += 1; });
+    await lose("shell-i18n.js")(opened);
+  } });
+  plain.speaks = await plainPage.evaluate(() => typeof t === "function");
+  await plainPage.close();
+  const plainEvery = { turns: 0 };
+  plainEvery.end = await openPlainWindowPage(browser, origin, { prepare: async (opened) => {
+    plainEvery.turns += 1;
+    await standBackend(opened);
+    await lose("shell-secret.js")(opened);
+  } }).then((opened) => opened.close().then(() => "the page stood"), (failure) => String(failure));
+  ok("a page a check stands up by hand takes the same road: a lost turn is opened again and leaves nothing behind, and a file lost on every turn ends it naming the file",
+    plain.turns === 2 && plain.speaks && plain.saidOnTheLostTurn > 0 && plain.faults.length === 0 &&
+      plainEvery.turns === 3 && plainEvery.end.includes("shell-secret.js failed: net::ERR_CONNECTION_FAILED"),
+    JSON.stringify({ plain, plainEvery: { turns: plainEvery.turns, end: plainEvery.end.slice(0, 300) } }));
+  /* Only the road's loss is opened again (`reopenable`): a page error of the window's own, with no file lost, is the
+   * check's at its first turn; and one beside a lost stylesheet — which no lost stylesheet explains — is not thrown
+   * away with that turn but ends the open, the error kept and the file named. */
+  const fault = (opened) => opened.addInitScript(() => {
+    window.addEventListener("DOMContentLoaded", () => { throw new Error("an error of the window's own, not the road's"); });
+  });
+  const productOnly = { turns: 0, faults: [] };
+  const productPage = await openWindowTestPage(browser, origin, { faults: productOnly.faults, before: async (opened) => {
+    productOnly.turns += 1;
+    await fault(opened);
+  } });
+  await productPage.page.close();
+  const beside = { turns: 0, faults: [] };
+  beside.end = await openPlainWindowPage(browser, origin, { faults: beside.faults, prepare: async (opened) => {
+    beside.turns += 1;
+    await standBackend(opened);
+    await fault(opened);
+    await lose("shell.css")(opened);
+  } }).then((opened) => opened.close().then(() => "the page stood"), (failure) => String(failure));
+  const kept = (faults) => faults.some((one) => one.includes("an error of the window's own, not the road's"));
+  ok("a turn is opened again only for the road's loss: a page error alone is the check's at the first turn, and one beside a lost stylesheet is kept and ends the open naming the file",
+    productOnly.turns === 1 && kept(productOnly.faults) &&
+      beside.turns === 1 && kept(beside.faults) && beside.end.includes("shell.css failed: net::ERR_CONNECTION_FAILED"),
+    JSON.stringify({ productOnly, beside: { turns: beside.turns, faults: beside.faults.length, end: beside.end.slice(0, 300) } }));
 });
 
 suite("i18n-lazy-catalogs", async ({ browser, origin, ok }) => {
@@ -5839,13 +5886,14 @@ ok(
 
 /* ---- macOS Option can compose or become terminal Alt (Orca parity) ------- */
 
-const macOptionPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const macOptionFaults = [];
-macOptionPage.on("pageerror", (error) => macOptionFaults.push(String(error)));
-await addReportedPlatform(macOptionPage, "MacIntel");
-await standBackend(macOptionPage);
-await macOptionPage.goto(`${origin}/index.html`);
-await macOptionPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const macOptionPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: macOptionFaults,
+  prepare: async (page) => {
+    await addReportedPlatform(page, "MacIntel");
+    await standBackend(page);
+  },
+});
 const macOption = await macOptionPage.evaluate(async () => {
   const term = await openTermTab();
   termView(term);
@@ -7145,13 +7193,14 @@ ok(
  * buffer; Linux asks the native PRIMARY selection and falls back to the same
  * buffer when the compositor refuses it. Drive both under reported platforms
  * so this remains deterministic on every CI runner. */
-const privateSelectionPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const privateSelectionFaults = [];
-privateSelectionPage.on("pageerror", (error) => privateSelectionFaults.push(String(error)));
-await addReportedPlatform(privateSelectionPage, "MacIntel");
-await standBackend(privateSelectionPage);
-await privateSelectionPage.goto(`${origin}/index.html`);
-await privateSelectionPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const privateSelectionPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: privateSelectionFaults,
+  prepare: async (page) => {
+    await addReportedPlatform(page, "MacIntel");
+    await standBackend(page);
+  },
+});
 
 const privateSelection = await privateSelectionPage.evaluate(async () => {
   window.__ANSWER__.term_snapshot = () => null;
@@ -7271,13 +7320,14 @@ ok(
 );
 await privateSelectionPage.close();
 
-const linuxSelectionPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const linuxSelectionFaults = [];
-linuxSelectionPage.on("pageerror", (error) => linuxSelectionFaults.push(String(error)));
-await addReportedPlatform(linuxSelectionPage, "Linux x86_64");
-await standBackend(linuxSelectionPage);
-await linuxSelectionPage.goto(`${origin}/index.html`);
-await linuxSelectionPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const linuxSelectionPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: linuxSelectionFaults,
+  prepare: async (page) => {
+    await addReportedPlatform(page, "Linux x86_64");
+    await standBackend(page);
+  },
+});
 
 const linuxSelection = await linuxSelectionPage.evaluate(async () => {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -7429,13 +7479,14 @@ ok(
  * paste shortcut. Drive the browser's real keydown road under Win32 rather
  * than dispatching a copy/paste event directly — the regression was in the
  * router before either clipboard event existed. */
-const windowsClipboardPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const windowsClipboardFaults = [];
-windowsClipboardPage.on("pageerror", (error) => windowsClipboardFaults.push(String(error)));
-await addReportedPlatform(windowsClipboardPage, "Win32");
-await standBackend(windowsClipboardPage);
-await windowsClipboardPage.goto(`${origin}/index.html`);
-await windowsClipboardPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const windowsClipboardPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: windowsClipboardFaults,
+  prepare: async (page) => {
+    await addReportedPlatform(page, "Win32");
+    await standBackend(page);
+  },
+});
 
 const windowsClipboardSetup = await windowsClipboardPage.evaluate(async () => {
   window.__ANSWER__.term_snapshot = () => null;
@@ -7604,13 +7655,14 @@ await windowsClipboardPage.close();
  * browser must never have to synthesize a native paste event after the
  * terminal router has already cancelled its keydown: the plugin road is the
  * one that can read the OS clipboard reliably inside Tauri. */
-const macClipboardPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const macClipboardFaults = [];
-macClipboardPage.on("pageerror", (error) => macClipboardFaults.push(String(error)));
-await addReportedPlatform(macClipboardPage, "MacIntel");
-await standBackend(macClipboardPage);
-await macClipboardPage.goto(`${origin}/index.html`);
-await macClipboardPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const macClipboardPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: macClipboardFaults,
+  prepare: async (page) => {
+    await addReportedPlatform(page, "MacIntel");
+    await standBackend(page);
+  },
+});
 
 const macClipboardSetup = await macClipboardPage.evaluate(async () => {
   window.__ANSWER__.term_snapshot = () => null;
@@ -17554,7 +17606,11 @@ ok(
 // The shared workspace-board fixture can still deliver an agent paint here.
 // That is real new activity and correctly restarts the usage settle timer;
 // measure this scenario's three beats in a fresh document with no such debt.
-const { page: usageMomentsPage, faults: usageMomentsFaults } = await openWindowTestPage(browser, origin);
+// The boot itself asks for usage once its last awaited phase stands (`refreshClaudeUsage`
+// after `browser_tabs_restored`). Asked after `before` below, that is a second ask in the
+// settle window (CI 11-23 and 11-28: before 0, after 2): the scenario starts once it was asked.
+const { page: usageMomentsPage, faults: usageMomentsFaults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
+await waitBootSettled(usageMomentsPage);
 const usageMoments = await usageMomentsPage.evaluate(async () => {
   const seen = {};
   const asked = () => window.__COUNTS__.claude_usage ?? 0;
@@ -18785,7 +18841,40 @@ const skillViewResult = await page.evaluate(async ([report, library]) => {
     overflow: view.scrollWidth > view.clientWidth,
     catalogs: ['en','ja','zh','es'].every((locale) => ['library.tab.skills','library.tab.mcp','library.status.repo','library.status.only','skills.conflict','skills.evidence'].every((key) => CATALOG[locale]?.[key])) };
 }, [SKILL_VIEW_FIXTURE, SKILL_LIBRARY_FIXTURE]);
-ok('skills is a first-class document with a keyed 300-row paint under 120ms', skillViewResult.kind === 'skills' && skillViewResult.heading === skillViewResult.headingWanted && skillViewResult.heading !== 'title' && skillViewResult.searchLabel !== 'search' && skillViewResult.cards === 300 && skillViewResult.firstPaintMs < 120 && skillViewResult.height > 0, JSON.stringify(skillViewResult));
+// The 120 ms budget is judged on five fresh pages, each opened and let finish its boot, and their
+// median: one paint on a busy runner went over it now and then (macOS 5 of 58 runs, 11-16 to
+// 11-28, 136.7 ms on 11-28) while the page's own budget held. The person chose this on 2026-11-28;
+// the paint above, in this long-lived page, is still read and kept in the record.
+const skillPaintSamples = [];
+for (let sample = 0; sample < 5; sample += 1) {
+  const { page: paintPage } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
+  try {
+    await waitBootSettled(paintPage);
+    skillPaintSamples.push(await paintPage.evaluate(async ([report, library]) => {
+      setSettingsOpen(false);
+      window.__ANSWER__.install_bundled_skill = () => [];
+      window.__ANSWER__.library_report = () => library;
+      window.__ANSWER__.library_look = () => library;
+      window.__ANSWER__.skills_list = () => report;
+      window.__ANSWER__.skills_rescan = () => report;
+      skillsReport = null; libraryReport = null;
+      if (skillsPending) await skillsPending;
+      const start = performance.now();
+      document.getElementById('nav-skills').click();
+      await refreshSkills();
+      const tab = tabs.find((tab) => tab.kind === 'skills');
+      const view = docHost(tab.pane, 'skills');
+      view.getBoundingClientRect();
+      await new Promise(requestAnimationFrame);
+      const ms = performance.now() - start;
+      return view.querySelectorAll('.lib-part[data-part="skills"] .lib-row').length === 300 ? ms : null;
+    }, [SKILL_VIEW_FIXTURE, SKILL_LIBRARY_FIXTURE]));
+  } finally {
+    await paintPage.close();
+  }
+}
+const skillPaintMedian = skillPaintSamples.every((ms) => typeof ms === 'number') ? [...skillPaintSamples].sort((a, b) => a - b)[2] : null;
+ok('skills is a first-class document with a keyed 300-row paint under 120ms', skillViewResult.kind === 'skills' && skillViewResult.heading === skillViewResult.headingWanted && skillViewResult.heading !== 'title' && skillViewResult.searchLabel !== 'search' && skillViewResult.cards === 300 && skillPaintMedian !== null && skillPaintMedian < 120 && skillViewResult.height > 0, JSON.stringify({ ...skillViewResult, paintSamplesMs: skillPaintSamples, paintMedianMs: skillPaintMedian }));
 ok('skills search and filters create zero nodes and combine on the same rows', skillViewResult.created === 0 && skillViewResult.sameNodes && skillViewResult.searchCount === 1 && skillViewResult.ownCount === 1 && skillViewResult.combinedCount === 0 && skillViewResult.allBack === 300, JSON.stringify(skillViewResult));
 ok('Skills arrow navigation keeps focus in its document instead of the terminal sink', skillViewResult.keyboardNext === 'family-1', JSON.stringify(skillViewResult));
 ok('skills detail reuses markdown, exposes the conflict and real evidence, and has four catalogs', skillViewResult.detail === 'Release review' && skillViewResult.evidence.includes('term-8') && skillViewResult.conflict && skillViewResult.variants === 2 && skillViewResult.catalogs && !skillViewResult.overflow, JSON.stringify(skillViewResult));
@@ -29603,13 +29692,14 @@ ok(
  * this fixture proves the contested road directly: global and Ctrl+Tab yield
  * in terminal-first mode, while terminal-scoped actions still belong to the
  * app. */
-const terminalShortcutPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const terminalShortcutFaults = [];
-terminalShortcutPage.on("pageerror", (error) => terminalShortcutFaults.push(String(error)));
-await addReportedPlatform(terminalShortcutPage, "Win32");
-await standBackend(terminalShortcutPage);
-await terminalShortcutPage.goto(`${origin}/index.html`);
-await terminalShortcutPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const terminalShortcutPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: terminalShortcutFaults,
+  prepare: async (page) => {
+    await addReportedPlatform(page, "Win32");
+    await standBackend(page);
+  },
+});
 const terminalShortcutRouting = await terminalShortcutPage.evaluate(async () => {
   const settle = () => new Promise((done) => setTimeout(done, 80));
   const keys = [];
@@ -38498,6 +38588,14 @@ const flatTranscript = await page.evaluate(async () => {
   const face = document.getElementById("worker-view");
   const list = face?.querySelector(".helper-turns");
   seen.opened = Boolean(list);
+  // A long conversation stands its earlier turns in steps after the first frame (`openHeldTurns`, b2eae66ce):
+  // the briefing and the 400 rows read below are the whole page's, so the steps are waited for, as the measuring
+  // tool waits (conversation-perf.mjs). The 40 ms above was the whole open before the steps; on a hosted runner
+  // the second step had often not stood the briefing by then, and `getComputedStyle(brief)` threw (16 of the 71
+  // sampled CI browser jobs after b2eae66ce, none of the 24 before it).
+  for (let wait = 0; wait < 200 && list?.__openFloor !== null && list?.__openFloor !== undefined; wait += 1) {
+    await new Promise((done) => setTimeout(done, 10));
+  }
   // The turns alone: the status row is the list's own last child now (the
   // extension's spinner row), and is not a turn.
   seen.count = list.querySelectorAll(":scope > [data-turn]").length;
@@ -41009,10 +41107,7 @@ ok(
  * 도로 캡을 쓴다(Orca resolveGitStatusLimit(0)의 길). */
 // A prior discard can still finish its refresh after the 80 ms fixture wait.
 // Give this exact request-count assertion its own window, as the ledger probe does.
-const scmCappedPage = await browser.newPage();
-await standBackend(scmCappedPage);
-await scmCappedPage.goto(`${origin}/index.html`);
-await scmCappedPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+const scmCappedPage = await openPlainWindowPage(browser, origin, { prepare: (page) => standBackend(page) });
 await scmCappedPage.evaluate(async () => { setActivityItem("scm"); await refreshScm(); });
 const scmCappedBanner = await scmCappedPage.evaluate(async () => {
   const seen = {};
@@ -42686,19 +42781,22 @@ ok(
 // The boot branch. Same document, same script — only the board is raised, and
 // nothing that belongs to the main window is started: no terminal is spawned,
 // no tab strip is built, and the chrome around the stage is folded away.
-const popoutPage = await browser.newPage({ viewport: { width: 960, height: 720 } });
 const popoutFaults = [];
-popoutPage.on("pageerror", (error) => popoutFaults.push(String(error)));
-// Booted in English on purpose: the pop-out reads the same boot report as the
-// main window, so this also proves the new markup's keys reach the catalog
-// rather than standing at their Korean fallbacks in a second window.
-await standBackend(popoutPage, { ...BOOT, locale: "en" });
-await popoutPage.addInitScript((columns) => {
-  window.__COLUMNS__ = columns;
-  window.__PANES__ = [{ term: 7, agent: "claude", state: "needs-attention", at: 1000, resumable: true }];
-}, POPOUT_COLUMNS);
-await popoutPage.goto(`${origin}/index.html?surface=popout`);
-await popoutPage.waitForSelector(".task-board-row");
+const popoutPage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 960, height: 720 }, faults: popoutFaults,
+  prepare: async (page) => {
+    // Booted in English on purpose: the pop-out reads the same boot report as the
+    // main window, so this also proves the new markup's keys reach the catalog
+    // rather than standing at their Korean fallbacks in a second window.
+    await standBackend(page, { ...BOOT, locale: "en" });
+    await page.addInitScript((columns) => {
+      window.__COLUMNS__ = columns;
+      window.__PANES__ = [{ term: 7, agent: "claude", state: "needs-attention", at: 1000, resumable: true }];
+    }, POPOUT_COLUMNS);
+  },
+  url: `${origin}/index.html?surface=popout`,
+  ready: (page) => page.waitForSelector(".task-board-row"),
+});
 await popoutPage.click('[data-board-mode="graph"]');
 await popoutPage.waitForFunction(
   () => document.querySelectorAll("#board-view .board-card").length > 0,
@@ -42861,14 +42959,14 @@ ok("the pop-out raised no errors", popoutFaults.length === 0, popoutFaults.join(
  * a terminal on a machine that has never heard of `zo`." 부트의 zo 문이
  * `return`이던 시절, 이 기계는 워크트리도 첫 터미널도 받지 못했다 — 접히는
  * 것은 레인 표면 하나여야 한다. 네 번째 페이지가 그 기계다. */
-const bareMachinePage = await browser.newPage({ viewport: { width: 1280, height: 860 } });
 const bareMachineFaults = [];
-bareMachinePage.on("pageerror", (error) => bareMachineFaults.push(String(error)));
-await standBackend(bareMachinePage, { ...BOOT, zo: null, serve: "down", lanes: [] });
-await bareMachinePage.goto(`${origin}/index.html`);
-// `github_status`는 boot 꼬리(ensureGithubStatus)도 부른다 — zo 문이 `return`으로
-// 돌아가면 여기 못 온다. project_catalog은 boot 밖 호출자가 있어 신호가 아니다.
-await bareMachinePage.waitForFunction(() => (window.__COUNTS__?.github_status ?? 0) > 0, null, { timeout: 15000 });
+const bareMachinePage = await openPlainWindowPage(browser, origin, {
+  viewport: { width: 1280, height: 860 }, faults: bareMachineFaults,
+  prepare: (page) => standBackend(page, { ...BOOT, zo: null, serve: "down", lanes: [] }),
+  // `github_status`는 boot 꼬리(ensureGithubStatus)도 부른다 — zo 문이 `return`으로
+  // 돌아가면 여기 못 온다. project_catalog은 boot 밖 호출자가 있어 신호가 아니다.
+  ready: (page) => page.waitForFunction(() => (window.__COUNTS__?.github_status ?? 0) > 0, null, { timeout: 15000 }),
+});
 const bareMachine = await bareMachinePage.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 150));
   const seen = {

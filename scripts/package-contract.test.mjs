@@ -13,7 +13,9 @@ import {
   compareSemver,
   oneArtifact,
   packageContract,
+  packageIdentity,
 } from "./package-contract.mjs";
+import * as contract from "./package-contract.mjs";
 import {
   downloadPreviousPackage,
   selectBaselineArtifact,
@@ -241,6 +243,41 @@ test("every helper source is explicitly declared for the bundler", async () => {
     if (file.endsWith(".rs")) assert.ok(binaries.includes(file.slice(0, -3)), `${file} needs an explicit [[bin]]`);
   }
   assert.equal(new Set(binaries).size, binaries.length);
+});
+
+// The bundler carries a [[bin]] beside the window only when every feature it requires was passed
+// with --features (tauri-cli 2.11.4 `get_binaries`, its own test
+// get_binaries_ignores_src_bin_with_disabled_required_features), and no package build passes any —
+// so the helpers checked beside the window are the bins that need no feature, the rule the lane's
+// tools/release/win-installer.sh reads off the installer too. The CEF helper needs one: macOS wraps
+// it in the Chromium helper apps (assertChromiumBundle reads those) and no other system runs it.
+test("the helpers checked beside the window are the bins the bundler carries: none that needs a feature", async () => {
+  const manifest = await readFile(new URL("../crates/zerocode-shell/Cargo.toml", import.meta.url), "utf8");
+  const { helperBinaries } = await packageIdentity();
+  assert.ok(cargoBinaryNames(manifest).includes("zerocode-cef-helper"), "the CEF helper is still a declared bin");
+  assert.ok(!helperBinaries.includes("zerocode-cef-helper"), "the CEF helper is not looked for beside the window");
+  assert.ok(helperBinaries.length > 0, "the window still carries helpers beside itself");
+
+  const toml = [
+    '[package]\nname = "app"\nversion = "1.0.0"\n',
+    '[[bin]]\nname = "app"\npath = "src/main.rs"\n',
+    '[[bin]]\nname = "plain-helper"\npath = "src/bin/plain-helper.rs"\n',
+    '[[bin]]\nname = "featured-helper"\npath = "src/bin/featured-helper.rs"\nrequired-features = ["browser"]\n',
+    '[[bin]]\nname = "spread-helper"\npath = "src/bin/spread-helper.rs"\nrequired-features = [\n  "one",\n  "two",\n]\n',
+    '[features]\ndefault = ["browser"]\nbrowser = []\n',
+  ].join("\n");
+  assert.deepEqual(contract.cargoBinaries(toml), [
+    { name: "app", requiredFeatures: [] },
+    { name: "plain-helper", requiredFeatures: [] },
+    { name: "featured-helper", requiredFeatures: ["browser"] },
+    { name: "spread-helper", requiredFeatures: ["one", "two"] },
+  ]);
+  assert.deepEqual(cargoBinaryNames(toml), ["app", "plain-helper", "featured-helper", "spread-helper"]);
+
+  const main = cargoPackageName(manifest);
+  assert.deepEqual(helperBinaries, contract.cargoBinaries(manifest)
+    .filter((bin) => bin.name !== main && bin.requiredFeatures.length === 0)
+    .map((bin) => bin.name));
 });
 
 test("installed helper validation catches a missing, empty or non-executable picker", async () => {

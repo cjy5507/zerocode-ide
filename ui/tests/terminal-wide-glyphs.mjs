@@ -606,7 +606,9 @@ export async function testWideGlyphs(page, ok) {
     other.shifts.length === [...WIDE_KINDS].length && other.shifts.every((shift) => Math.abs(shift) < COLUMN_SLACK_PX),
     JSON.stringify({ ...other, shifts: other.shifts.map((shift) => Math.round(shift * 100) / 100) }));
 
-  // What is left between two glyphs is tracking; the rest of the two columns is glyph.
+  // What is left of the two columns outside the glyph's advance is tracking;
+  // the rest is the advance box itself (a face may also carry sidebearings
+  // inside that box, so actual air between two glyphs is read from `ink.gap`).
   const filled = 1 - rows.fit.tracking / (2 * rows.cell);
   const widenedOut = rows.fit.stretch >= rows.stretchLimit - 0.01;
   ok("a wide glyph the fallback face draws short is grown and widened until it covers its two columns, or as far as it may be widened",
@@ -614,8 +616,8 @@ export async function testWideGlyphs(page, ok) {
     JSON.stringify({ short: rows.short, advance: rows.advance, cell: rows.cell, filled, fit: rows.fit, limit: rows.stretchLimit }));
 
   ok("a wide glyph is widened by no more than a sixth, and one widened that far keeps air between it and the next",
-    !rows.short || (rows.fit.stretch <= WIDEN_MOST + 0.01 && (!widenedOut || rows.fit.tracking >= AIR_LEAST_CELLS * rows.cell)),
-    JSON.stringify({ short: rows.short, stretch: rows.fit.stretch, most: WIDEN_MOST, tracking: rows.fit.tracking, least: AIR_LEAST_CELLS * rows.cell }));
+    !rows.short || (rows.fit.stretch <= WIDEN_MOST + 0.01 && (!widenedOut || (ink.inked && ink.gap >= AIR_LEAST_CELLS * rows.cell))),
+    JSON.stringify({ short: rows.short, stretch: rows.fit.stretch, most: WIDEN_MOST, gap: ink.gap, tracking: rows.fit.tracking, least: AIR_LEAST_CELLS * rows.cell }));
 
   // Asked only of a face that is dressed: a run left as its face draws it is
   // not a box of its own, and its blanks stay the narrow runs they are.

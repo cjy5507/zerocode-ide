@@ -2551,13 +2551,75 @@ export async function waitBootSettled(page) {
  *   rails  — the two rails on from the first script, as a person's narrow
  *            window boots; off by default (`railsOff`). */
 export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {}, rails = false, boot = BOOT } = {}) {
+  const page = await reopenWhileOwnFilesUnreached((last) =>
+    openWindowTestPageOnce(browser, origin, { faults, before, shape, rails, boot, last }));
+  return { page, faults };
+}
+
+/* The page, once a turn stood it: `once(last)` answers `{ page }`, or `{ unreached, said }` with its page closed when
+ * the turn is thrown away (`reopenable`) and is not the `last` (`OWN_FILES_TURNS`). stderr names the files, and how
+ * many page errors the thrown-away turn took with it and the first of them, so nothing it said goes unread. */
+async function reopenWhileOwnFilesUnreached(once) {
   for (let turn = 1; ; turn += 1) {
-    const opened = await openWindowTestPageOnce(browser, origin,
-      { faults, before, shape, rails, boot, last: turn === OWN_FILES_TURNS });
-    if (opened.page) return { page: opened.page, faults };
+    const opened = await once(turn === OWN_FILES_TURNS);
+    if (opened.page) return opened.page;
+    const said = opened.said.length === 0 ? ""
+      : `; that turn's ${opened.said.length} page error(s) went with it, the first: ${opened.said[0].split("\n")[0].slice(0, 160)}`;
     process.stderr.write(`window-boot: ${opened.unreached.join(" | ")} — this harness's own file server was not reached; `
-      + `the page is opened again (turn ${turn + 1} of ${OWN_FILES_TURNS})\n`);
+      + `the page is opened again (turn ${turn + 1} of ${OWN_FILES_TURNS})${said}\n`);
   }
+}
+
+/* A page a check stands up by hand on `browser.newPage` — a platform, a boot, an address of its own, none of what
+ * `openWindowTestPage` adds — with the same answer to a file of the window's own this harness's server never got to
+ * answer (`OWN_FILES_TURNS`): such a page used to wait out its 30 s for `BOUND` and end the suite (third PR run
+ * 46035760071, Windows, window.mjs `macClipboardPage` — a lost connection is the likely cause there, not a proven one:
+ * that page recorded no failed request). Only a turn whose one fault is that loss is opened again (`reopenable`); any
+ * other failure is the check's, as before, and names the requests that failed.
+ *
+ *   viewport — the page's, as `browser.newPage` takes it (none: the browser's own)
+ *   faults   — the check's list of renderer errors (`String(error)`); a turn that is thrown away leaves it as it was
+ *   prepare  — what the check did before `goto`: its platform, its backend, its init scripts
+ *   url      — the address (`index.html` by default)
+ *   ready    — the check's own wait once the page loaded (`BOUND` filled by default) */
+export async function openPlainWindowPage(browser, origin, { viewport, faults = [], prepare, url = `${origin}/index.html`,
+  ready = (page) => page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0) } = {}) {
+  return reopenWhileOwnFilesUnreached(async (last) => {
+    const page = await browser.newPage(viewport === undefined ? undefined : { viewport });
+    let heard = [];
+    const settle = () => {
+      if (heard === faults) return;
+      faults.push(...heard);
+      heard = faults;
+    };
+    page.on("pageerror", (error) => heard.push(String(error)));
+    const seen = watchOwnFiles(page, origin);
+    await prepare(page);
+    try {
+      await page.goto(url);
+      if (!last && reopenable(seen, heard)) throw new Error("a file of the window's own was not reached");
+      await ready(page);
+      // As `openWindowTestPage` asks: a page that stood without one of the window's own files is not the window, and
+      // says which file it lost.
+      if (seen.own.length > 0) throw new Error(`the window's own files did not arrive: ${seen.own.map((one) => one.line).join(" | ")}`);
+    } catch (error) {
+      if (!last && reopenable(seen, heard)) {
+        await page.close().catch(() => {});
+        return { unreached: seen.own.map((one) => one.line), said: heard };
+      }
+      settle();
+      if (seen.lines.length > 0 && error instanceof Error) {
+        const named = `failed requests: ${seen.lines.join(" | ")}`;
+        error.message = `${error.message} | ${named}`;
+        if (typeof error.stack === "string") error.stack = `${error.stack}\n${named}`;
+      }
+      // Nobody is handed a page that never stood, so nobody could close it.
+      await page.close().catch(() => {});
+      throw error;
+    }
+    settle();
+    return { page };
+  });
 }
 
 /* How many times a page is opened before a file of the window's own that never reached it ends the suite. A page asks
@@ -2569,12 +2631,61 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
  * turn, and the last turn's failure is the suite's, as before. */
 const OWN_FILES_TURNS = 3;
 
-/* The window's own files a page asked this harness's server for and never got because no connection was made. */
-const unreachedOwnFiles = (requests, origin) => requests.filter((line) => line.startsWith(`${origin}/`)
-  && /\.(?:html|js|css)(?:\?\S*)? failed: net::ERR_CONNECTION_\w+$/.test(line));
+/* The connection errors that say this harness's server was never reached: the road's loss, the only one opened again.
+ * A connection that was made and then broke (`ERR_CONNECTION_RESET`), an HTTP error, any other failure is the page's or
+ * the server's, never the road's. */
+const NEVER_CONNECTED = new Set(["net::ERR_CONNECTION_FAILED", "net::ERR_CONNECTION_REFUSED"]);
 
-/* One turn of `openWindowTestPage`. `{ page }` when the window stands; `{ unreached }`, the page closed, when its own
- * files were not reached and this is not the `last` turn; every other failure is thrown. The caller's `faults` takes
+/* One of the window's own files a page needs to stand: the document, a script or a stylesheet asked of this harness's
+ * server, judged by the request's kind and its path — a `fetch` whose address merely ends in `.css` is not one. */
+function ownStartupFile(request, origin) {
+  if (!["document", "script", "stylesheet"].includes(request.resourceType())) return false;
+  let url;
+  try {
+    url = new URL(request.url());
+  } catch {
+    return false;
+  }
+  return url.origin === origin && /\.(?:html|js|css)$/.test(url.pathname);
+}
+
+/* What one turn of a page asked for and what failed. `lines`: every request that failed or answered an error, for the
+ * message that says why a page never stood. `own`: the window's own startup files that failed (`ownStartupFile`), each
+ * `lost` when no connection was made (`NEVER_CONNECTED`) — the same list decides the turn's reopening and the last
+ * turn's 「did not arrive」. `other`: the requests that failed and are not those. A request the page itself let go
+ * (`ERR_ABORTED`) is in `lines` only. */
+function watchOwnFiles(page, origin) {
+  const seen = { lines: [], own: [], other: [] };
+  page.on("requestfailed", (request) => {
+    const error = request.failure()?.errorText ?? "unknown";
+    const line = `${request.url()} failed: ${error}`;
+    seen.lines.push(line);
+    if (error === "net::ERR_ABORTED") return;
+    if (ownStartupFile(request, origin)) {
+      seen.own.push({ line, lost: NEVER_CONNECTED.has(error), script: request.resourceType() === "script" });
+    } else {
+      seen.other.push(line);
+    }
+  });
+  page.on("response", (response) => {
+    if (response.status() >= 400) seen.lines.push(`${response.url()} HTTP ${response.status()}`);
+  });
+  return seen;
+}
+
+/* Whether a turn is thrown away and the page opened again: only when the road's loss is all that went wrong in it.
+ * Every own file that failed was never connected to; no other request failed; and its page errors, if any, can be
+ * that loss's doing — only a lost script explains them (v1.1.138: every script that speaks through `t` failed after
+ * `shell-i18n.js`), a lost stylesheet or document does not. Anything else stands as the turn's failure, with what the
+ * page said. */
+function reopenable(seen, said) {
+  if (seen.own.length === 0 || seen.own.some((one) => !one.lost)) return false;
+  if (seen.other.length > 0) return false;
+  return said.length === 0 || seen.own.some((one) => one.script);
+}
+
+/* One turn of `openWindowTestPage`. `{ page }` when the window stands; `{ unreached, said }`, the page closed, when the
+ * turn is thrown away (`reopenable`) and this is not the `last` turn; every other failure is thrown. The caller's `faults` takes
  * this page's renderer errors once the page is kept or its failure is final — a turn that is thrown away leaves the
  * list as it was. */
 async function openWindowTestPageOnce(browser, origin, { faults, before, shape, rails, boot, last }) {
@@ -2596,12 +2707,8 @@ async function openWindowTestPageOnce(browser, origin, { faults, before, shape, 
   page.on("pageerror", (error) => heard.push(error?.stack ?? String(error)));
   // What the page asked for and what failed, kept for the one message that says why a page never finished loading:
   // a request that failed or answered an error, and the console's errors. Read only on that failure.
-  const requests = [];
+  const seen = watchOwnFiles(page, origin);
   const consoleErrors = [];
-  page.on("requestfailed", (request) => requests.push(`${request.url()} failed: ${request.failure()?.errorText ?? "unknown"}`));
-  page.on("response", (response) => {
-    if (response.status() >= 400) requests.push(`${response.url()} HTTP ${response.status()}`);
-  });
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
@@ -2626,20 +2733,17 @@ async function openWindowTestPageOnce(browser, origin, { faults, before, shape, 
     // `goto` returns at the page's load: every script it names has run or failed by then, so a file that was not
     // reached is known now. A turn that will be thrown away is not waited out — a window without its words' file
     // never binds, and waiting for it to was thirty seconds a turn.
-    if (!last && unreachedOwnFiles(requests, origin).length > 0) throw new Error("a file of the window's own was not reached");
+    if (!last && reopenable(seen, heard)) throw new Error("a file of the window's own was not reached");
     await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
     // A page that stood up although one of the window's own scripts or styles never arrived is not the window: the
     // first use of what that file declares fails far from here, under a name that says nothing of the load. PR #17's
     // Windows run (2026-11-06, job 127718318662) read 「tabs is not defined」 in conversation-steps that way, in the run
     // whose terminal-close-result could not connect to this server at all (t-98327). The page says which file it lost.
-    const lost = requests.filter((line) => line.startsWith(`${origin}/`) && /\.(?:js|css)(?:\?\S*)? failed: /.test(line)
-      && !line.endsWith("net::ERR_ABORTED"));
-    if (lost.length > 0) throw new Error(`the window's own files did not arrive: ${lost.join(" | ")}`);
+    if (seen.own.length > 0) throw new Error(`the window's own files did not arrive: ${seen.own.map((one) => one.line).join(" | ")}`);
   } catch (error) {
-    const unreached = unreachedOwnFiles(requests, origin);
-    if (unreached.length > 0 && !last) {
+    if (!last && reopenable(seen, heard)) {
       await page.close().catch(() => {});
-      return { unreached };
+      return { unreached: seen.own.map((one) => one.line), said: heard };
     }
     settle();
     // The boot globals and the script resources that did arrive: which scripts the page actually ran.
@@ -2655,7 +2759,7 @@ async function openWindowTestPageOnce(browser, origin, { faults, before, shape, 
     // Nobody is handed a page that never stood, so nobody could close it.
     await page.close().catch(() => {});
     throw new Error(`window did not finish loading: ${faults.join(" | ") || error}`
-      + ` | failed requests: ${requests.join(" | ") || "none"}`
+      + ` | failed requests: ${seen.lines.join(" | ") || "none"}`
       + ` | console errors: ${consoleErrors.join(" | ") || "none"}`
       + ` | boot: ${JSON.stringify(boot)}`);
   }

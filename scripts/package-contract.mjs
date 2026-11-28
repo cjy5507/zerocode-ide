@@ -41,10 +41,19 @@ export function cargoPackageName(toml) {
   return tomlSectionValue(toml, "package", "name");
 }
 
+/* Every [[bin]] of a manifest, with the features it requires (`required-features`, on one line or
+ * spread over several). */
+export function cargoBinaries(toml) {
+  return toml.split(/^\[\[bin\]\][ \t]*$/m).slice(1).map((section) => {
+    const body = section.split(/^\[/m)[0];
+    const name = body.match(/^name\s*=\s*"([^"\n]+)"/m)?.[1];
+    const required = body.match(/^required-features\s*=\s*\[([^\]]*)\]/m)?.[1] ?? "";
+    return name ? { name, requiredFeatures: [...required.matchAll(/"([^"\n]+)"/g)].map((found) => found[1]) } : null;
+  }).filter(Boolean);
+}
+
 export function cargoBinaryNames(toml) {
-  return toml.split(/^\[\[bin\]\][ \t]*$/m).slice(1)
-    .map((section) => section.split(/^\[/m)[0].match(/^name\s*=\s*"([^"\n]+)"/m)?.[1])
-    .filter(Boolean);
+  return cargoBinaries(toml).map((bin) => bin.name);
 }
 
 export function cargoWorkspaceVersion(toml) {
@@ -119,7 +128,13 @@ export async function packageIdentity(options = {}) {
     identifier: config.identifier,
     version,
     binaryName,
-    helperBinaries: cargoBinaryNames(manifest).filter((name) => name !== cargoName),
+    // What the bundler carries beside the window: a [[bin]] whose required features were all passed
+    // with --features (tauri-cli `get_binaries`), and no package build passes any — so every bin that
+    // needs none, as tools/release/win-installer.sh reads the installer too. The CEF helper needs one:
+    // macOS wraps it in the Chromium helper apps (assertChromiumBundle) and no other system runs it.
+    helperBinaries: cargoBinaries(manifest)
+      .filter((bin) => bin.name !== cargoName && bin.requiredFeatures.length === 0)
+      .map((bin) => bin.name),
     wixUpgradeCode,
   };
 }

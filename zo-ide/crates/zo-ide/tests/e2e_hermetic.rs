@@ -10413,6 +10413,7 @@ async fn e2e_terminal_background_group_ends_after_sigterm() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // the server script is most of it, and it reads as one program
 async fn e2e_background_server_keeps_answering_after_headless_zo_exits() {
     use tokio::io::AsyncReadExt as _;
     use tokio::net::TcpListener;
@@ -10420,13 +10421,23 @@ async fn e2e_background_server_keeps_answering_after_headless_zo_exits() {
     let layout = Layout::new();
     let ready = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     fs::write(layout.cwd.join("background_server.py"), r#"
+import sys
+import time
+
+# Each step's wall time, for the test to print when no address arrives.
+def note(step):
+    with open("server-start.log", "a") as log:
+        log.write(f"{time.time():.3f} {step}\n")
+
+note(f"python {sys.version.split()[0]} ({sys.executable}) started")
 import errno
 import os
 import socket
+import socketserver
 import stat
-import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+note("imported http.server")
 
 class ServerHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -10452,11 +10463,20 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ready")
 
-with HTTPServer(("127.0.0.1", 0), ServerHandler) as server:
+# HTTPServer.server_bind names the server by socket.getfqdn, a reverse lookup
+# CI's macOS runner never finished in 10 s; the address is name enough here.
+class Server(HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+with Server(("127.0.0.1", 0), ServerHandler) as server:
+    note(f"bound port {server.server_port} as {server.server_name}")
     server.timeout = float(sys.argv[2])
     server.write_failed = False
     with socket.create_connection(("127.0.0.1", int(sys.argv[1])), server.timeout) as ready:
         ready.sendall(server.server_port.to_bytes(2, "big"))
+    note("announced the port")
     for _ in range(3):
         server.handle_request()
         if server.write_failed:
@@ -10471,15 +10491,22 @@ with HTTPServer(("127.0.0.1", 0), ServerHandler) as server:
         &[("bash", serde_json::json!({"command": command, "run_in_background": true}))],
         "background-server-started",
     ).await.unwrap();
+    let zo_started = std::time::SystemTime::now();
     let output = run_pipe(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
         &["--plain", "--permission-mode", "danger-full-access"], b"Start a background server.\n/exit\n").unwrap();
+    let zo_ran = zo_started.elapsed().unwrap_or_default();
     assert!(output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("background-server-started"), "{output:?}");
 
-    let port = tokio::time::timeout(TEST_TIMEOUT, async {
+    let Ok(port) = tokio::time::timeout(TEST_TIMEOUT, async {
         let (mut socket, _) = ready.accept().await.unwrap();
         socket.read_u16().await.unwrap()
-    }).await.expect("the server announced its address");
+    }).await else {
+        panic!(
+            "the server announced its address: nothing within {TEST_TIMEOUT:?} of zo's exit\n{}",
+            background_server_startup(&layout, zo_started, zo_ran, &service.request_bodies().await, &output),
+        );
+    };
     let client = reqwest::Client::builder().no_proxy().timeout(TEST_TIMEOUT).build().unwrap();
     for path in ["health", "write", "write"] {
         let response = client.get(format!("http://127.0.0.1:{port}/{path}")).send().await.unwrap();
@@ -10502,6 +10529,58 @@ with HTTPServer(("127.0.0.1", 0), ServerHandler) as server:
         .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
         .collect();
     assert_eq!(files, ["served request\nserved request\n"; 2]);
+}
+
+/// What a background server that never announced its address left behind:
+/// each step its script logged, in seconds after zo started; the result zo
+/// gave the model for the `bash` call; the server's two output files; and
+/// zo's stderr. CI's macOS timed the test out in each run from 11-25 to 11-27
+/// while a local Mac passed it, and a bare `Elapsed` named no step (t-133401).
+fn background_server_startup(
+    layout: &Layout,
+    zo_started: std::time::SystemTime,
+    zo_ran: Duration,
+    requests: &[String],
+    output: &std::process::Output,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut report = format!("zo ran {:.3}s and exited {}\n", zo_ran.as_secs_f64(), output.status);
+    let started = zo_started.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+    report.push_str("server steps, seconds after zo started:\n");
+    match fs::read_to_string(layout.cwd.join("server-start.log")) {
+        Ok(log) => {
+            for line in log.lines() {
+                let (stamp, step) = line.split_once(' ').unwrap_or((line, ""));
+                match stamp.parse::<f64>() {
+                    Ok(stamp) => writeln!(report, "  {:+.3}s {step}", stamp - started),
+                    Err(_) => writeln!(report, "  {line}"),
+                }
+                .unwrap();
+            }
+        }
+        Err(error) => writeln!(report, "  none ({error}): the script never ran its first line").unwrap(),
+    }
+    let body: Option<serde_json::Value> = requests.last().and_then(|body| serde_json::from_str(body).ok());
+    let messages = body.as_ref().and_then(|body| body["messages"].as_array());
+    for block in messages.into_iter().flatten()
+        .filter_map(|message| message["content"].as_array()).flatten()
+        .filter(|block| block["type"] == "tool_result")
+    {
+        writeln!(report, "tool result zo sent the model: {block}").unwrap();
+    }
+    match fs::read_dir(layout.state.join("zo-bash-raw")) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let text = fs::read(entry.path()).unwrap_or_default();
+                writeln!(report, "output file {}:\n{}", entry.file_name().to_string_lossy(),
+                    String::from_utf8_lossy(&text)).unwrap();
+            }
+        }
+        Err(error) => writeln!(report, "no output folder: {error}").unwrap(),
+    }
+    write!(report, "zo stderr:\n{}", String::from_utf8_lossy(&output.stderr)).unwrap();
+    report
 }
 
 /// t-80732: the 10-28 shape — an example `pkill -f` in backticks inside a

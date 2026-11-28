@@ -4932,13 +4932,13 @@ const SCENE_CEILING: std::time::Duration = std::time::Duration::from_millis(150)
 /// Slack on a scene's expected duration: scheduler and socket overhead.
 ///
 /// What it must stay under is the gap between the end a scene asserts and the
-/// end it rules out, and in every scene that gap is one ceiling: a window and
-/// the ceiling against two windows (450 against 600 ms), the ceiling against a
-/// whole window (150 against 300 ms), the ceiling against a whole backoff (150
-/// against 600 ms). So two thirds of a ceiling still tells the two ends apart
-/// in all three, and a busy machine has room: at 50 ms one run ended 201.4 ms
-/// in, under a load of 34 to 66, and the same scene reached 191 ms at a load
-/// of 28 (2026-11-16; alone it takes 152 to 155 ms).
+/// end it rules out, and in both scenes that use it that gap is one ceiling: a
+/// window and the ceiling against two windows (450 against 600 ms), the ceiling
+/// against a whole window (150 against 300 ms). So two thirds of a ceiling still
+/// tells the two ends apart in both, and a busy machine has room: at 50 ms one
+/// run ended 201.4 ms in, under a load of 34 to 66, and the same scene reached
+/// 191 ms at a load of 28 (2026-11-16; alone it takes 152 to 155 ms). The
+/// backoff scene is judged by the pause it chose instead (2026-11-28).
 const SCENE_SLACK: std::time::Duration = std::time::Duration::from_millis(100);
 const _: () = assert!(
     SCENE_SLACK.as_millis() < SCENE_CEILING.as_millis(),
@@ -5399,17 +5399,24 @@ async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceili
 
 /// Scene S: a quick failure whose reconnect backoff outlasts the bundle's ceiling. The
 /// pause is cut to what the bundle has left, so the turn ends at the ceiling — not a whole
-/// backoff past it with "reconnecting" on screen the while.
+/// backoff past it with "reconnecting" on screen the while. Judged by the pause the client
+/// chose, which its reconnect notice carries and it also sleeps: every pause at most the
+/// ceiling, so a 600 ms backoff left uncut fails however busy the machine (CI 2026-11-28:
+/// the pause was cut to 0.1 s and the turn still took 254 ms on a busy runner), and the turn
+/// under a whole backoff, the end the scene rules out. That the pause equals the bundle's
+/// rest exactly is not measured here.
 async fn check_a_backoff_past_the_ceiling_is_cut(wire: SceneWire, name: &str) {
     let scripts = vec![
         server_error_connection(),
         silent_connection(),
         answer("never reached"),
     ];
-    let (text, error, connections, elapsed) = run_scene_backing_off(
+    let notices = SceneNotices::default();
+    let (text, error, connections, elapsed) = run_scene_noting(
         wire,
         scripts,
         Some((SCENE_LONG_BACKOFF, SCENE_LONG_BACKOFF)),
+        &notices,
     )
     .await;
     report_scene(name, &text, error.as_ref(), connections, elapsed);
@@ -5419,9 +5426,20 @@ async fn check_a_backoff_past_the_ceiling_is_cut(wire: SceneWire, name: &str) {
         matches!(error, ApiError::RetriesExhausted { attempts: 2, .. }),
         "the failed first connection and the reconnect the ceiling cut short: {error}"
     );
+    let pauses: Vec<std::time::Duration> = notices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|notice| notice.kind == core_types::StreamNoticeKind::Reconnect)
+        .map(|notice| notice.delay)
+        .collect();
     assert!(
-        elapsed <= SCENE_CEILING + SCENE_SLACK,
-        "the pause is cut to the bundle's rest, so the turn ends at the ceiling: {elapsed:?}"
+        !pauses.is_empty() && pauses.iter().all(|pause| *pause <= SCENE_CEILING),
+        "the pause is cut to the bundle's rest, at most the ceiling and not the whole backoff: {pauses:?}"
+    );
+    assert!(
+        elapsed < SCENE_LONG_BACKOFF,
+        "the turn ends before a whole backoff could pass: {elapsed:?}"
     );
 }
 

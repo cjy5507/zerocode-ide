@@ -266,7 +266,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             platform: macos
             bundles: app,dmg
           - os: windows-2022
@@ -338,7 +338,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             platform: macos
           - os: windows-2022
             platform: windows

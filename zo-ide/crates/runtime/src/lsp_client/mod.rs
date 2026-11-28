@@ -133,6 +133,8 @@ pub struct LspStdioTransport {
     versions: Arc<Mutex<HashMap<String, i64>>>,
     next_id: Arc<AtomicU64>,
     runtime_handle: Option<tokio::runtime::Handle>,
+    #[cfg(test)]
+    probe_stderr: Option<PathBuf>,
 }
 
 enum OpenDocumentReservation {
@@ -153,6 +155,19 @@ impl LspStdioTransport {
         let label: Arc<str> = transport.command.clone().into();
         let process = McpStdioProcess::spawn(transport)?;
         let (child, stdin, stdout) = process.into_parts();
+        #[cfg(test)]
+        let probe_stderr = transport.env.get("ZO_LSP_TEST_PROBE_STDERR").map(PathBuf::from);
+        #[cfg(test)]
+        let probe_pid = probe_stderr.as_ref().and(child.id());
+        #[cfg(test)]
+        if let Some(pid) = probe_pid {
+            let fixture = probe_stderr
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .and_then(std::path::Path::file_name)
+                .map(std::ffi::OsStr::to_string_lossy);
+            lsp_test_probe(format_args!("{pid} process spawned fixture={fixture:?}"));
+        }
 
         let pending: PendingResponses = Arc::new(AsyncMutex::new(HashMap::new()));
         let diagnostics_sink: Arc<Mutex<Option<DiagnosticsSink>>> = Arc::new(Mutex::new(None));
@@ -164,6 +179,8 @@ impl LspStdioTransport {
             stdout,
             Arc::clone(&pending),
             Arc::clone(&diagnostics_sink),
+            #[cfg(test)]
+            probe_pid,
         ));
 
         Ok(Self {
@@ -177,6 +194,8 @@ impl LspStdioTransport {
             versions: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
             runtime_handle: None,
+            #[cfg(test)]
+            probe_stderr,
         })
     }
 
@@ -292,6 +311,11 @@ impl LspStdioTransport {
             ));
         }
 
+        #[cfg(test)]
+        if self.probe_stderr.is_some() {
+            let pid = self.child.lock().await.id();
+            lsp_test_probe(format_args!("{pid:?} stdin flushed {method} id={id}"));
+        }
         let body = match timeout(Duration::from_millis(LSP_DISPATCH_TIMEOUT_MS), rx).await {
             Ok(Ok(body)) => body,
             Ok(Err(_)) => {
@@ -301,6 +325,18 @@ impl LspStdioTransport {
                 ));
             }
             Err(_) => {
+                #[cfg(test)]
+                if let Some(path) = &self.probe_stderr {
+                    let mut child = self.child.lock().await;
+                    let pid = child.id();
+                    let status = child.try_wait();
+                    let fixture = path.with_extension("py");
+                    let stderr = std::fs::read_to_string(path)
+                        .map(|log| log.replace(fixture.to_string_lossy().as_ref(), "<lsp-fixture>"));
+                    lsp_test_probe(format_args!(
+                        "{pid:?} timeout {method} id={id} status={status:?} stderr={stderr:?}"
+                    ));
+                }
                 self.pending.lock().await.remove(&id);
                 return Err(format!(
                     "LSP request {method} timed out after {LSP_DISPATCH_TIMEOUT_MS} ms"
@@ -594,6 +630,17 @@ impl LspTransport for LspStdioTransport {
     }
 }
 
+#[cfg(test)]
+fn lsp_test_probe(message: std::fmt::Arguments<'_>) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    crate::test_diag(&format!("[lsp-test-probe] {timestamp_ms} ms {message}"));
+}
+
 /// Background reader: drains LSP frames from `stdout` for the process
 /// lifetime. Id-bearing JSON-RPC responses are routed to the matching
 /// pending oneshot; `textDocument/publishDiagnostics` notifications are
@@ -604,11 +651,24 @@ async fn reader_loop(
     mut reader: BufReader<ChildStdout>,
     pending: PendingResponses,
     diagnostics_sink: Arc<Mutex<Option<DiagnosticsSink>>>,
+    #[cfg(test)] probe_pid: Option<u32>,
 ) {
+    #[cfg(test)]
+    if let Some(pid) = probe_pid {
+        lsp_test_probe(format_args!("{pid} stdout reader running"));
+    }
     loop {
         // EOF or a malformed frame ends the reader; outstanding callers
         // observe a closed channel and surface a transport error.
-        let Ok(payload) = read_lsp_frame(&mut reader).await else {
+        let frame = read_lsp_frame(&mut reader).await;
+        #[cfg(test)]
+        if let Some(pid) = probe_pid {
+            match &frame {
+                Ok(bytes) => lsp_test_probe(format_args!("{pid} stdout read {} bytes", bytes.len())),
+                Err(error) => lsp_test_probe(format_args!("{pid} stdout error {error}")),
+            }
+        }
+        let Ok(payload) = frame else {
             break;
         };
 
@@ -619,6 +679,10 @@ async fn reader_loop(
         if let Some(id) = message.get("id").and_then(JsonValue::as_u64) {
             // Response to one of our requests.
             if let Some(sender) = pending.lock().await.remove(&id) {
+                #[cfg(test)]
+                if let Some(pid) = probe_pid {
+                    lsp_test_probe(format_args!("{pid} stdout routing response id={id}"));
+                }
                 let _ = sender.send(message);
             }
             continue;

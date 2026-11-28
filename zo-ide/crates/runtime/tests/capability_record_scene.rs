@@ -118,9 +118,17 @@ impl Drop for Endpoint {
 fn child(endpoint: &Endpoint, home: &Path, mode: &str) -> String {
     let workspace = home.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.env_clear();
+    // Winsock expands %SystemRoot% when it loads its providers.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "WINDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let output = command
         .args(["--ignored", "--exact", "capability_scene_child", "--nocapture"])
-        .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("ZO_CONFIG_HOME", home)

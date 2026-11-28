@@ -216,18 +216,44 @@ pub fn may_write(home: &Path, path: &Path) -> bool {
     let Some(name) = local_file_name(path) else {
         return true;
     };
-    if !dot_zo_in_place(path) {
-        return false;
-    }
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        Ok(metadata) if metadata.file_type().is_file() => {
+    match standing(path) {
+        Some(Standing::Nothing) => true,
+        Some(Standing::File) => {
             let (Ok(real), Ok(bytes)) = (path.canonicalize(), std::fs::read(path)) else {
                 return false;
             };
             recorded(home, &real, &bytes) || carries_no_authority(name, &bytes)
         }
-        _ => false,
+        None => false,
+    }
+}
+
+/// Whether the local file `path` stands where the loader reads it: in the
+/// folder's own `.zo`, with nothing or a regular file at its name, not a link
+/// — what [`may_write`] asks before it asks whose the bytes are. Any other
+/// path stands where it is.
+#[must_use]
+pub fn in_place(path: &Path) -> bool {
+    local_file_name(path).is_none() || standing(path).is_some()
+}
+
+/// What stands at a local file's name, read once.
+enum Standing {
+    Nothing,
+    File,
+}
+
+/// What stands at the local file `path`, or `None` where zo does not write:
+/// a `.zo` that is not the folder's own, or a link or anything but a regular
+/// file at the name.
+fn standing(path: &Path) -> Option<Standing> {
+    if !dot_zo_in_place(path) {
+        return None;
+    }
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Standing::Nothing),
+        Ok(metadata) if metadata.file_type().is_file() => Some(Standing::File),
+        _ => None,
     }
 }
 

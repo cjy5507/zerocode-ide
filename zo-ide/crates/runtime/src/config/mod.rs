@@ -24,7 +24,8 @@ pub use self::allow_always_narrow::{
     NarrowedRule,
 };
 pub use self::mcp_edit::{
-    remove_mcp_server, trust_mcp_server, untrust_mcp_server, write_mcp_server, McpEdit,
+    refuse_trust_where_no_record_counts, remove_mcp_server, trust_mcp_server,
+    untrust_mcp_server, write_mcp_server, McpEdit,
 };
 pub use self::mcp_secrets::{
     mcp_literal_secrets, move_mcp_literal_to_reference, persons_own_literal_secrets,

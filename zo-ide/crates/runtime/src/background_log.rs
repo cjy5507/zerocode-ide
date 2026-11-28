@@ -88,20 +88,54 @@ impl Capture {
 struct Stream {
     file: File,
     offset: u64,
+    /// The child's own file position, shared through this handle: [`Self::cut`]
+    /// moves it back to the head of the file.
+    #[cfg(windows)]
+    writer: File,
 }
 
 impl Stream {
     fn open(dir: &Path) -> io::Result<(Self, File)> {
+        // Unix appends, so a cut file is written again from its head. Windows
+        // cannot: a handle opened to append lacks FILE_WRITE_DATA, and Git
+        // Bash's runtime (MSYS2 `dtable.cc`) takes such an inherited stdout or
+        // stderr for read-only, so every write of the shell failed (t-133401).
         let spool = tempfile::Builder::new()
             .prefix("background-")
             .suffix(".log")
-            .append(true)
+            .append(cfg!(not(windows)))
             .tempfile_in(dir)?;
         // Reopen for an independent cursor and keep the path for spill cleanup
         // and for the person managing the server after zo exits.
         let file = spool.reopen()?;
         let (writer, _) = spool.keep().map_err(|error| error.error)?;
-        Ok((Self { file, offset: 0 }, writer))
+        let stream = Self {
+            file,
+            offset: 0,
+            #[cfg(windows)]
+            writer: writer.try_clone()?,
+        };
+        Ok((stream, writer))
+    }
+
+    /// Empty the file so the writer starts again at its head.
+    #[cfg(not(windows))]
+    fn cut(&mut self) -> io::Result<()> {
+        self.file.set_len(0)
+    }
+
+    /// Windows has no append for the child, so its position is moved back to
+    /// the head, and the file is cut where that position then stands: a write
+    /// that finished in between stays. This is what `SetEndOfFile` does on
+    /// the writer (read the position, set the end there), in the safe calls
+    /// the workspace allows. The steps are not one atomic call: a write
+    /// between reading the position and cutting is lost, and the next one
+    /// then follows as many NUL bytes.
+    #[cfg(windows)]
+    fn cut(&mut self) -> io::Result<()> {
+        self.writer.seek(SeekFrom::Start(0))?;
+        let kept = self.writer.stream_position()?;
+        self.writer.set_len(kept)
     }
 
     fn read(&mut self, text: &mut String, label: Option<&str>, finished: bool) -> io::Result<bool> {
@@ -134,8 +168,8 @@ impl Stream {
         };
 
         // Reclaim space after reading the available tail. An unfinished
-        // line may be discarded, and the writer still appends at EOF.
-        if size > RAW_SPILL_LIMIT_BYTES as u64 && self.file.set_len(0).is_ok() {
+        // line may be discarded, and the writer starts again at the head.
+        if size > RAW_SPILL_LIMIT_BYTES as u64 && self.cut().is_ok() {
             skipped |= self.offset < size;
             self.offset = 0;
         }
@@ -341,7 +375,7 @@ mod tests {
     #[test]
     fn background_output_resumes_after_truncating_an_oversized_file() {
         use crate::task_registry::TaskRegistry;
-        use std::io::Write as _;
+        use std::io::{Seek as _, Write as _};
 
         let registry = TaskRegistry::new_in_memory();
         let task_id = registry.create_background_process("command", None, None).task_id;
@@ -354,6 +388,9 @@ mod tests {
         writer.write_all(b"before\n").unwrap();
         assert_eq!(registry.output(&task_id).unwrap(), "before\n");
         output_file.set_len(RAW_SPILL_LIMIT_BYTES as u64).unwrap();
+        // A Windows writer does not append: it would overwrite at its own
+        // position and leave the file at the limit, never over it.
+        writer.seek(SeekFrom::End(0)).unwrap();
         writer.write_all(b"partial").unwrap();
 
         let log = registry.output(&task_id).unwrap();

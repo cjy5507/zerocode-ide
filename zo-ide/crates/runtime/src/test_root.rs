@@ -15,15 +15,25 @@ pub(crate) struct TestRoot(PathBuf);
 
 impl TestRoot {
     pub(crate) fn new(prefix: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch")
-            .as_nanos();
-        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let (nanos, counter) = temp_dir_id();
         let name = format!("{prefix}-{}-{nanos}-{counter}", std::process::id());
         Self(std::env::temp_dir().join(name))
     }
+}
+
+fn temp_dir_id() -> (u128, u64) {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be after epoch")
+        .as_nanos();
+    (nanos, COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Name a fixture folder with a trailing PID for `core_types::ended_process_folders`.
+pub(crate) fn process_fixture_dir(prefix: &str) -> PathBuf {
+    let (nanos, counter) = temp_dir_id();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}-{counter}-{}", std::process::id()))
 }
 
 impl std::ops::Deref for TestRoot {

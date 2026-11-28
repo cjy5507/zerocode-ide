@@ -105,13 +105,17 @@ pub fn remove_mcp_server(home: &Path, path: &Path, name: &str) -> Result<McpEdit
 /// record. Whether a record may be BELIEVED at all is
 /// [`ConfigLoader`](super::ConfigLoader)'s gate — a git-tracked, symlinked or
 /// nested-`.zo` file fails closed there — which is why recording a name says
-/// nothing about the next load on its own.
+/// nothing about the next load on its own. Where zo keeps no record of local
+/// files, a folder's record never counts, and nothing is read or written
+/// ([`refuse_trust_where_no_record_counts`]).
 ///
 /// # Errors
 ///
-/// The record is not a JSON array of server names, it does not survive the
-/// round-trip through the parser a future session uses, or the write fails.
+/// Consent this system cannot record, the record is not a JSON array of
+/// server names, it does not survive the round-trip through the parser a
+/// future session uses, or the write fails.
 pub fn trust_mcp_server(home: &Path, path: &Path, name: &str) -> Result<McpEdit, ConfigError> {
+    refuse_trust_where_no_record_counts(path, name)?;
     let mut names = parse_trusted_mcp_server_names(path, &read_file_or_empty(path)?)?;
     if names.iter().any(|trusted| trusted == name) {
         return Ok(McpEdit::Unchanged);
@@ -127,12 +131,20 @@ pub fn trust_mcp_server(home: &Path, path: &Path, name: &str) -> Result<McpEdit,
 /// Consent is given to one server. When `zo mcp remove --project` takes that
 /// server away, a name left here would run whatever is added under it next
 /// without asking. A record that never held the name is not rewritten, and
-/// where no record stands none is created.
+/// where no record stands none is created. Where zo keeps no record of local
+/// files the loader reads a folder's record as the repository's, so taking a
+/// name out of it widens nothing: it is written where it stands, without
+/// asking whether zo wrote it, and not recorded (`untrust_unrecorded`).
 ///
 /// # Errors
 ///
-/// As [`trust_mcp_server`].
+/// The record is not a JSON array of server names, it does not survive the
+/// round-trip through the parser a future session uses, it is not zo's to
+/// write, it changed or went while it was being edited, or the write fails.
 pub fn untrust_mcp_server(home: &Path, path: &Path, name: &str) -> Result<McpEdit, ConfigError> {
+    if !consent_can_be_recorded(path) {
+        return untrust_unrecorded(path, name, &mut || {});
+    }
     let mut names = parse_trusted_mcp_server_names(path, &read_file_or_empty(path)?)?;
     let before = names.len();
     // A hand-edited record may hold the name twice; consent goes with every copy.
@@ -144,25 +156,134 @@ pub fn untrust_mcp_server(home: &Path, path: &Path, name: &str) -> Result<McpEdi
     Ok(McpEdit::Removed)
 }
 
+/// Take `name` out of a folder's trust record where zo keeps no record of
+/// local files. Removals from one record take turns under its settings lock,
+/// and each reads the record again once it holds the lock: one that waited
+/// takes its name out of what the one before it left, and never writes that
+/// one's name back. The bytes read must still stand, unchanged, just before
+/// they are replaced — an edit made meanwhile by a writer that takes no lock
+/// is not written over, and a record that went is not made again. Nothing is
+/// locked or made where the name is not there to take out. `between` runs
+/// after the record is read and before it is replaced: where a test lands a
+/// second writer.
+fn untrust_unrecorded(
+    path: &Path,
+    name: &str,
+    between: &mut dyn FnMut(),
+) -> Result<McpEdit, ConfigError> {
+    let holds_the_name = |contents: &str| {
+        parse_trusted_mcp_server_names(path, contents)
+            .map(|names| names.iter().any(|trusted| trusted == name))
+    };
+    if !holds_the_name(&read_file_or_empty(path)?)? {
+        return Ok(McpEdit::Absent);
+    }
+    // The lock is made beside the record: in the folder's own `.zo`, never
+    // through a link.
+    refuse_a_file_out_of_place(path)?;
+    let _guard = crate::file_ops::SettingsFileLock::acquire(path).map_err(ConfigError::Io)?;
+    let read = read_file_or_empty(path)?;
+    let mut names = parse_trusted_mcp_server_names(path, &read)?;
+    let before = names.len();
+    // A hand-edited record may hold the name twice; consent goes with every copy.
+    names.retain(|trusted| trusted != name);
+    if names.len() == before {
+        return Ok(McpEdit::Absent);
+    }
+    let rendered = render_trusted_names(path, &names)?;
+    between();
+    match std::fs::read_to_string(path) {
+        Ok(now) if now == read => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(ConfigError::Io(error));
+        }
+        _ => {
+            return Err(ConfigError::Io(std::io::Error::other(format!(
+                "{} changed or went while {name} was being taken out of it, so it was left as it \
+                 is; try again",
+                path.display()
+            ))));
+        }
+    }
+    refuse_a_file_out_of_place(path)?;
+    write_document(path, &rendered)?;
+    Ok(McpEdit::Removed)
+}
+
+/// Refuse consent the trust record at `path` could never hold. Where zo keeps
+/// no record of local files ([`super::can_tell_persons_own_settings_file`]),
+/// the loader reads a folder's `.zo/trusted-mcp-servers.json` as the
+/// repository's: a name written there would run nothing while saying it was
+/// trusted. The way that works there comes first in the refusal.
+///
+/// # Errors
+///
+/// Where zo keeps no record of local files and `path` is a folder's trust
+/// record.
+pub fn refuse_trust_where_no_record_counts(path: &Path, name: &str) -> Result<(), ConfigError> {
+    if consent_can_be_recorded(path) {
+        return Ok(());
+    }
+    Err(ConfigError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "to run {name} on this system, add it to your own settings instead: the same \
+             `zo mcp add {name} …` line without --project and --trust. zo keeps no record of \
+             local files here, so {} would never count as yours, and nothing was written.",
+            path.display()
+        ),
+    )))
+}
+
+/// Whether consent written into the trust record at `path` can count: zo
+/// keeps its record of local files on this system, or `path` is not a
+/// folder's `.zo` file — one the loader never reads as a trust record.
+fn consent_can_be_recorded(path: &Path) -> bool {
+    super::can_tell_persons_own_settings_file() || !super::local_record::is_recorded_kind(path)
+}
+
 /// Render the record, read it back through the parser a future session uses,
 /// and only then write it.
 fn write_trusted_names(home: &Path, path: &Path, names: &[String]) -> Result<(), ConfigError> {
-    let rendered =
-        JsonValue::Array(names.iter().cloned().map(JsonValue::String).collect()).render_pretty();
-    // The read-back `commit` does for a settings document: a record our
-    // renderer mangles is caught before it becomes the file on disk.
-    if parse_trusted_mcp_server_names(path, &rendered)? != names {
-        return Err(ConfigError::Parse(format!(
-            "{}: the trusted MCP servers did not survive the JSON round-trip",
-            path.display()
-        )));
-    }
+    let rendered = render_trusted_names(path, names)?;
     refuse_a_file_zo_did_not_write(home, path)?;
     // Owner-only like every document this module writes: a name another local
     // account could append is a server this one would run.
     write_document(path, &rendered)?;
     super::local_record::wrote(home, path, rendered.as_bytes());
     Ok(())
+}
+
+/// The record holding `names`, rendered and read back through the parser a
+/// future session uses — the read-back `commit` does for a settings document:
+/// a record our renderer mangles is caught before it becomes the file on disk.
+fn render_trusted_names(path: &Path, names: &[String]) -> Result<String, ConfigError> {
+    let rendered =
+        JsonValue::Array(names.iter().cloned().map(JsonValue::String).collect()).render_pretty();
+    if parse_trusted_mcp_server_names(path, &rendered)? != names {
+        return Err(ConfigError::Parse(format!(
+            "{}: the trusted MCP servers did not survive the JSON round-trip",
+            path.display()
+        )));
+    }
+    Ok(rendered)
+}
+
+/// A folder's local file that is a link, or reached through a `.zo` that
+/// links to another folder, is not written into: the write would land in a
+/// file the loader does not read here.
+fn refuse_a_file_out_of_place(path: &Path) -> Result<(), ConfigError> {
+    if super::local_record::in_place(path) {
+        return Ok(());
+    }
+    Err(ConfigError::Io(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "{} is a link, or the folder's .zo is a link to another folder, so zo does not \
+             write into it",
+            path.display()
+        ),
+    )))
 }
 
 /// A project's `.zo/trusted-mcp-servers.json` or `.zo/settings.local.json`

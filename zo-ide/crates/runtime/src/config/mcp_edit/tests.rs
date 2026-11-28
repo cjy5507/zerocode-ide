@@ -345,6 +345,9 @@ fn a_trusted_name_un_gates_exactly_that_project_server() {
 /// Consent is a set of names. The record is created where nothing stood, the
 /// names a person put there — once they record the file as theirs — stay in
 /// the order they wrote them, and recording one twice is not a second entry.
+/// Only where zo keeps its record of local files: elsewhere `trust` is
+/// refused (`trusting_where_no_record_is_kept_is_refused_and_writes_nothing`).
+#[cfg(unix)]
 #[test]
 fn trusting_a_name_twice_is_unchanged_and_the_names_already_there_survive() {
     let dir = tempfile::tempdir().expect("temporary project dir");
@@ -381,6 +384,46 @@ fn trusting_a_name_twice_is_unchanged_and_the_names_already_there_survive() {
     )
     .expect("parse");
     assert_eq!(names, ["first", "handwritten", "second"]);
+}
+
+/// Where zo keeps no record of local files, the loader reads a folder's trust
+/// record as the repository's, so a name written there would run nothing:
+/// `trust` is refused before anything is written — no `.zo` is made, a record
+/// a person wrote stays as they wrote it, nothing is recorded — and the
+/// refusal names the way that works there first.
+#[cfg(windows)]
+#[test]
+fn trusting_where_no_record_is_kept_is_refused_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let zo = dir.path().join(".zo");
+    let record = zo.join(mcp_keys::TRUSTED_SERVERS_FILE);
+    let refused = trust_mcp_server(&home_for(&record), &record, "first")
+        .expect_err("no record is kept here");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("to run first on this system, add it to your own settings instead"),
+        "{refused}"
+    );
+    assert!(!zo.exists(), "trusting created {}", zo.display());
+
+    std::fs::create_dir_all(&zo).expect("project config dir");
+    let by_hand = "[\"first\"]";
+    std::fs::write(&record, by_hand).expect("a person writes the record");
+    for name in ["first", "second"] {
+        trust_mcp_server(&home_for(&record), &record, name)
+            .expect_err("refused whatever the record holds");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("trust record"),
+        by_hand
+    );
+    assert!(
+        !home_for(&record)
+            .join(crate::config::local_record::RECORD_FILE)
+            .exists(),
+        "nothing is recorded"
+    );
 }
 
 #[test]
@@ -430,9 +473,7 @@ fn untrusting_takes_out_exactly_that_name_and_keeps_the_rest_owner_only() {
         .path()
         .join(".zo")
         .join(mcp_keys::TRUSTED_SERVERS_FILE);
-    for name in ["first", "gone", "last"] {
-        trust_mcp_server(&home_for(&record), &record, name).expect("trust");
-    }
+    consented_to(&record, &["first", "gone", "last"]);
 
     assert_eq!(
         untrust_mcp_server(&home_for(&record), &record, "gone").expect("untrust"),
@@ -454,6 +495,78 @@ fn untrusting_takes_out_exactly_that_name_and_keeps_the_rest_owner_only() {
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
     }
+}
+
+/// Where zo keeps no record of local files a project remove takes its name
+/// out without asking the record ([`untrust_unrecorded`]). Two removals from
+/// one record take turns: the second waits on the first's lock and takes its
+/// name out of what the first left, so neither writes the other's name back.
+/// A record that a writer without the lock edits, or that goes, while a
+/// removal is between its read and its write is left as it stands — not
+/// written over, not made again.
+#[test]
+fn removals_where_no_record_is_kept_take_turns_and_write_over_nothing() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir
+        .path()
+        .join(".zo")
+        .join(mcp_keys::TRUSTED_SERVERS_FILE);
+    let record = record.as_path();
+    std::fs::create_dir_all(record.parent().expect("the record's .zo")).expect("project config dir");
+    std::fs::write(record, r#"["first","second","kept"]"#).expect("seed record");
+    let names_now = || {
+        parse_trusted_mcp_server_names(
+            record,
+            &std::fs::read_to_string(record).expect("trust record"),
+        )
+        .expect("parse")
+    };
+
+    // The first removal is between its read and its write when the second
+    // starts; the pause only holds it there long enough for the second to
+    // arrive.
+    let (inside, first_is_inside) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let first = scope.spawn(move || {
+            untrust_unrecorded(record, "first", &mut || {
+                inside.send(()).expect("the test waits for this");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            })
+        });
+        first_is_inside.recv().expect("the first removal read the record");
+        assert_eq!(
+            untrust_unrecorded(record, "second", &mut || {}).expect("second removal"),
+            McpEdit::Removed
+        );
+        assert_eq!(
+            first.join().expect("first thread").expect("first removal"),
+            McpEdit::Removed
+        );
+    });
+    assert_eq!(names_now(), ["kept"], "a removal wrote the other's name back");
+
+    let edited = r#"["kept","added by hand"]"#;
+    std::fs::write(record, r#"["kept"]"#).expect("seed record");
+    let error = untrust_unrecorded(record, "kept", &mut || {
+        std::fs::write(record, edited).expect("a person edits the record");
+    })
+    .expect_err("an edit made meanwhile");
+    assert!(error.to_string().contains("try again"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(record).expect("trust record"),
+        edited
+    );
+
+    let error = untrust_unrecorded(record, "kept", &mut || {
+        std::fs::remove_file(record).expect("the record goes");
+    })
+    .expect_err("a record gone meanwhile");
+    assert!(error.to_string().contains("try again"), "{error}");
+    assert!(!record.exists(), "the record was made again");
+    assert!(
+        !record.with_extension("json.lock").exists(),
+        "the lock was left behind"
+    );
 }
 
 /// A name that was never trusted leaves the person's bytes as they wrote them,
@@ -550,6 +663,23 @@ fn an_untrusted_name_gates_the_next_server_added_under_it() {
     let untrusted = config.mcp().untrusted_project_servers();
     assert_eq!(untrusted.len(), 1);
     assert_eq!(untrusted[0].name, "consented");
+}
+
+/// The trust record at `record` holding `names`, as a person who consented to
+/// each one leaves it: through `trust` where zo keeps its record of local
+/// files; where it keeps none `trust` is refused, so the names are written as
+/// a person writes them.
+fn consented_to(record: &std::path::Path, names: &[&str]) {
+    if crate::config::can_tell_persons_own_settings_file() {
+        for name in names {
+            trust_mcp_server(&home_for(record), record, name).expect("trust");
+        }
+        return;
+    }
+    std::fs::create_dir_all(record.parent().expect("the record's .zo"))
+        .expect("project config dir");
+    std::fs::write(record, serde_json::to_string(names).expect("names"))
+        .expect("a person writes the record");
 }
 
 /// The config home a test's record is kept in: beside the `.zo` folder it

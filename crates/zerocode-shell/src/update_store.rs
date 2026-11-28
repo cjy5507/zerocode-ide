@@ -380,7 +380,12 @@ mod tests {
         assert_eq!(read_history_cache(&dir), None, "torn is 「ask again」");
 
         let path = write_archive(&dir, &update_runtime::archive_file_name("1.3.0"), b"gz").unwrap();
-        assert_eq!(path, dir.join("ZeroCode_1.3.0.app.tar.gz"));
+        let expected_file_name = if cfg!(windows) {
+            "ZeroCode_1.3.0-setup.exe"
+        } else {
+            "ZeroCode_1.3.0.app.tar.gz"
+        };
+        assert_eq!(path, dir.join(expected_file_name));
         assert_eq!(std::fs::read(&path).unwrap(), b"gz");
     }
 }

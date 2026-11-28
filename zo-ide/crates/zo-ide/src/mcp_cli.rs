@@ -561,14 +561,22 @@ fn list_text(rows: &[Row]) -> String {
 
 /// Why a project-scoped server is not loaded, and the two ways to load it.
 /// The record is named from the loader's own spelling of it, so a rename there
-/// cannot leave this sentence pointing at a file nobody reads.
+/// cannot leave this sentence pointing at a file nobody reads. Where zo keeps
+/// no record of local files the record never counts, so it is not named: the
+/// person's own settings are the ways there.
 fn gate_reason(path: Option<&Path>) -> String {
+    let document = path.map_or_else(
+        || format!("{ZO_DIR_NAME}/settings.json"),
+        |path| path.display().to_string(),
+    );
+    if !runtime::can_tell_persons_own_settings_file() {
+        return format!(
+            "{document} is not trusted (on this system only your own settings load it: the \
+             server in them, or enableAllProjectMcpServers)"
+        );
+    }
     format!(
-        "{} is not trusted ({ZO_DIR_NAME}/{}, or enableAllProjectMcpServers)",
-        path.map_or_else(
-            || format!("{ZO_DIR_NAME}/settings.json"),
-            |path| path.display().to_string()
-        ),
+        "{document} is not trusted ({ZO_DIR_NAME}/{}, or enableAllProjectMcpServers)",
         runtime::TRUSTED_MCP_SERVERS_FILE,
     )
 }
@@ -629,6 +637,13 @@ fn add(
     spec: &AddSpec,
 ) -> Result<Report, String> {
     let config = server_from_spec(name, spec)?;
+    // Consent this system cannot record is refused before anything is
+    // written, the settings document too: the server without the consent
+    // asked for would be half of this command line.
+    if request.trust {
+        runtime::refuse_trust_where_no_record_counts(&loader.trusted_mcp_servers_path(), name)
+            .map_err(|error| error.to_string())?;
+    }
     let path = scope_path(request, loader);
     let edit = runtime::write_mcp_server(loader.config_home(), &path, name, &config)
         .map_err(|error| format!("{name} could not be written: {error}"))?;
@@ -684,12 +699,19 @@ fn trust(loader: &ConfigLoader, name: &str) -> Result<(PathBuf, McpEdit), String
 }
 
 /// The line a project `add` ends on while the server still will not load.
-/// Without consent the fix is the flag. With it the record exists and the gate
-/// did not believe it, which is a different sentence and a different fix — the
-/// record authorizes only while its bytes are what zo wrote there (153), so
-/// that a repository cannot ship consent to run its own MCP command.
+/// Without consent the fix is the flag — or, where zo keeps no record of local
+/// files and the flag can record nothing, the person's own settings. With it
+/// the record exists and the gate did not believe it, which is a different
+/// sentence and a different fix — the record authorizes only while its bytes
+/// are what zo wrote there (153), so that a repository cannot ship consent to
+/// run its own MCP command.
 fn still_gated(document: &Path, record: Option<&Path>) -> String {
     match record {
+        None if !runtime::can_tell_persons_own_settings_file() => format!(
+            "it will not load here: add it to your own settings instead, with the same `zo mcp add` \
+             line without --project. --trust cannot record it: {}",
+            crate::trust_local_cli::NO_RECORD_ON_THIS_SYSTEM
+        ),
         None => format!(
             "it will not load until it is trusted — {} (--trust records it)",
             gate_reason(Some(document))

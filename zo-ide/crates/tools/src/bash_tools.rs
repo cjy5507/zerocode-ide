@@ -1205,7 +1205,12 @@ mod tests {
             {
                 break;
             }
-            assert!(Instant::now() < deadline, "background output was not recorded");
+            assert!(
+                Instant::now() < deadline,
+                "background output was not recorded ({}): {}",
+                task.status,
+                task.output
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(output.no_output_expected, Some(false));
